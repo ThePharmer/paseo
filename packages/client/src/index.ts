@@ -62,6 +62,7 @@ export interface PaseoClientConfig {
   runtimeGeneration?: number | null;
   password?: string;
   authHeader?: string;
+  headers?: Record<string, string>;
   suppressSendErrors?: boolean;
   logger?: PaseoLogger;
   connectTimeoutMs?: number;

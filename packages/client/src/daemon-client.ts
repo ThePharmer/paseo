@@ -315,6 +315,12 @@ export interface DaemonClientConfig {
   runtimeGeneration?: number | null;
   password?: string;
   authHeader?: string;
+  /**
+   * Extra WebSocket handshake headers. Only transports that can set handshake
+   * headers honour them (React Native, Node); browser WebSockets ignore them.
+   * The Authorization header derived from `password` always wins over a custom entry.
+   */
+  headers?: Record<string, string>;
   suppressSendErrors?: boolean;
   transportFactory?: DaemonTransportFactory;
   webSocketFactory?: WebSocketFactory;
@@ -1198,7 +1204,7 @@ export class DaemonClient {
       return;
     }
 
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...this.config.headers };
     const password = normalizePassword(this.config.password);
     if (password) {
       headers.Authorization = `Bearer ${password}`;

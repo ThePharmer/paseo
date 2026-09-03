@@ -707,6 +707,41 @@ test("passes password as HTTP bearer header and WebSocket subprotocol", async ()
   });
 });
 
+test("passes custom handshake headers and keeps password authorization authoritative", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+  const transportFactory = vi.fn(() => mock.transport);
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    password: "shared-secret",
+    headers: {
+      "CF-Access-Client-Id": "token-id.access",
+      "CF-Access-Client-Secret": "token-secret",
+      Authorization: "Bearer ignored",
+    },
+    logger,
+    reconnect: { enabled: false },
+    transportFactory,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  expect(transportFactory).toHaveBeenCalledWith({
+    url: "ws://test",
+    headers: {
+      "CF-Access-Client-Id": "token-id.access",
+      "CF-Access-Client-Secret": "token-secret",
+      Authorization: "Bearer shared-secret",
+    },
+    protocols: ["paseo.bearer.shared-secret"],
+  });
+});
+
 test("advertises client capabilities in hello", async () => {
   const logger = createMockLogger();
   const mock = createMockTransport();
