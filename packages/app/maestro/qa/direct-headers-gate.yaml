@@ -41,14 +41,30 @@ appId: sh.paseo
       id: "welcome-screen"
     timeout: 90000
 
-- tapOn:
-    id: "welcome-direct-connection"
+# Opening the sheet occasionally stalls with only its header on screen (seen
+# about one launch in four on the CI emulator). Close a stuck sheet with Back,
+# which is safe here because the keyboard is suppressed, and open it again.
 - waitForAnimationToEnd:
     timeout: 3000
-- extendedWaitUntil:
-    visible:
-      id: "direct-host-input"
-    timeout: 10000
+- retry:
+    maxRetries: 3
+    commands:
+      - runFlow:
+          when:
+            visible:
+              id: "add-host-modal"
+          commands:
+            - back
+            - waitForAnimationToEnd:
+                timeout: 3000
+      - tapOn:
+          id: "welcome-direct-connection"
+      - waitForAnimationToEnd:
+          timeout: 3000
+      - extendedWaitUntil:
+          visible:
+            id: "direct-host-input"
+          timeout: 8000
 
 - retry:
     maxRetries: 3
