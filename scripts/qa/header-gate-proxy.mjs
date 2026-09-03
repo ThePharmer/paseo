@@ -37,14 +37,26 @@ function forwardedHeaders(req) {
 
 const server = http.createServer((req, res) => {
   const allowed = isAuthorized(req);
-  log({ kind: "request", method: req.method, path: req.url, hasHeader: headerName in req.headers, allowed });
+  log({
+    kind: "request",
+    method: req.method,
+    path: req.url,
+    hasHeader: headerName in req.headers,
+    allowed,
+  });
   if (!allowed) {
     res.writeHead(302, { Location: loginLocation, "Content-Length": "0" });
     res.end();
     return;
   }
   const proxied = http.request(
-    { host: upstreamHost, port: upstreamPort, method: req.method, path: req.url, headers: forwardedHeaders(req) },
+    {
+      host: upstreamHost,
+      port: upstreamPort,
+      method: req.method,
+      path: req.url,
+      headers: forwardedHeaders(req),
+    },
     (upstream) => {
       res.writeHead(upstream.statusCode ?? 502, upstream.headers);
       upstream.pipe(res);
