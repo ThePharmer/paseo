@@ -31,21 +31,27 @@ appId: sh.paseo
       id: "add-host-modal"
     timeout: 10000
 
-- tapOn:
-    id: "direct-host-input"
-- eraseText
-- inputText: "10.0.2.2"
-- assertVisible:
-    id: "direct-host-input"
-    text: "10.0.2.2"
+- retry:
+    maxRetries: 3
+    commands:
+      - tapOn:
+          id: "direct-host-input"
+      - eraseText
+      - inputText: "10.0.2.2"
+      - assertVisible:
+          id: "direct-host-input"
+          text: "10.0.2.2"
 
-- tapOn:
-    id: "direct-port-input"
-- eraseText
-- inputText: "6768"
-- assertVisible:
-    id: "direct-port-input"
-    text: "6768"
+- retry:
+    maxRetries: 3
+    commands:
+      - tapOn:
+          id: "direct-port-input"
+      - eraseText
+      - inputText: "6768"
+      - assertVisible:
+          id: "direct-port-input"
+          text: "6768"
 - tapOn: "Enter the address of a Paseo server."
 
 - tapOn:
