@@ -21,6 +21,11 @@ echo "::group::settle the emulator"
 # (ActivityTaskManagerService observes this setting live), then wait for the
 # package service and for the launcher to hold focus.
 adb shell settings put global hide_error_dialogs 1
+# The AVD has a hardware keyboard (enable-hw-keyboard in the workflow); this
+# keeps the soft keyboard from appearing on top of it. Maestro's inputText
+# injects key events rather than typing through the IME, so text entry
+# still works and the keyboard never covers the sheet's Connect button.
+adb shell settings put secure show_ime_with_hard_keyboard 0
 for i in $(seq 1 60); do
   if adb shell service list 2>/dev/null | grep -q '\bpackage\b'; then echo "package service up after ${i}s"; break; fi
   sleep 1
