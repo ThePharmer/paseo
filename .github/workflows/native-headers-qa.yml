@@ -170,7 +170,8 @@ jobs:
           export PASEO_HOME="$RUNNER_TEMP/paseo-home"
           mkdir -p "$PASEO_HOME"
           echo "PASEO_HOME=$PASEO_HOME" >> "$GITHUB_ENV"
-          PASEO_LISTEN=127.0.0.1:6767 PASEO_RELAY_ENABLED=false paseo daemon start
+          # The app dials the emulator's host alias, which the proxy forwards as-is.
+          PASEO_LISTEN=127.0.0.1:6767 PASEO_HOSTNAMES=10.0.2.2 PASEO_RELAY_ENABLED=false paseo daemon start
           for i in $(seq 1 60); do
             if curl -fs http://127.0.0.1:6767/api/health >/dev/null; then echo "daemon ready after ${i}s"; break; fi
             sleep 1

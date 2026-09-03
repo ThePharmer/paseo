@@ -27,7 +27,10 @@ function isAuthorized(req) {
 }
 
 function forwardedHeaders(req) {
-  const headers = { ...req.headers, host: `${upstreamHost}:${upstreamPort}` };
+  // Keep Host as the client sent it, like Cloudflare does. The daemon compares
+  // the WebSocket Origin against the request authority and answers 403 when
+  // they differ; React Native sets Origin from the URL the app dialled.
+  const headers = { ...req.headers };
   delete headers[headerName];
   return headers;
 }
