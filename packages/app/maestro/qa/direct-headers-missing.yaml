@@ -36,6 +36,7 @@ appId: sh.paseo
     commands:
       - tapOn:
           id: "direct-host-input"
+      - waitForAnimationToEnd
       - eraseText
       - inputText: "10.0.2.2"
       - assertVisible:
@@ -47,6 +48,7 @@ appId: sh.paseo
     commands:
       - tapOn:
           id: "direct-port-input"
+      - waitForAnimationToEnd
       - eraseText
       - inputText: "6768"
       - assertVisible:

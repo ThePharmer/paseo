@@ -7,13 +7,16 @@
 # Direct connection > Advanced and proves the app comes up Online through it.
 #
 # Conventions (Maestro 2.5.x on Android):
-# - inputText can drop characters on Android (maestro#395); typed fields are
-#   wrapped in retry with erase-and-retype and an exact-text assertion.
 # - Text matchers are full-match regexes, hence ".*Online.*".
 # - hideKeyboard is a Back press on Android, so a non-interactive text is
 #   tapped instead to dismiss the keyboard.
 # - A modal system dialog hides everything behind it from UiAutomator; the
 #   runFlow guard clears one that appears before the first wait.
+# - inputText can drop characters on Android (maestro#395), mostly while the
+#   keyboard is still animating in. Typing waits for animations first and is
+#   verified with an exact-text assertion. Retries use a fresh header row
+#   because tapping a filled field places the cursor mid-text, so an
+#   erase-and-retype in place corrupts the value.
 appId: sh.paseo
 ---
 - launchApp:
@@ -49,6 +52,7 @@ appId: sh.paseo
     commands:
       - tapOn:
           id: "direct-host-input"
+      - waitForAnimationToEnd
       - eraseText
       - inputText: "10.0.2.2"
       - assertVisible:
@@ -60,11 +64,13 @@ appId: sh.paseo
     commands:
       - tapOn:
           id: "direct-port-input"
+      - waitForAnimationToEnd
       - eraseText
       - inputText: "6768"
       - assertVisible:
           id: "direct-port-input"
           text: "6768"
+
 - tapOn: "Enter the address of a Paseo server."
 
 - tapOn:
@@ -75,29 +81,30 @@ appId: sh.paseo
     timeout: 5000
 - takeScreenshot: 01-advanced-with-empty-headers
 
-- tapOn:
-    id: "direct-header-add"
 - retry:
     maxRetries: 3
     commands:
+      # Start every attempt from an empty row.
+      - tapOn:
+          id: "direct-header-remove-0"
+          optional: true
+      - tapOn:
+          id: "direct-header-add"
       - tapOn:
           id: "direct-header-name-0"
-      - eraseText: 30
+      - waitForAnimationToEnd
       - inputText: "X-Paseo-Gate"
       - assertVisible:
           id: "direct-header-name-0"
           text: "X-Paseo-Gate"
-
-- retry:
-    maxRetries: 3
-    commands:
       - tapOn:
           id: "direct-header-value-0"
-      - eraseText: 30
+      - waitForAnimationToEnd
       - inputText: "qa-gate-7f3a"
       - assertVisible:
           id: "direct-header-value-0"
           text: "qa-gate-7f3a"
+
 - tapOn: "Enter the address of a Paseo server."
 - takeScreenshot: 02-header-row-filled
 
