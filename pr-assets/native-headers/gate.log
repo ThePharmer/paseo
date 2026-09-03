@@ -1,0 +1,5 @@
+{"ts":"2026-09-03T23:39:24.959Z","kind":"listening","listenPort":6768,"upstream":"127.0.0.1:6767","requiredHeader":"x-paseo-gate"}
+{"ts":"2026-09-03T23:39:25.888Z","kind":"request","method":"GET","path":"/api/health","hasHeader":false,"allowed":false}
+{"ts":"2026-09-03T23:39:25.898Z","kind":"request","method":"GET","path":"/api/health","hasHeader":true,"allowed":true}
+{"ts":"2026-09-03T23:44:05.098Z","kind":"upgrade","path":"/ws","hasHeader":false,"allowed":false,"protocols":null}
+{"ts":"2026-09-03T23:47:19.769Z","kind":"upgrade","path":"/ws","hasHeader":true,"allowed":true,"protocols":null}
