@@ -52,17 +52,25 @@ adb install -r "$APK_PATH"
 adb shell pm list packages | grep -F sh.paseo
 echo "::endgroup::"
 
+# Each flow starts with launchApp clearState, so a rerun is a clean retry.
+# The bottom sheet's open animation occasionally stalls on this emulator
+# (Reanimated, unrelated to the feature); a relaunch is the only safe reset.
 run_flow() {
   local name="$1"
-  echo "::group::maestro flow: $name"
-  if ! maestro test --debug-output "$OUT_DIR/maestro-debug-$name" "$FLOWS_DIR/$name.yaml"; then
-    echo "flow $name failed; capturing screen and logcat tail"
-    adb exec-out screencap -p > "$OUT_DIR/failure-$name.png" || true
-    adb logcat -d -t 400 > "$OUT_DIR/logcat-$name.txt" || true
+  local attempt
+  for attempt in 1 2 3; do
+    echo "::group::maestro flow: $name (attempt $attempt)"
+    if maestro test --debug-output "$OUT_DIR/maestro-debug-$name-$attempt" "$FLOWS_DIR/$name.yaml"; then
+      echo "::endgroup::"
+      return 0
+    fi
+    echo "flow $name failed on attempt $attempt; capturing screen and logcat tail"
+    adb exec-out screencap -p > "$OUT_DIR/failure-$name-$attempt.png" || true
+    adb logcat -d -t 400 > "$OUT_DIR/logcat-$name-$attempt.txt" || true
+    adb shell am force-stop sh.paseo || true
     echo "::endgroup::"
-    return 1
-  fi
-  echo "::endgroup::"
+  done
+  return 1
 }
 
 status=0
