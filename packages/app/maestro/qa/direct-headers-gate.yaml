@@ -128,7 +128,11 @@ appId: sh.paseo
 - tapOn:
     id: "direct-host-submit"
 
+# A successful probe saves the host and lands on the daemon home screen. The
+# "Online" badge lives in the host sidebar, so assert the home screen itself.
 - extendedWaitUntil:
-    visible: ".*Online.*"
+    visible: "Add a project"
     timeout: 90000
-- takeScreenshot: 03-online-through-header-gate
+- assertNotVisible:
+    id: "add-host-modal"
+- takeScreenshot: 03-connected-through-header-gate
