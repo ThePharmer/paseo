@@ -1,0 +1,233 @@
+name: Native headers QA (Android)
+
+# QA evidence for the custom direct-connection headers change (refs #3151,
+# discussion #3125). Not part of the PR itself; it lives on the qa/* branch.
+#
+# Job 1 builds a release APK with no store credentials (debug-signed, package
+# sh.paseo). Job 2 boots an emulator, runs a stock 0.7.2 daemon on the runner
+# behind a header-gating proxy that imitates Cloudflare Access (302 without the
+# header), and drives the app with Maestro: once without the header (must fail)
+# and once with it (must come Online). Screenshots and the proxy's decision log
+# are uploaded as artifacts.
+#
+# Re-running the flows without rebuilding: dispatch with apk_run_id set to a
+# previous run that uploaded the APK, plus its artifact name.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_run_id:
+        description: "Reuse the APK artifact from this run id (skips the build job)"
+        required: false
+        default: ""
+        type: string
+      apk_artifact_name:
+        description: "Artifact name in that run (required with apk_run_id)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: native-headers-qa-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GATE_HEADER_NAME: X-Paseo-Gate
+  GATE_HEADER_VALUE: qa-gate-7f3a
+
+jobs:
+  build-apk:
+    if: inputs.apk_run_id == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    outputs:
+      artifact-name: ${{ steps.artifact.outputs.artifact-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # Gradle's docs: use setup-gradle for caching rather than setup-java's
+      # gradle cache; the two interfere. setup-gradle also stops daemons in its
+      # post step, so the build does not pass --no-daemon.
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install JS dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Build workspace packages
+        run: |
+          npm run build:app-deps
+          npm --prefix packages/app run build:terminal-webview
+
+      - name: Prebuild and assemble a debug-signed release APK
+        env:
+          APP_VARIANT: production
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+            -Dorg.gradle.parallel=false
+            -Dorg.gradle.workers.max=1
+            -Dorg.gradle.daemon=false
+        run: |
+          set -euo pipefail
+          cd packages/app
+          npx expo prebuild --platform android --clean --non-interactive
+          cd android
+          ./gradlew \
+            :app:assembleRelease \
+            --max-workers=1 \
+            -x lint \
+            -x lintVitalAnalyzeRelease \
+            -x lintVitalRelease \
+            -x generateReleaseLintModel \
+            -x generateReleaseLintVitalModel
+
+      - name: Name and verify the artifact
+        id: artifact
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+          name="paseo-v${version}-${short_sha}-native-headers-qa-android.apk"
+          cp packages/app/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/$name"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          "$apksigner" verify --print-certs "$RUNNER_TEMP/$name" | head -n 4
+          echo "artifact-name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.artifact-name }}
+          path: ${{ runner.temp }}/${{ steps.artifact.outputs.artifact-name }}
+          if-no-files-found: error
+          retention-days: 14
+
+  emulator-qa:
+    needs: build-apk
+    if: always() && (needs.build-apk.result == 'success' || inputs.apk_run_id != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      APK_NAME: ${{ inputs.apk_run_id != '' && inputs.apk_artifact_name || needs.build-apk.outputs.artifact-name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Download the APK built in this run
+        if: inputs.apk_run_id == ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}
+          path: ${{ runner.temp }}/apk
+
+      - name: Download the APK from a previous run
+        if: inputs.apk_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ inputs.apk_run_id }}" --repo "${{ github.repository }}" \
+            -n "$APK_NAME" -D "$RUNNER_TEMP/apk"
+          ls -la "$RUNNER_TEMP/apk"
+
+      - name: Install Maestro
+        # Pinned: 2.6.0 mis-handles templated appIds and 2.8/2.9 report Android
+        # taps as completed without firing onPress on Expo SDK 54 (Fabric).
+        env:
+          MAESTRO_VERSION: "2.5.1"
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+          "$HOME/.maestro/bin/maestro" --version
+
+      - name: Start a stock 0.7.2 daemon behind the header gate
+        run: |
+          set -euo pipefail
+          npm install -g @getpaseo/cli@0.7.2
+          export PASEO_HOME="$RUNNER_TEMP/paseo-home"
+          mkdir -p "$PASEO_HOME"
+          echo "PASEO_HOME=$PASEO_HOME" >> "$GITHUB_ENV"
+          PASEO_LISTEN=127.0.0.1:6767 PASEO_RELAY_ENABLED=false paseo daemon start
+          for i in $(seq 1 60); do
+            if curl -fs http://127.0.0.1:6767/api/health >/dev/null; then echo "daemon ready after ${i}s"; break; fi
+            sleep 1
+          done
+          curl -fs http://127.0.0.1:6767/api/health
+
+          nohup node scripts/qa/header-gate-proxy.mjs > "$RUNNER_TEMP/gate.log" 2>&1 &
+          sleep 1
+          echo "gate sanity checks (expect 302 then 200):"
+          curl -s -o /dev/null -w 'no header: %{http_code}\n' http://127.0.0.1:6768/api/health
+          curl -s -o /dev/null -w 'with header: %{http_code}\n' \
+            -H "$GATE_HEADER_NAME: $GATE_HEADER_VALUE" http://127.0.0.1:6768/api/health
+
+      - name: Drive the app on an emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          APK_PATH: ${{ runner.temp }}/apk/${{ env.APK_NAME }}
+          FLOWS_DIR: ${{ github.workspace }}/packages/app/maestro/qa
+          OUT_DIR: ${{ runner.temp }}/screenshots
+          # Android driver default is 15 s; Maestro's docs say raise it on CI.
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: "120000"
+          MAESTRO_CLI_NO_ANALYTICS: "1"
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          profile: pixel_7
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash "$GITHUB_WORKSPACE/scripts/qa/run-android-header-flows.sh"
+
+      - name: Prove the gate saw both handshakes
+        if: always()
+        run: |
+          set -euo pipefail
+          echo "::group::gate decision log"
+          cat "$RUNNER_TEMP/gate.log"
+          echo "::endgroup::"
+          grep -q '"kind":"upgrade","path":"/ws[^"]*","hasHeader":false,"allowed":false' "$RUNNER_TEMP/gate.log"
+          grep -q '"kind":"upgrade","path":"/ws[^"]*","hasHeader":true,"allowed":true' "$RUNNER_TEMP/gate.log"
+          echo "gate log shows a rejected header-less upgrade and an accepted upgrade carrying the header"
+
+      - name: Collect daemon logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/daemon-logs"
+          cp -r "$PASEO_HOME"/logs "$RUNNER_TEMP/daemon-logs/" 2>/dev/null || true
+          find "$PASEO_HOME" -maxdepth 1 -name '*.log' -exec cp {} "$RUNNER_TEMP/daemon-logs/" \; 2>/dev/null || true
+          ls -la "$RUNNER_TEMP/daemon-logs" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-headers-qa-evidence-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/screenshots
+            ${{ runner.temp }}/gate.log
+            ${{ runner.temp }}/daemon-logs
+          if-no-files-found: warn
+          retention-days: 30

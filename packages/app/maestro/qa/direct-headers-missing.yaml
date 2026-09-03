@@ -1,0 +1,57 @@
+# Negative control for direct-headers-gate.yaml: the same host and port with no
+# header row. The gate answers the handshake with a 302 and the Add Host probe
+# must surface a connection failure instead of adding the host.
+appId: sh.paseo
+---
+- launchApp:
+    clearState: true
+
+- runFlow:
+    when:
+      visible: ".*(isn't responding|keeps stopping).*"
+    commands:
+      - tapOn: "(?i)(Wait|Close app|OK)"
+
+- runFlow:
+    when:
+      visible: "Open in.*Paseo.*\\?"
+    commands:
+      - tapOn: "Open"
+
+- extendedWaitUntil:
+    visible:
+      id: "welcome-screen"
+    timeout: 90000
+
+- tapOn:
+    id: "welcome-direct-connection"
+
+- extendedWaitUntil:
+    visible:
+      id: "add-host-modal"
+    timeout: 10000
+
+- tapOn:
+    id: "direct-host-input"
+- eraseText
+- inputText: "10.0.2.2"
+- assertVisible:
+    id: "direct-host-input"
+    text: "10.0.2.2"
+
+- tapOn:
+    id: "direct-port-input"
+- eraseText
+- inputText: "6768"
+- assertVisible:
+    id: "direct-port-input"
+    text: "6768"
+- tapOn: "Enter the address of a Paseo server."
+
+- tapOn:
+    id: "direct-host-submit"
+
+- extendedWaitUntil:
+    visible: "We failed to connect.*"
+    timeout: 30000
+- takeScreenshot: 04-no-header-rejected-by-gate
