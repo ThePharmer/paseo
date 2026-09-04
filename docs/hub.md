@@ -2,7 +2,9 @@
 
 Paseo Hub is an explicit opt-in connection from one Paseo daemon to one Hub. Running a daemon does
 not register it with a Hub. The relationship begins only when a user runs
-`paseo hub connect <url> --token <token>` from the daemon machine.
+`paseo hub connect [url]` from the daemon machine with an explicit API key or matching stored CLI login.
+
+The human CLI login and daemon relationship are separate identities. `paseo hub login [url]` stores a durable organization-scoped CLI credential keyed by normalized Hub origin under `PASEO_HOME`. Interactive login optionally connects the local daemon, then points to the Hub UI for trigger configuration; it does not scaffold or deploy configuration. `paseo hub init` remains the explicit triggers-as-code scaffold. `paseo hub export [directory]` writes the active organization's current triggers as one self-contained YAML file per trigger, using the active login unless another Hub or API key is selected. Origin resolution uses explicit command input, `PASEO_HUB_URL`, active login, then `https://hub.paseo.sh`. Connect uses exact-origin authority to request a one-time enrollment token, then passes only that token to the daemon. The daemon generates and persists its own relationship credential.
 
 ## Connection and authority
 
@@ -15,17 +17,21 @@ The daemon persists a relationship ID and private connection credential before e
 relationship is independent of its current transport, so a future transport can replace the direct
 WebSocket without pairing again. The current foundation supports one Hub relationship per daemon.
 
-Normal authenticated daemon sessions may run the `hub.management.daemon.connect`,
-`hub.management.daemon.get_status`, and `hub.management.daemon.disconnect` RPCs. Hub connections
-receive only `hub.execution.*` authority, so execution credentials cannot manage the relationship.
+Normal authenticated daemon sessions may manage the daemon's Hub relationship and permissions.
+Hub connections have no daemon permissions by default. Connecting gives Hub machine identity and
+presence but no execution authority. The `hub.execute` permission lets workflows triggered from
+GitHub, Slack, Discord, Linear, and other integrations create workspaces and run agents. Grant it
+during interactive login or later with `paseo hub permissions grant hub.execute`. Relationships
+created before this split migrate their legacy execution scope to `hub.execute`. Hub sessions cannot
+manage their own relationship or permissions.
 
 ## Session grants and execution ownership
 
 Trusted clients and the Hub use the same `Session` implementation. The connection boundary supplies
-grants: trusted clients receive `*`, while an enrolled Hub connection receives its persisted
-`hub.execution.*` grant. One matcher handles exact RPC names and trailing namespace wildcards for
-both inbound requests and outbound messages. A denied request returns the ordinary `rpc_error`
-shape.
+semantic permissions: trusted clients receive the owner permission set, while an enrolled Hub
+connection receives its persisted permissions. Legacy relationship files carrying
+`hub.execution.*` migrate once to `hub.execute` at the persistence boundary. A denied request returns
+the ordinary `rpc_error` shape. See [permissions.md](permissions.md).
 
 The Hub connection still has a narrow lifecycle boundary: it has no trusted-client hello/resume,
 browser, binary, retained-session, or broadcast state. Its outbound execution events include only
@@ -44,9 +50,30 @@ daemon, execution, and agent identity with that terminal state. Paseo never stor
 replays the original prompt. A duplicate create returns the existing agent without starting another
 turn.
 
-Hub creates use the same agent creation path as trusted clients. They may select any existing
-worktree target shape. Execution completion policy remains outside the daemon: a completed agent
-turn does not imply that the Hub execution is terminal.
+Every Hub execution creates a fresh Paseo workspace. The workspace owns the execution's agents and
+terminals. Local checkout and worktree targets select only the workspace backing and isolation; the
+Hub cannot select or reuse an existing workspace. Hub creates use the same agent creation path as
+trusted clients. They may select any worktree target shape and carry optional MCP server configuration and provider-native
+`providerOptions` for the agent session. The daemon keeps that configuration in its private agent
+record so provider sessions can recover after a restart; neither ordinary client snapshots and
+updates nor Hub projections expose session configuration. See [providers.md](providers.md) for the
+supported provider keys.
+
+Hub tool preapproval is a private, structured list of `{ kind: "mcp", server, tool }` references.
+Every reference must name an MCP server injected by the same create request. The daemon translates
+only those identities into the selected provider's native approval configuration. The protocol
+cannot name or preapprove native tools such as Bash, Edit, or Write. Explicit local or managed ask
+and deny policy takes precedence. Providers without exact MCP preapproval support reject unattended
+Hub creation instead of broadening access or waiting for an invisible prompt.
+When a create request includes a tool policy, a successful response includes
+`toolPolicyApplied: true`; absence of that acknowledgement is not success for unattended execution.
+
+A Hub workflow may use read-only provider settings for classifier steps. This is defense in depth,
+not a security boundary: classifier labels and prompt intent do not authorize tools. Exact MCP grants
+and the provider's local or managed policy remain the authorization controls.
+
+Execution completion policy remains outside the daemon: a completed agent turn does not imply that
+the Hub execution is terminal.
 
 The Hub ends an execution by sending `hub.execution.control.request` with the durable execution ID
 and either `interrupt` or `archive`. The daemon resolves the agent from the authenticated daemon
@@ -56,11 +83,11 @@ If no execution exists for that authenticated daemon and execution ID, interrupt
 success because the requested stopped or archived state already holds. An execution owned by another
 daemon is indistinguishable from a missing execution and is never exposed or affected.
 
-Interrupt uses the ordinary agent cancellation lifecycle. Archive first archives the owned agent.
-When that agent belongs to an active Paseo-owned worktree workspace, the daemon also archives the
-workspace through the shared workspace archive service, so the backing directory is removed only
-after its final active workspace reference disappears. Local and shared checkouts archive only the
-execution-owned agent.
+Interrupt uses the ordinary agent cancellation lifecycle. Archive resolves the execution agent's
+required workspaceId and sends it through the shared workspace archive service. The service archives
+that workspace's agents and terminals, then removes Paseo-owned backing directories only after their
+final active workspace reference disappears. Local checkouts remain on disk; sibling workspaces
+sharing a backing directory remain active.
 
 ## Disconnect and revocation
 
@@ -72,11 +99,13 @@ Hub authentication rejection or close code `4403` permanently revokes the local 
 daemon deletes its credential, stops reconnecting, and retains only the relationship ID, Hub origin,
 scopes, and a sanitized reason for status reporting.
 
-`paseo hub disconnect` disables socket reconnect before requesting remote revocation. If the Hub is
-offline, the daemon persists `disconnecting` and retries revocation across daemon restarts without
-opening a Hub socket. This also covers an enrollment whose request may have succeeded but whose
-response was lost. `--force` removes local authority immediately and warns that remote revocation may
-still be pending.
+`paseo hub disconnect` disables socket reconnect and execution authority before making one bounded
+remote revocation request. The daemon then removes the local relationship whether the request
+succeeds or fails. A failed request returns a warning that server-side revocation may remain pending.
+`--force` skips the remote request. Legacy persisted `disconnecting` records are removed on startup;
+the daemon does not retry revocation in the background.
+
+`paseo hub logout` removes only the active human CLI credential and preserves credentials for other origins. Interactive logout inspects and optionally disconnects a same-origin daemon before deleting the login; a failed requested disconnect preserves the login. JSON and noninteractive logout never prompt or disconnect implicitly.
 
 ## Cross-repository compatibility
 
@@ -84,3 +113,5 @@ The consumer implementation lives in Paseo Cloud. Cloud owns its copy of the Hub
 has no Paseo runtime or build dependency. Cross-repository end-to-end verification separately builds
 a Paseo source checkout and exercises the real daemon, CLI, direct WebSocket, Cloud service, and
 Postgres. That compatibility fixture is not a package dependency or fallback implementation.
+Its `hub-e2e` ACP provider accepts only exact tool names on the injected `hub` MCP server. Other
+custom ACP providers remain unsupported for unattended preapproval.

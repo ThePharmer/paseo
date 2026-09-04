@@ -11,9 +11,14 @@ import {
   prPanePipelineQueryKey,
   prPaneTimelineQueryKey,
 } from "@/git/pull-request-panel/query-keys";
-import { resetReviewDraftStore, useReviewDraftStore } from "@/review/store";
+import {
+  resetWorkingDiffComparisons,
+  resolveWorkingDiffComparison,
+  selectWorkingDiffComparison,
+} from "@/git/working-diff-comparison";
 import {
   applyCheckoutStatusUpdateFromEvent,
+  ensureCheckoutStatus,
   type CheckoutPrStatusPayload,
   type CheckoutStatusPayload,
   fetchCheckoutStatus,
@@ -86,10 +91,12 @@ function checkoutStatusUpdate(
   };
 }
 
-function setDiffModeOverride(isDirtyAtSelection: boolean): void {
-  useReviewDraftStore.getState().setDiffModeOverride({
-    scopeKey: "review:scope",
-    override: { serverId, cwd, mode: "base", isDirtyAtSelection },
+function selectBaseComparison(isDirtyAtSelection: boolean): void {
+  selectWorkingDiffComparison({
+    serverId,
+    cwd,
+    comparison: "base",
+    isDirty: isDirtyAtSelection,
   });
 }
 
@@ -98,7 +105,7 @@ function createQueryClient(): QueryClient {
 }
 
 beforeEach(() => {
-  resetReviewDraftStore();
+  resetWorkingDiffComparisons();
 });
 
 describe("fetchCheckoutStatus", () => {
@@ -112,13 +119,48 @@ describe("fetchCheckoutStatus", () => {
     expect(client.getCheckoutStatus).toHaveBeenCalledExactlyOnceWith(cwd);
   });
 
-  it("expires a manual diff-mode override when the fetched dirty state flipped", async () => {
-    setDiffModeOverride(true);
+  it("expires a manual working-diff comparison when the fetched dirty state flipped", async () => {
+    selectBaseComparison(true);
     const client = { getCheckoutStatus: vi.fn(async () => checkoutStatus({ isDirty: false })) };
 
     await fetchCheckoutStatus({ client, serverId, cwd });
 
-    expect(useReviewDraftStore.getState().diffModeOverrides["review:scope"]).toBeUndefined();
+    expect(resolveWorkingDiffComparison({ serverId, cwd, isDirty: false })).toBe("base");
+    expect(resolveWorkingDiffComparison({ serverId, cwd, isDirty: true })).toBe("uncommitted");
+  });
+});
+
+describe("ensureCheckoutStatus", () => {
+  it("awaits the canonical checkout-status query and reuses its cached result", async () => {
+    const queryClient = createQueryClient();
+    const fetched = checkoutStatus({ currentBranch: "feature/current" });
+    const client = { getCheckoutStatus: vi.fn(async () => fetched) };
+
+    const first = await ensureCheckoutStatus({ queryClient, client, serverId, cwd });
+    const second = await ensureCheckoutStatus({ queryClient, client, serverId, cwd });
+
+    expect(first).toEqual(fetched);
+    expect(second).toEqual(fetched);
+    expect(client.getCheckoutStatus).toHaveBeenCalledExactlyOnceWith(cwd);
+  });
+
+  it("awaits a refetch when the canonical cached status was invalidated", async () => {
+    const queryClient = createQueryClient();
+    queryClient.setQueryData(
+      checkoutStatusQueryKey(serverId, cwd),
+      checkoutStatus({ currentBranch: "feature/stale" }),
+    );
+    await queryClient.invalidateQueries({
+      queryKey: checkoutStatusQueryKey(serverId, cwd),
+      refetchType: "none",
+    });
+    const fetched = checkoutStatus({ currentBranch: "feature/current" });
+    const client = { getCheckoutStatus: vi.fn(async () => fetched) };
+
+    const result = await ensureCheckoutStatus({ queryClient, client, serverId, cwd });
+
+    expect(result.currentBranch).toBe("feature/current");
+    expect(client.getCheckoutStatus).toHaveBeenCalledExactlyOnceWith(cwd);
   });
 });
 
@@ -198,9 +240,9 @@ describe("applyCheckoutStatusUpdateFromEvent", () => {
     ).toBe("unauthenticated");
   });
 
-  it("expires a manual diff-mode override when the pushed dirty state flipped", () => {
+  it("expires a manual working-diff comparison when the pushed dirty state flipped", () => {
     const queryClient = createQueryClient();
-    setDiffModeOverride(false);
+    selectBaseComparison(false);
 
     applyCheckoutStatusUpdateFromEvent({
       queryClient,
@@ -208,12 +250,12 @@ describe("applyCheckoutStatusUpdateFromEvent", () => {
       message: checkoutStatusUpdate(checkoutStatus({ isDirty: true })),
     });
 
-    expect(useReviewDraftStore.getState().diffModeOverrides["review:scope"]).toBeUndefined();
+    expect(resolveWorkingDiffComparison({ serverId, cwd, isDirty: true })).toBe("uncommitted");
   });
 
-  it("keeps a manual diff-mode override while the pushed dirty state still matches", () => {
+  it("keeps a manual working-diff comparison while the pushed dirty state still matches", () => {
     const queryClient = createQueryClient();
-    setDiffModeOverride(true);
+    selectBaseComparison(true);
 
     applyCheckoutStatusUpdateFromEvent({
       queryClient,
@@ -221,7 +263,7 @@ describe("applyCheckoutStatusUpdateFromEvent", () => {
       message: checkoutStatusUpdate(checkoutStatus({ isDirty: true })),
     });
 
-    expect(useReviewDraftStore.getState().diffModeOverrides["review:scope"]).toBeDefined();
+    expect(resolveWorkingDiffComparison({ serverId, cwd, isDirty: true })).toBe("base");
   });
 
   it("invalidates PR detail queries when the prStatus changes, ignoring the volatile requestId", () => {

@@ -14,6 +14,10 @@ For testing rules, see [testing.md](testing.md).
 - **`interface`** over `type` when both work.
 - **No `index.ts` barrel files** that only re-export — they create indirection and circular-dep risk. Import from the source.
 
+## Shell scripts
+
+- Bash scripts always use `#!/usr/bin/env bash`. Never hard-code `/bin/bash` or `/usr/bin/bash`; those paths are not portable to environments such as NixOS.
+
 ## Comments and noise
 
 - Delete any comment where removing it loses zero information. Comments explain _why_, not _what_.
@@ -93,6 +97,14 @@ For testing rules, see [testing.md](testing.md).
 - Stable references for props that cross `memo` boundaries or feed dependency arrays. Static literals at module scope `as const`; derived with `useMemo`; handlers with `useCallback` only when there's a memoized beneficiary.
 - Use stable ids for `key`, never array index for reorderable/filterable lists.
 - Context for stable values (theme, auth). Store with selectors for state that changes.
+
+### Retained panel measurements
+
+Inactive retained panels use `display: none`, so DOM and layout APIs report zero width and height. A non-positive measurement means the surface is not rendered; it is never a valid compact layout.
+
+- Suspend geometry-derived updates while either measured dimension is non-positive. Preserve the last valid state until the surface reports positive geometry again.
+- Enforce the rule at the measurement boundary shared by every trigger. Guarding only an `onLayout` or `ResizeObserver` callback still lets effects, content changes, and imperative remeasurement publish hidden geometry.
+- Test the hide-and-reveal path through a real retained surface. Settled assertions do not catch stale geometry painted during the first returned frames.
 
 ## Naming
 

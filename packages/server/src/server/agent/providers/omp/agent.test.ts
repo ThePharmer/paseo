@@ -1,8 +1,22 @@
 import { describe, expect, test } from "vitest";
+import { setImmediate as waitForImmediate } from "node:timers/promises";
 
 import type { PaseoToolCatalog } from "../../tools/types.js";
 import type { OmpNoTurnScheduler, OmpProviderIdleScheduler } from "./agent.js";
+import type { OmpUsagePollScheduler } from "./usage-poller.js";
+import { resolveOmpProviderParams } from "./provider-config.js";
 import { OmpHarness } from "./test-utils/omp-harness.js";
+
+test("OMP ready timeout defaults to 20 seconds and RPC timeout overrides both", () => {
+  expect(resolveOmpProviderParams({}).runtimeProviderParams).toMatchObject({
+    readyTimeoutMs: 20_000,
+    rpcTimeoutMs: 60_000,
+  });
+  expect(resolveOmpProviderParams({ rpcTimeoutMs: 90_000 }).runtimeProviderParams).toMatchObject({
+    readyTimeoutMs: 90_000,
+    rpcTimeoutMs: 90_000,
+  });
+});
 
 class ManualIdleScheduler implements OmpProviderIdleScheduler {
   private readonly retries: Array<() => void> = [];
@@ -62,6 +76,28 @@ class ManualNoTurnScheduler implements OmpNoTurnScheduler {
 
   wasAborted(): boolean {
     return this.aborted;
+  }
+}
+
+class ManualUsagePollScheduler implements OmpUsagePollScheduler {
+  private readonly polls: Array<{ active: boolean; callback: () => void }> = [];
+
+  schedulePoll(callback: () => void): () => void {
+    const poll = { active: true, callback };
+    this.polls.push(poll);
+    return () => {
+      poll.active = false;
+    };
+  }
+
+  poll(): void {
+    const poll = this.polls.shift();
+    if (!poll) throw new Error("OMP has not scheduled a context usage poll");
+    if (poll.active) poll.callback();
+  }
+
+  activePollCount(): number {
+    return this.polls.filter((poll) => poll.active).length;
   }
 }
 
@@ -147,6 +183,7 @@ describe("OMP agent client and session", () => {
       { type: "user_message", text: "hello OMP", messageId: "user-1" },
       { type: "assistant_message", text: "hello from OMP", messageId: "omp-assistant-1" },
     ]);
+    expect(omp.eventTypes().slice(0, 2)).toEqual(["turn_started", "timeline"]);
     expect(omp.completedTurnCount()).toBe(1);
   });
 
@@ -206,6 +243,45 @@ describe("OMP agent client and session", () => {
       finalText: "empty terminal payload recovered",
     });
     expect(omp.completedTurnCount()).toBe(1);
+  });
+
+  test("starts and stops context usage polling with the active turn", async () => {
+    const scheduler = new ManualUsagePollScheduler();
+    const omp = new OmpHarness({ usagePollScheduler: scheduler });
+    await omp.start();
+    omp.runtime().stats = {
+      contextUsage: { tokens: 130, contextWindow: 200_000 },
+    };
+    omp.runtime().state.contextUsage = { tokens: 99, contextWindow: 100_000 };
+    await omp.requireStartTurn("keep working");
+    expect(scheduler.activePollCount()).toBe(1);
+    scheduler.poll();
+    await waitForImmediate();
+    expect(omp.usageUpdates()).toEqual([
+      {
+        inputTokens: 0,
+        cachedInputTokens: 0,
+        outputTokens: 0,
+        totalCostUsd: 0,
+        contextWindowMaxTokens: 200_000,
+        contextWindowUsedTokens: 130,
+      },
+    ]);
+    expect(scheduler.activePollCount()).toBe(1);
+    omp.runtime().abortError = new Error("abort unavailable");
+    await expect(omp.interrupt()).rejects.toThrow("abort unavailable");
+    expect(scheduler.activePollCount()).toBe(1);
+    omp.runtime().abortError = null;
+    await omp.interrupt();
+    expect(scheduler.activePollCount()).toBe(0);
+
+    await omp.runPrompt("finish normally", "done");
+    expect(scheduler.activePollCount()).toBe(0);
+
+    await omp.requireStartTurn("close the session");
+    expect(scheduler.activePollCount()).toBe(1);
+    await omp.close();
+    expect(scheduler.activePollCount()).toBe(0);
   });
 
   test("does not accept a follow-up until OMP reports stable idle", async () => {
@@ -292,7 +368,7 @@ describe("OMP agent client and session", () => {
     ]);
   });
 
-  test("renders a live system-notice custom message as a synthetic tool call", async () => {
+  test("renders a live system-notice custom message as a notification", async () => {
     const omp = new OmpHarness();
     await omp.start();
 
@@ -311,8 +387,12 @@ describe("OMP agent client and session", () => {
       );
     omp.runtime().acceptCustomMessage("plain custom status text");
 
-    expect(omp.timeline().filter((item) => item.type === "tool_call")).toMatchObject([
-      { callId: "omp-notice:DocsSmokeTwo", name: "task_notification", status: "completed" },
+    expect(omp.timeline().filter((item) => item.type === "notification")).toEqual([
+      {
+        type: "notification",
+        level: "info",
+        message: "Background job DocsSmokeTwo completed",
+      },
     ]);
     // Non-notice custom messages still fall through as assistant messages.
     expect(omp.timeline().filter((item) => item.type === "assistant_message")).toMatchObject([

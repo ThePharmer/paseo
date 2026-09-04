@@ -25,6 +25,7 @@ describe("parseScheduleCreateInput cwd/host validation", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   test("no host, no cwd → defaults to process.cwd()", () => {
@@ -60,6 +61,17 @@ describe("parseScheduleCreateInput cwd/host validation", () => {
       expect.objectContaining({
         code: "MISSING_CWD",
         message: expect.stringContaining("--cwd is required when --host is specified"),
+      }),
+    );
+  });
+
+  test("PASEO_HOST without cwd → throws MISSING_CWD", () => {
+    vi.stubEnv("PASEO_HOST", "dev:6767");
+
+    expect(() => parseScheduleCreateInput(baseOptions)).toThrow(
+      expect.objectContaining({
+        code: "MISSING_CWD",
+        message: expect.stringContaining("--cwd is required"),
       }),
     );
   });
@@ -113,6 +125,25 @@ describe("parseScheduleCreateInput first-run timing", () => {
         message: "--timezone can only be used with --cron",
       }),
     );
+  });
+});
+
+describe("parseScheduleCreateInput thinking", () => {
+  test("sets the thinking option for each scheduled new-agent run", () => {
+    const input = parseScheduleCreateInput({
+      ...baseOptions,
+      cwd: "/project",
+      thinking: "  high  ",
+    });
+
+    expect(input.target).toEqual({
+      type: "new-agent",
+      config: {
+        provider: "claude",
+        cwd: "/project",
+        thinkingOptionId: "high",
+      },
+    });
   });
 });
 

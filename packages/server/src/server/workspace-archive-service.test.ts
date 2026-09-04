@@ -18,6 +18,7 @@ import {
   type ArchiveResult,
   resolveWorkspaceIdAtPath,
 } from "./workspace-archive-service.js";
+import { WorkspaceAutomationBlockedError } from "./workspace-automation-gate.js";
 
 const cleanupPaths: string[] = [];
 
@@ -142,6 +143,7 @@ function createArchiveDeps(input: ArchiveDepsInput): ArchiveTestDependencies {
     } as unknown as Pick<WorkspaceGitService, "getSnapshot">,
     agentManager: {
       listAgents: () => [],
+      getAgent: () => null,
       archiveAgent: vi.fn(async (agentId: string) => {
         archivedAgentIds.push(agentId);
         return { archivedAt: new Date().toISOString() };
@@ -152,8 +154,8 @@ function createArchiveDeps(input: ArchiveDepsInput): ArchiveTestDependencies {
       }),
     },
     agentStorage: {
-      list: async (): Promise<StoredAgentRecord[]> => [],
-    } as Pick<AgentStorage, "list">,
+      listByWorkspace: async (): Promise<StoredAgentRecord[]> => [],
+    } as Pick<AgentStorage, "listByWorkspace">,
     findWorkspaceIdForCwd: input.findWorkspaceIdForCwd ?? vi.fn(async () => null),
     listActiveWorkspaces: async () =>
       active.filter((workspace) => !archivedWorkspaceIds.has(workspace.workspaceId)),
@@ -259,6 +261,56 @@ describe("archiveByScope", () => {
     });
     expect(existsSync(worktree.worktreePath)).toBe(true);
     expect(readFileSync(path.join(repoDir, "shared-teardown.log"), "utf8")).toBe("ok");
+  });
+
+  test("workspace scope skips teardown while repository automation is blocked", async () => {
+    const { tempDir, repoDir } = createGitRepo();
+    const marker = path.join(repoDir, "blocked-teardown.log");
+    writeFileSync(
+      path.join(repoDir, "paseo.json"),
+      JSON.stringify({
+        worktree: {
+          teardown: [`node -e "require('fs').writeFileSync('${marker}', 'unsafe')"`],
+        },
+      }),
+    );
+    execFileSync("git", ["add", "."], { cwd: repoDir, stdio: "pipe" });
+    execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "blocked teardown"], {
+      cwd: repoDir,
+      stdio: "pipe",
+    });
+    const paseoHome = path.join(tempDir, ".paseo");
+    const worktree = await createPaseoOwnedWorktree(repoDir, paseoHome, "blocked-teardown");
+    const workspaceId = "ws-blocked-teardown";
+    const deps = createArchiveDeps({
+      paseoHome,
+      activeWorkspaces: [
+        {
+          workspaceId,
+          cwd: worktree.worktreePath,
+          kind: "worktree",
+          worktreeRoot: worktree.worktreePath,
+          isPaseoOwnedWorktree: true,
+          mainRepoRoot: repoDir,
+        },
+      ],
+    });
+    deps.assertWorkspaceAutomationAllowed = async () => {
+      throw new WorkspaceAutomationBlockedError({
+        kind: "change_request",
+        forge: "github",
+        number: 42,
+        headRepository: "contributor/paseo",
+      });
+    };
+
+    const result = await archiveByScope(deps, {
+      scope: { kind: "workspace", workspaceId },
+      requestId: "req-blocked-teardown",
+    });
+
+    expect(result.archivedWorkspaceIds).toEqual([workspaceId]);
+    expect(existsSync(marker)).toBe(false);
   });
 
   test("workspace scope keeps a worktree for an active workspace in a subdirectory", async () => {
@@ -690,6 +742,8 @@ describe("archiveByScope", () => {
     });
     deps.agentManager = {
       listAgents: () => [{ id: liveAgentId, workspaceId: targetWorkspaceId }] as ManagedAgent[],
+      getAgent: (agentId: string) =>
+        agentId === liveAgentId ? ({ id: liveAgentId } as ManagedAgent) : null,
       archiveAgent: vi.fn(async (agentId: string) => {
         deps.archivedAgentIds.push(agentId);
         return { archivedAt: new Date().toISOString() };
@@ -700,12 +754,15 @@ describe("archiveByScope", () => {
       }),
     };
     deps.agentStorage = {
-      list: async () =>
-        [
-          { id: targetStoredAgentId, workspaceId: targetWorkspaceId, archivedAt: null },
-          { id: otherStoredAgentId, workspaceId: otherWorkspaceId, archivedAt: null },
-        ] as StoredAgentRecord[],
-    } as Pick<AgentStorage, "list">;
+      listByWorkspace: async (workspaceId: string) =>
+        workspaceId === targetWorkspaceId
+          ? ([
+              { id: targetStoredAgentId, workspaceId: targetWorkspaceId, archivedAt: null },
+            ] as StoredAgentRecord[])
+          : ([
+              { id: otherStoredAgentId, workspaceId: otherWorkspaceId, archivedAt: null },
+            ] as StoredAgentRecord[]),
+    } as Pick<AgentStorage, "listByWorkspace">;
 
     const result = await archiveByScope(deps, {
       scope: { kind: "workspace", workspaceId: targetWorkspaceId },
@@ -721,6 +778,38 @@ describe("archiveByScope", () => {
     expect(result.archivedAgentIds).not.toContain(otherStoredAgentId);
     expect(deps.archivedSnapshotIds).toEqual([targetStoredAgentId]);
     expect(existsSync(worktree.worktreePath)).toBe(false);
+  });
+
+  test("archives the durable snapshot when an observed live agent closes before teardown", async () => {
+    const { tempDir, repoDir } = createGitRepo();
+    const paseoHome = path.join(tempDir, ".paseo");
+    const workspaceId = "ws-live-teardown-race";
+    const agentId = "agent-live-teardown-race";
+    const deps = createArchiveDeps({
+      paseoHome,
+      activeWorkspaces: [{ workspaceId, cwd: repoDir, kind: "local_checkout" }],
+    });
+    deps.agentManager = {
+      listAgents: () => [{ id: agentId, workspaceId }] as ManagedAgent[],
+      getAgent: () => null,
+      archiveAgent: vi.fn(async () => ({ archivedAt: new Date().toISOString() })),
+      archiveSnapshot: vi.fn(async (id: string) => {
+        deps.archivedSnapshotIds.push(id);
+        return {};
+      }),
+    };
+    deps.agentStorage = {
+      list: async () => [{ id: agentId, workspaceId, archivedAt: null }] as StoredAgentRecord[],
+    } as Pick<AgentStorage, "list">;
+
+    const result = await archiveByScope(deps, {
+      scope: { kind: "workspace", workspaceId },
+      requestId: "req-live-teardown-race",
+    });
+
+    expect(result.archivedAgentIds).toContain(agentId);
+    expect(deps.archivedSnapshotIds).toEqual([agentId]);
+    expect(deps.agentManager.archiveAgent).not.toHaveBeenCalled();
   });
 
   test("worktree scope archives three workspaces on the directory and removes it", async () => {

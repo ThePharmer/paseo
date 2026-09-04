@@ -128,6 +128,8 @@ export interface PiRpcSlashCommand {
 
 export type PiRpcCommand =
   | { id?: string; type: "prompt"; message: string; images?: PiImageContent[] }
+  | { id?: string; type: "steer"; message: string; images?: PiImageContent[] }
+  | { id?: string; type: "clear_queue" }
   | { id?: string; type: "compact"; customInstructions?: string }
   | { id?: string; type: "set_auto_compaction"; enabled: boolean }
   | { id?: string; type: "abort" }
@@ -160,7 +162,9 @@ export type PiAgentSessionEvent =
   | { type: "message_end"; message: PiAgentMessage }
   | {
       type: "message_update";
-      message: PiAgentMessage;
+      // COMPAT(piCumulativeMessageUpdate): added in v0.3.0, remove after 2027-02-07 once the pi
+      // floor is >=0.84. pi <=0.83 repeats the cumulative assistant message on every update.
+      message?: PiAgentMessage;
       assistantMessageEvent: PiAssistantMessageEvent;
     }
   | {
@@ -185,7 +189,16 @@ export type PiAgentSessionEvent =
     }
   | { type: "compaction_start"; reason?: "manual" | "threshold" | "overflow" | string }
   | { type: "compaction_end"; reason?: string; errorMessage?: string; aborted?: boolean }
-  | { type: "agent_end"; messages?: PiAgentMessage[] };
+  | { type: "agent_end"; messages?: PiAgentMessage[]; willRetry?: boolean }
+  | { type: "agent_settled" }
+  | {
+      type: "auto_retry_start";
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      errorMessage: string;
+    }
+  | { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string };
 
 export type PiRuntimeEvent =
   | PiAgentSessionEvent

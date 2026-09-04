@@ -78,6 +78,29 @@ ordinary portals regardless of `z-index`, which would hide app toasts and
 tooltips behind the menu. The shared overlay scale keeps menus below toasts and
 lets tooltip portals paint above both.
 
+The shared overlay scale is relative for interactive surfaces: a base floating
+panel is below a base modal, while a floating panel rendered from inside a modal
+inherits that modal's layer and paints above it. Wrap portal content in
+`OverlayLayerProvider`; do not assign one global menu z-index. Desktop web
+comboboxes must use `overlay-root` too. Rendering them through React Native
+Web's `<Modal>` puts them in the browser top layer, where no ordinary modal
+portal can cover them.
+
+Painting and keyboard ownership use the same relative layer model. Register
+desktop modal, combobox, and dropdown focus scopes with `useWebOverlayRegistration`; the
+highest painted scope alone receives overlay keys, traps focus, and restores
+focus when it closes. Do not add component-local global Escape listeners: two
+stacked overlays would both close on one keypress.
+
+If an overlay is rendered by a global host rather than beneath its opener in
+the React tree, carry the opener's current layer through the host store and
+restore it with `OverlayLayerProvider`. Otherwise painting and keyboard
+ownership silently reset at the app root. When the opener is a global keyboard
+action and has no component context to carry, resolve the host layer with
+`useGlobalWebOverlayLayer` on its closed-to-open transition. It captures the
+current top registered layer before the new host joins the stack; do not give a
+global dialog a fixed root-derived modal layer.
+
 ## Gotcha 2 — Portal breaks lifecycle and coordinate-system inheritance
 
 A Portal escapes Android's hit-test, but it also escapes two things you were
@@ -101,33 +124,49 @@ quietly relying on:
   renders inside its host, not necessarily at window origin. Position anchored
   content relative to the host: `anchorRect - hostRect`. This is what
   `measureFloatingPanelPortalHost()` is for.
+- **React context.** `@gorhom/portal` is not a React portal — a real one keeps
+  context, this one does not. It stores the element and the host renders it, so
+  context resolves at the _host's_ position. Everything provided between
+  `PortalProvider` in `app/_layout.tsx` and your sheet is invisible inside it.
+  This is why app-wide providers wrap `PortalProvider` rather than the reverse.
 
-The fix for transforms is Gotcha 3.
+The fix for transforms is Gotcha 3. The fix for context is Gotcha 7.
 
-## Gotcha 3 — Reanimated transforms vs `measureInWindow`
+## Gotcha 3 — Keyboard layout and portal anchors
 
-`measureInWindow` returns the view's _current_ screen position. In theory that
-includes Reanimated-applied transforms (Reanimated updates native view
-properties, and Android's `getLocationInWindow` reads transformed coords). In
-practice it's racy — the measurement may snapshot mid-animation, and on Android
-with Reanimated worklets the result is not always stable.
+`KeyboardTranslateView` owns visual keyboard motion. Android uses the
+controller's Reanimated signal. iOS uses its native-driver `Animated.event`
+signal because the stock iOS Reanimated value changes at move start, while
+writing a replacement Reanimated value every frame interrupts UIKit's hide
+animation. Keep this platform choice inside `KeyboardTranslateView`.
 
-If the panel cannot stay inside the transformed ancestor, do not try to track
-the keyboard by re-measuring on every frame. Instead,
-**slave the popover's transform to the same `KeyboardShiftProvider` SharedValue
-the composer uses**:
+`KeyboardDock` always keeps the chat surface at full height and wraps it in
+`KeyboardTranslateView`. The panel root clips it at the header edge, so rows
+slide under the header on open and out from under it on close. Do not swap the
+dock to keyboard padding at rest. Changing its height creates either a blank
+band or a paused transition when the inverted list updates its viewport.
 
-1. Snapshot `openShift = shift.value` at the moment you measure the anchor.
-2. Apply `useAnimatedStyle(() => ({ transform: [{ translateY: openShift.value - shift.value }] }))`
-   to the popover wrapper.
+Do not animate a layout prop through the keyboard transition. On Android
+Fabric, each animated layout update clones the shadow tree and runs Yoga over
+the dock subtree. This measured about 10 ms per frame on the emulator and the
+mounted layouts arrived in bursts every 2–4 frames. A transform does not dirty
+layout. Preserve the translated dock's history scroll range with a far-end
+content inset on the inverted stream list. Update that inset only when keyboard
+motion settles; never drive it per frame.
 
-When `shift` equals `openShift`, the translate is 0 and the popover sits at
-the measured position. When the keyboard moves afterward, the delta translates
-the popover by exactly the amount the composer translates. They move in
-lockstep, no re-measurement needed. Do not call
-`useReanimatedKeyboardAnimation()` directly for app UI offset policy; Android
-can briefly report a stale nonzero height with closed progress, and the shared
-provider is where that is normalized.
+Move the stream and composer together through `KeyboardDock`. Do not translate
+them independently.
+
+`KeyboardShiftProvider` owns the normalized shift used for settled insets and
+portal geometry, plus the `isMoving` worklet value. It reconciles native
+animation-end events because the controller can retain a nonzero value after
+the keyboard closes.
+
+Measure portal anchors while the dock is at rest. If a popover opens during
+motion, re-measure when `isMoving` settles. `measureInWindow` includes the
+dock's current layout and transform. Snapshot the shift at measurement time and
+apply only the subsequent shift delta to the animated `bottom`. Adding the full
+shift moves the portal twice and can place it over the composer controls.
 
 The provider also reconciles iOS from the controller's native `onEnd` event.
 The controller's stock iOS shared values update at move start and during an
@@ -135,10 +174,6 @@ interactive move, but not at the terminal event, so JS contention can otherwise
 leave the last height/progress pair stuck in either the open or closed state.
 Keep that terminal reconciliation on the UI thread; a later focus or blur must
 not be required to repair the offset.
-
-Re-measure on `Keyboard.addListener('keyboardDidShow'|'keyboardDidHide')` only
-to refresh the snapshot if the keyboard was mid-transition when the popover
-opened.
 
 ## Gotcha 4 — Host-relative positioning before platform offsets
 
@@ -213,6 +248,28 @@ Do not treat `onChange(-1)` as a close by itself. In a stacked
 another pushed sheet. Close React state from `onDismiss`; use `onChange` only to
 track phase.
 
+## Gotcha 7 — A sheet cannot read context from its call site
+
+React cannot copy contexts reflectively, so the only way across the teleport in
+Gotcha 2 is to render the providers a second time, with values captured on the
+near side where they are still readable. `IsolatedBottomSheetModal` takes a
+`contextBridge` for exactly that:
+
+```tsx
+const contextBridge = useCallback<ContextBridge>(
+  (content) => <ThingContext.Provider value={thing}>{content}</ThingContext.Provider>,
+  [thing],
+);
+```
+
+The prop is **required**, and `null` is a real answer. A sheet whose content
+needs nothing local should have to say so, because the failure mode is silent
+until someone adds a `useContext` deep inside and it throws on device only —
+never on web, where the desktop path uses a real portal. `menu-surface.tsx`
+bridges the menu's two contexts; the rest pass `null`.
+
+Wrapping providers _around_ the modal does nothing. They land on the wrong side.
+
 ## Recipe for a new anchored panel
 
 Before you write a new one, ask:
@@ -235,3 +292,6 @@ Before you write a new one, ask:
    bounded**. Verify before you commit.
 
 Then copy the closest canonical file and trim.
+
+Building a **menu** rather than a bare panel? Don't. Use the menu engine — it already solves
+everything above, plus submenus, sheets, and hover intent. See [menus.md](menus.md).

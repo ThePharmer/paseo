@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { defaultHostAppearance } from "@/hosts/appearance";
 import {
+  createRemoteSshHostConnection,
   normalizeStoredHostProfile,
   orderHostsLocalFirst,
   resolveActiveHostServerId,
+  upsertHostConnectionInProfiles,
+  type HostConnection,
   type HostProfile,
 } from "./host-connection";
 
@@ -10,6 +14,7 @@ function makeHost(serverId: string): HostProfile {
   return {
     serverId,
     label: serverId,
+    appearance: defaultHostAppearance(),
     lifecycle: {},
     connections: [],
     preferredConnectionId: null,
@@ -113,6 +118,137 @@ describe("normalizeStoredHostProfile", () => {
       useTls: true,
       daemonPublicKeyB64: "pubkey",
     });
+  });
+
+  it("gives a host stored before appearance existed the default appearance", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_old",
+      connections: [
+        { id: "socket:/tmp/paseo.sock", type: "directSocket", path: "/tmp/paseo.sock" },
+      ],
+    });
+
+    expect(profile?.appearance).toEqual({ color: "none", badgeDisplay: null });
+  });
+
+  it("loads a stored appearance the user chose", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_new",
+      appearance: { color: "teal", badgeDisplay: "icon" },
+      connections: [
+        { id: "socket:/tmp/paseo.sock", type: "directSocket", path: "/tmp/paseo.sock" },
+      ],
+    });
+
+    expect(profile?.appearance).toEqual({ color: "teal", badgeDisplay: "icon" });
+  });
+
+  it("normalizes stored Remote SSH connection parameters", () => {
+    const profile = normalizeStoredHostProfile({
+      serverId: "srv_ssh",
+      connections: [
+        {
+          type: "remoteSsh",
+          host: " deploy@example.com ",
+          sshPort: 2222,
+          daemonPort: 7777,
+        },
+      ],
+    });
+
+    expect(profile?.connections[0]).toEqual({
+      id: "ssh:deploy%40example.com:2222:7777",
+      type: "remoteSsh",
+      host: "deploy@example.com",
+      sshPort: 2222,
+      daemonPort: 7777,
+    });
+  });
+});
+
+describe("createRemoteSshHostConnection", () => {
+  it("keeps optional SSH settings absent", () => {
+    expect(createRemoteSshHostConnection({ host: "build-box" })).toEqual({
+      id: "ssh:build-box::",
+      type: "remoteSsh",
+      host: "build-box",
+    });
+  });
+
+  it("rejects invalid SSH destinations and ports", () => {
+    expect(() => createRemoteSshHostConnection({ host: "" })).toThrow("SSH host is required");
+    expect(() => createRemoteSshHostConnection({ host: "bad host" })).toThrow(
+      "SSH host is invalid",
+    );
+    expect(() => createRemoteSshHostConnection({ host: "build-box", sshPort: 70000 })).toThrow(
+      "SSH port must be between 1 and 65535",
+    );
+    expect(() => createRemoteSshHostConnection({ host: "build-box", daemonPort: 0 })).toThrow(
+      "Daemon port must be between 1 and 65535",
+    );
+  });
+});
+
+describe("upsertHostConnectionInProfiles", () => {
+  const connection: HostConnection = {
+    id: "socket:/tmp/paseo.sock",
+    type: "directSocket",
+    path: "/tmp/paseo.sock",
+  };
+
+  it("gives a newly discovered host the default appearance", () => {
+    const [profile] = upsertHostConnectionInProfiles({
+      profiles: [],
+      serverId: "srv_new",
+      connection,
+    });
+
+    expect(profile.appearance).toEqual({ color: "none", badgeDisplay: null });
+  });
+
+  it("keeps the appearance the user chose when the host reconnects", () => {
+    const existing: HostProfile = {
+      ...makeHost("srv_known"),
+      appearance: { color: "amber", badgeDisplay: "hidden" },
+      connections: [],
+    };
+
+    const [profile] = upsertHostConnectionInProfiles({
+      profiles: [existing],
+      serverId: "srv_known",
+      connection,
+    });
+
+    expect(profile.appearance).toEqual({ color: "amber", badgeDisplay: "hidden" });
+  });
+
+  it("replaces a direct connection when its settings change", () => {
+    const existingConnection: HostConnection = {
+      id: "direct:example.test:6767",
+      type: "directTcp",
+      endpoint: "example.test:6767",
+      useTls: false,
+      password: "old-secret",
+    };
+    const existing: HostProfile = {
+      ...makeHost("srv_known"),
+      connections: [existingConnection],
+      preferredConnectionId: existingConnection.id,
+    };
+    const replacement: HostConnection = {
+      ...existingConnection,
+      useTls: true,
+      password: "new-secret",
+    };
+
+    const [profile] = upsertHostConnectionInProfiles({
+      profiles: [existing],
+      serverId: "srv_known",
+      connection: replacement,
+    });
+
+    expect(profile.connections).toEqual([replacement]);
+    expect(profile.preferredConnectionId).toBe(replacement.id);
   });
 });
 

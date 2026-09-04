@@ -4,9 +4,18 @@ import { addJsonAndDaemonHostOptions } from "../../utils/command-options.js";
 import { runArchiveCommand } from "./archive.js";
 import { runCreateCommand } from "./create.js";
 import { runLsCommand } from "./ls.js";
+import { runRenameCommand } from "./rename.js";
+import { runSetupCommand } from "./setup.js";
 
 export function createWorkspaceCommand(): Command {
   const workspace = new Command("workspace").description("Manage workspaces");
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("setup")
+      .description("Allow and run setup for a workspace")
+      .argument("<workspace-id>", "Workspace id"),
+  ).action(withOutput(runSetupCommand));
 
   addJsonAndDaemonHostOptions(
     workspace
@@ -31,6 +40,18 @@ export function createWorkspaceCommand(): Command {
   addJsonAndDaemonHostOptions(workspace.command("ls").description("List active workspaces")).action(
     withOutput(runLsCommand),
   );
+
+  addJsonAndDaemonHostOptions(
+    workspace
+      .command("rename")
+      .description("Set a workspace's user-visible title")
+      .argument("<workspace-id>", "Workspace id")
+      .argument("[title]", "New workspace title")
+      .option("--reset", "Clear the title and revert to the branch or directory name")
+      // Commander 12 accepts excess positionals by default, which would rename to
+      // the first word of an unquoted multi-word title and silently drop the rest.
+      .allowExcessArguments(false),
+  ).action(withOutput(runRenameCommand));
 
   addJsonAndDaemonHostOptions(
     workspace

@@ -1,7 +1,7 @@
 import express from "express";
 import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "http";
 import { constants, existsSync, unlinkSync } from "fs";
-import { open } from "fs/promises";
+import { open, rm } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import { hostname as getHostname } from "node:os";
 import path from "node:path";
@@ -117,6 +117,8 @@ export async function fanOutReconciledWorkspaceUpdates(input: {
 }
 
 import { VoiceAssistantWebSocketServer } from "./websocket-server.js";
+import { WorkspaceSetupRuntime } from "./workspace-setup-runtime.js";
+import { createWorkspaceLabelService } from "./workspace-labels/index.js";
 import { createGitHubService } from "../services/github-service.js";
 import { createPaseoWorktree as createRegisteredPaseoWorktree } from "./paseo-worktree-service.js";
 import { createWorkspaceProvisioningService } from "./session/workspace-provisioning/workspace-provisioning-service.js";
@@ -135,15 +137,20 @@ import {
   type PaseoToolHostDependencies,
 } from "./agent/tools/paseo-tools.js";
 import type { PaseoToolRuntimeContext } from "./agent/tools/types.js";
-import { ProviderSnapshotManager } from "./agent/provider-snapshot-manager.js";
+import { createAgentProviderRuntime } from "./agent/provider-runtime.js";
 import { bootstrapWorkspaceRegistries } from "./workspace-registry-bootstrap.js";
 import { WorkspaceReconciliationService } from "./workspace-reconciliation-service.js";
-import { FileBackedProjectRegistry, FileBackedWorkspaceRegistry } from "./workspace-registry.js";
-import { FileBackedChatService } from "./chat/chat-service.js";
+import {
+  FileBackedProjectRegistry,
+  FileBackedWorkspaceRegistry,
+  type WorkspaceArchiveContext,
+} from "./workspace-registry.js";
 import { CheckoutDiffManager } from "./checkout-diff-manager.js";
-import { LoopService } from "./loop-service.js";
 import { ScheduleService } from "./schedule/service.js";
 import { DaemonConfigStore, type MutableDaemonConfig } from "./daemon-config-store.js";
+import { createOrchestrationSkills } from "./orchestration-skills/index.js";
+import { resolveConfigFromPersisted, type CliConfigOverrides } from "./config.js";
+import { resolvePaseoToolPolicy } from "./agent/paseo-tool-policy.js";
 import { BrowserToolsBroker } from "./browser-tools/broker.js";
 import { DaemonConfigBrowserToolsPolicy } from "./browser-tools/policy.js";
 import { WorkspaceGitServiceImpl } from "./workspace-git-service.js";
@@ -159,14 +166,19 @@ import { wrapSessionMessage, type SessionOutboundMessage } from "./messages.js";
 import type { TerminalManager } from "../terminal/terminal-manager.js";
 import { createConfiguredTerminalManager } from "../terminal/terminal-manager-factory.js";
 import { applyTerminalAgentHookSetting } from "../terminal/agent-hooks/terminal-agent-hook-setting.js";
-import { createConnectionOfferV2, encodeOfferToFragmentUrl } from "./connection-offer.js";
 import { loadOrCreateDaemonKeyPair } from "./daemon-keypair.js";
-import { startRelayTransport, type RelayTransportController } from "./relay-transport.js";
-import type { PushNotificationSender } from "./push/notifications.js";
+import { createRelayRuntime, type RelayRuntime } from "./relay-runtime.js";
+import type { PushNotificationSender } from "./push/index.js";
 import { getOrCreateServerId } from "./server-id.js";
 import { resolveDaemonVersion } from "./daemon-version.js";
 import type { AgentClient, AgentProvider } from "./agent/agent-sdk-types.js";
-import type { FirstAgentContext, TerminalProfile } from "@getpaseo/protocol/messages";
+import type {
+  AgentProfile,
+  AgentSkillSelection,
+  FirstAgentContext,
+  PluginSource,
+  TerminalProfile,
+} from "@getpaseo/protocol/messages";
 import type {
   AgentProviderRuntimeSettingsMap,
   ProviderOverride,
@@ -178,6 +190,7 @@ import { ScriptHealthMonitor } from "./script-health-monitor.js";
 import { createScriptStatusEmitter } from "./script-status-projection.js";
 import { WorkspaceScriptRuntimeStore } from "./workspace-script-runtime-store.js";
 import { createWorkspaceScriptsService } from "./session/workspace-scripts/workspace-scripts-service.js";
+import { assertWorkspaceAutomationAllowedForWorkspace } from "./workspace-automation-gate.js";
 import { spawnWorkspaceScript } from "./worktree-bootstrap.js";
 import {
   createManagedProcessRegistry,
@@ -195,6 +208,8 @@ import { createWebUiMiddleware } from "./web-ui.js";
 import { WorkspaceAutoName } from "./workspace-auto-name.js";
 import { createGitMutationService } from "./session/git-mutation/git-mutation-service.js";
 import { workspaceIdsOnCheckout } from "./workspace-directory.js";
+import { configureGitProcessPolicy } from "../utils/run-git-command.js";
+import { resolveGitProcessPolicy } from "../utils/git-process-scheduler.js";
 import { resolveFirstAgentPromptTitle } from "./agent/create-agent-title.js";
 import {
   createAgentCommand,
@@ -212,11 +227,11 @@ import {
   type HubRelationshipRemote,
 } from "./hub/relationship-remote.js";
 import { DaemonExecutions } from "./hub/daemon-executions.js";
+import { PluginService } from "./plugins/index.js";
+import { ManagedPluginSources } from "./plugins/managed-source.js";
 
-const MAX_MCP_DEBUG_BATCH_ITEMS = 10;
-const REDACTED_LOG_VALUE = "[redacted]";
-const IDLE_AGENT_RUNTIME_TTL_MS = 2 * 60 * 1000;
-const IDLE_AGENT_RUNTIME_SWEEP_INTERVAL_MS = 15 * 1000;
+const MCP_DEBUG_BATCH_LIMIT = 10;
+const MCP_DEBUG_SECRET = "[redacted]";
 const DOWNLOAD_OPEN_FLAGS =
   process.platform === "win32" ? constants.O_RDONLY : constants.O_RDONLY | constants.O_NOFOLLOW;
 
@@ -314,35 +329,28 @@ export function createTerminalActivityRouteHandler(
   };
 }
 
-function summarizeAgentMcpDebugMessage(body: unknown): Record<string, unknown> {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return {
-      type: body === null ? "null" : typeof body,
-    };
+function describeMcpRequest(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { shape: value === null ? "null" : typeof value };
   }
-
-  const record = body as Record<string, unknown>;
-  const method = typeof record.method === "string" ? record.method : undefined;
+  const request = value as Record<string, unknown>;
   return {
-    type: "object",
-    ...(typeof record.jsonrpc === "string" ? { jsonrpc: record.jsonrpc } : {}),
-    ...(method ? { method } : {}),
-    hasId: Object.prototype.hasOwnProperty.call(record, "id"),
-    hasParams: Object.prototype.hasOwnProperty.call(record, "params"),
+    shape: "request",
+    ...(typeof request.jsonrpc === "string" ? { jsonrpc: request.jsonrpc } : {}),
+    ...(typeof request.method === "string" ? { method: request.method } : {}),
+    hasId: "id" in request,
+    hasParams: "params" in request,
   };
 }
 
-function summarizeAgentMcpDebugBody(body: unknown): Record<string, unknown> {
-  if (!Array.isArray(body)) {
-    return summarizeAgentMcpDebugMessage(body);
-  }
-
-  const messages = body.slice(0, MAX_MCP_DEBUG_BATCH_ITEMS).map(summarizeAgentMcpDebugMessage);
+function describeMcpDebugPayload(value: unknown): Record<string, unknown> {
+  if (!Array.isArray(value)) return describeMcpRequest(value);
+  const sampled = value.slice(0, MCP_DEBUG_BATCH_LIMIT).map(describeMcpRequest);
   return {
-    type: "batch",
-    count: body.length,
-    messages,
-    ...(body.length > messages.length ? { omitted: body.length - messages.length } : {}),
+    shape: "batch",
+    count: value.length,
+    sampled,
+    ...(sampled.length < value.length ? { skipped: value.length - sampled.length } : {}),
   };
 }
 
@@ -387,16 +395,25 @@ export interface PaseoDaemonConfig {
   mcpEnabled?: boolean;
   mcpInjectIntoAgents?: boolean;
   browserToolsEnabled?: boolean;
+  git?: {
+    maxProcessesPerSecond: number;
+    maxProcessConcurrency: number;
+  };
   autoArchiveAfterMerge?: boolean;
   enableTerminalAgentHooks?: boolean;
   appendSystemPrompt?: string;
   terminalProfiles?: TerminalProfile[];
+  agentProfiles?: AgentProfile[];
+  skillSelection?: AgentSkillSelection;
+  pluginsEnabled?: boolean;
+  plugins?: Record<string, PluginSource>;
   staticDir: string;
   mcpDebug: boolean;
   isDev?: boolean;
   agentClients: Partial<Record<AgentProvider, AgentClient>>;
   agentStoragePath: string;
   relayEnabled?: boolean;
+  relayEnabledMutable?: boolean;
   relayEndpoint?: string;
   relayPublicEndpoint?: string;
   relayUseTls?: boolean;
@@ -419,6 +436,7 @@ export interface PaseoDaemonConfig {
   dictationFinalTimeoutMs?: number;
   downloadTokenTtlMs?: number;
   agentProviderSettings?: AgentProviderRuntimeSettingsMap;
+  providerCatalogRefreshTimeoutMs?: number;
   metadataGeneration?: {
     providers?: Array<{
       provider: string;
@@ -431,6 +449,13 @@ export interface PaseoDaemonConfig {
   onLifecycleIntent?: (intent: DaemonLifecycleIntent) => void;
   pushNotificationSender?: PushNotificationSender;
   managedProcesses?: ManagedProcessRegistry;
+  configReload?: {
+    env: NodeJS.ProcessEnv;
+    cli?: CliConfigOverrides;
+    overrideControlledPaths: string[];
+    relayEnabledFallback: boolean;
+    startupPersisted: PersistedConfig;
+  };
 }
 
 export interface PaseoDaemon {
@@ -451,6 +476,10 @@ export interface PaseoDaemonDependencies {
   hubRelationshipClock?: HubRelationshipClock;
   hubRelationshipRetryPolicy?: HubRelationshipRetryPolicy;
   createHubDaemonId?: () => string;
+  serverFeatureOverrides?: {
+    daemonStatusRpc?: boolean;
+    relayConfig?: boolean;
+  };
 }
 
 function createBootstrapManagedProcessRegistry(
@@ -495,21 +524,22 @@ function resolveExpressTrustProxySetting(config: PaseoDaemonConfig): true | stri
 }
 
 function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDaemonConfig {
-  const providers: MutableDaemonConfig["providers"] = Object.fromEntries(
-    Object.entries(config.providerOverrides ?? {}).map(([providerId, override]) => {
-      const providerConfig: MutableDaemonConfig["providers"][string] = {};
-      if (override.enabled !== undefined) {
-        providerConfig.enabled = override.enabled;
-      }
-      if (override.additionalModels) {
-        providerConfig.additionalModels = override.additionalModels;
-      }
-      return [providerId, providerConfig];
-    }),
-  );
+  const providers = config.providerOverrides ?? {};
 
   const initialConfig: MutableDaemonConfig = {
-    mcp: { injectIntoAgents: config.mcpInjectIntoAgents ?? true },
+    relay: { enabled: config.relayEnabled ?? true },
+    mcp: {
+      enabled: config.mcpEnabled ?? true,
+      injectIntoAgents: config.mcpInjectIntoAgents ?? true,
+    },
+    ...(config.hostnames !== undefined ? { hostnames: config.hostnames } : {}),
+    cors: { allowedOrigins: config.corsAllowedOrigins },
+    trustedProxies: config.trustedProxies ?? ["loopback"],
+    git: config.git ?? resolveGitProcessPolicy({ env: process.env }),
+    app: { baseUrl: config.appBaseUrl ?? "https://app.paseo.sh" },
+    ...(config.providerCatalogRefreshTimeoutMs !== undefined
+      ? { catalogRefreshTimeoutMs: config.providerCatalogRefreshTimeoutMs }
+      : {}),
     browserTools: { enabled: config.browserToolsEnabled ?? false },
     providers,
     metadataGeneration: {
@@ -518,10 +548,17 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
     autoArchiveAfterMerge: config.autoArchiveAfterMerge ?? false,
     enableTerminalAgentHooks: config.enableTerminalAgentHooks ?? false,
     appendSystemPrompt: config.appendSystemPrompt ?? "",
+    pluginsEnabled: config.pluginsEnabled ?? false,
+    plugins: config.plugins ?? {},
+    skills: { selection: config.skillSelection },
   };
 
   if (config.terminalProfiles !== undefined) {
     initialConfig.terminalProfiles = config.terminalProfiles;
+  }
+
+  if (config.agentProfiles !== undefined) {
+    initialConfig.agentProfiles = config.agentProfiles;
   }
 
   return initialConfig;
@@ -532,17 +569,45 @@ export async function createPaseoDaemon(
   rootLogger: Logger,
   dependencies: PaseoDaemonDependencies = {},
 ): Promise<PaseoDaemon> {
+  configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
+  const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
+  await rm(obsoleteTimelineDirectory, { recursive: true, force: true }).catch((error) => {
+    logger.warn(
+      { err: error, path: obsoleteTimelineDirectory },
+      "Failed to remove obsolete agent timeline data",
+    );
+  });
   const bootstrapStart = performance.now();
   const elapsed = () => `${(performance.now() - bootstrapStart).toFixed(0)}ms`;
   const daemonVersion = config.daemonVersion ?? resolveDaemonVersion(import.meta.url);
-  const daemonConfigStore = new DaemonConfigStore(
-    config.paseoHome,
-    createInitialMutableDaemonConfig(config),
-    logger,
-  );
+  const initialMutableConfig = createInitialMutableDaemonConfig(config);
+  const daemonConfigStore = new DaemonConfigStore(config.paseoHome, initialMutableConfig, logger, {
+    relayEnabledMutable: config.relayEnabledMutable ?? true,
+    startupPersisted: config.configReload?.startupPersisted,
+    reloadSource: {
+      resolve: (persisted) => {
+        const reloaded = resolveConfigFromPersisted(config.paseoHome, persisted, {
+          env: config.configReload?.env ?? process.env,
+          cli: config.configReload?.cli,
+          relayEnabledFallback: config.configReload?.relayEnabledFallback,
+        });
+        return {
+          mutable: createInitialMutableDaemonConfig(reloaded),
+          overrideControlledPaths: reloaded.configReload?.overrideControlledPaths ?? [],
+        };
+      },
+    },
+  });
+  const orchestrationSkills = createOrchestrationSkills(daemonConfigStore);
+  void orchestrationSkills.autoUpdate().catch((error) => {
+    logger.error({ err: error }, "Failed to maintain orchestration skills at startup");
+  });
   const browserToolsPolicy = new DaemonConfigBrowserToolsPolicy(daemonConfigStore);
   const browserToolsBroker = new BrowserToolsBroker({});
+  const pluginRuntime = new PluginService(logger, daemonConfigStore, daemonVersion, {
+    managedSources: new ManagedPluginSources(config.paseoHome),
+  });
 
   const serverId = getOrCreateServerId(config.paseoHome, { logger });
   const daemonKeyPair = await loadOrCreateDaemonKeyPair(config.paseoHome, logger);
@@ -553,7 +618,7 @@ export async function createPaseoDaemon(
   void reconcileManagedProcessLedger(managedProcesses, logger).catch((error) => {
     logger.warn({ err: error }, "Failed to reconcile managed helper process ledger");
   });
-  let relayTransport: RelayTransportController | null = null;
+  let relayRuntime: RelayRuntime | null = null;
 
   const staticDir = config.staticDir;
   const downloadTokenTtlMs = config.downloadTokenTtlMs ?? 60000;
@@ -575,6 +640,9 @@ export async function createPaseoDaemon(
 
   const app = express();
   app.set("trust proxy", resolveExpressTrustProxySetting(config));
+  daemonConfigStore.onFieldChange("trustedProxies", (value) => {
+    app.set("trust proxy", value ?? ["loopback"]);
+  });
   let boundListenTarget: ListenTarget | null = null;
   let workspaceRegistry: FileBackedWorkspaceRegistry | null = null;
   const terminalManager = createConfiguredTerminalManager({
@@ -590,14 +658,22 @@ export async function createPaseoDaemon(
     publicBaseUrl: serviceProxyPublicBaseUrl,
   });
   const scriptRuntimeStore = new WorkspaceScriptRuntimeStore();
-  const configuredHostnames = config.hostnames ?? config.allowedHosts;
+  const workspaceSetupRuntime = new WorkspaceSetupRuntime();
+  let configuredHostnames = config.hostnames ?? config.allowedHosts;
+  let appBaseUrl = config.appBaseUrl ?? "https://app.paseo.sh";
+  daemonConfigStore.onFieldChange("hostnames", (value) => {
+    configuredHostnames = value as HostnamesConfig | undefined;
+  });
+  daemonConfigStore.onFieldChange("app.baseUrl", (value) => {
+    appBaseUrl = typeof value === "string" ? value : "https://app.paseo.sh";
+  });
   let wsServer: VoiceAssistantWebSocketServer | null = null;
   let serviceProxyListenTarget: ListenTarget | null = null;
   const scriptHealthMonitor = new ScriptHealthMonitor({
     serviceProxy,
     onChange: createScriptStatusEmitter({
       sessions: () =>
-        wsServer?.listTrustedSessions().map((session) => ({
+        wsServer?.listSessions().map((session) => ({
           emit: (message) => session.emitServerMessage(message),
         })) ?? [],
       serviceProxy,
@@ -636,8 +712,7 @@ export async function createPaseoDaemon(
   }
 
   // CORS - allow same-origin + configured origins
-  const allowedOrigins = new Set([
-    ...config.corsAllowedOrigins,
+  const fixedAllowedOrigins = [
     // Packaged desktop renderers use the custom paseo:// protocol scheme.
     "paseo://app",
     // For TCP, add localhost variants
@@ -648,7 +723,14 @@ export async function createPaseoDaemon(
           `http://127.0.0.1:${listenTarget.port}`,
         ]
       : []),
-  ]);
+  ];
+  const allowedOrigins = new Set([...config.corsAllowedOrigins, ...fixedAllowedOrigins]);
+  daemonConfigStore.onFieldChange("cors.allowedOrigins", (value) => {
+    allowedOrigins.clear();
+    for (const origin of [...((value as string[] | undefined) ?? []), ...fixedAllowedOrigins]) {
+      allowedOrigins.add(origin);
+    }
+  });
 
   app.use((req, res, next) => {
     const origin = req.headers.origin;
@@ -781,9 +863,9 @@ export async function createPaseoDaemon(
     path.join(config.paseoHome, "projects", "workspaces.json"),
     logger,
   );
-  const chatService = new FileBackedChatService({
+  const workspaceLabelService = createWorkspaceLabelService({
     paseoHome: config.paseoHome,
-    logger,
+    workspaceRegistry,
   });
   const github = createGitHubService();
   const workspaceGitService = new WorkspaceGitServiceImpl({
@@ -795,20 +877,36 @@ export async function createPaseoDaemon(
     },
   });
   const workspaceProvisioning = createWorkspaceProvisioningService({
+    serverId,
     projectRegistry,
     workspaceRegistry,
     workspaceGitService,
     logger,
   });
-  const providerSnapshotLogger = logger.child({ module: "provider-snapshot-manager" });
-  const providerSnapshotManager = new ProviderSnapshotManager({
-    logger: providerSnapshotLogger,
-    runtimeSettings: config.agentProviderSettings,
-    providerOverrides: config.providerOverrides,
-    workspaceGitService,
-    managedProcesses,
-    isDev: config.isDev === true,
-    extraClients: config.agentClients,
+  const agentProviderRuntime = await createAgentProviderRuntime({
+    paseoHome: config.paseoHome,
+    logger,
+    snapshotManager: {
+      refreshTimeoutMs: config.providerCatalogRefreshTimeoutMs,
+      runtimeSettings: config.agentProviderSettings,
+      providerOverrides: config.providerOverrides,
+      workspaceGitService,
+      managedProcesses,
+      isDev: config.isDev === true,
+      extraClients: config.agentClients,
+    },
+  });
+  const providerSnapshotManager = agentProviderRuntime.snapshotManager;
+  daemonConfigStore.onFieldChange("catalogRefreshTimeoutMs", (value) => {
+    providerSnapshotManager.setRefreshTimeoutMs(typeof value === "number" ? value : undefined);
+  });
+  daemonConfigStore.onFieldChange("git.maxProcessesPerSecond", () => {
+    const git = daemonConfigStore.get().git;
+    if (git) configureGitProcessPolicy(git);
+  });
+  daemonConfigStore.onFieldChange("git.maxProcessConcurrency", () => {
+    const git = daemonConfigStore.get().git;
+    if (git) configureGitProcessPolicy(git);
   });
   const initialAgentManagerState = providerSnapshotManager.getAgentManagerProviderState();
   const agentManager = new AgentManager({
@@ -820,6 +918,8 @@ export async function createPaseoDaemon(
       workspaceGitService.onWorkspaceStateMayHaveChanged(cwd);
     },
     mcpAuthToken: agentMcpAuthToken,
+    resolvePaseoToolPolicy: (provider) =>
+      resolvePaseoToolPolicy(provider, daemonConfigStore.get().providers),
     logger,
   });
 
@@ -831,6 +931,7 @@ export async function createPaseoDaemon(
   await agentStorage.initialize();
   logger.info({ elapsed: elapsed() }, "Agent storage initialized");
   await bootstrapWorkspaceRegistries({
+    serverId,
     paseoHome: config.paseoHome,
     agentStorage,
     projectRegistry,
@@ -838,12 +939,14 @@ export async function createPaseoDaemon(
     workspaceGitService,
     logger,
   });
+  await workspaceLabelService.initialize();
   logger.info({ elapsed: elapsed() }, "Workspace registries bootstrapped");
   const teardownArchivedWorkspaceRuntime = (workspaceId: string): void => {
     scriptRuntimeStore.removeForWorkspace(workspaceId);
     releaseWorkspaceServicePortPlan(workspaceId);
   };
   const workspaceReconciliation = new WorkspaceReconciliationService({
+    serverId,
     projectRegistry,
     workspaceRegistry,
     logger,
@@ -852,27 +955,29 @@ export async function createPaseoDaemon(
     onWorkspaceArchived: teardownArchivedWorkspaceRuntime,
     onWorkspacesChanged: async (workspaceIds) => {
       await fanOutReconciledWorkspaceUpdates({
-        sessions: wsServer?.listTrustedSessions() ?? [],
+        sessions: wsServer?.listSessions() ?? [],
         workspaceIds,
         logger,
       });
     },
   });
   await workspaceReconciliation.start();
-  void workspaceReconciliation.runOnce().catch((error) => {
+  void workspaceReconciliation.reconcileNow().catch((error) => {
     logger.warn({ err: error }, "Initial workspace reconciliation failed");
   });
-  await chatService.initialize();
-  logger.info({ elapsed: elapsed() }, "Chat service initialized");
   const checkoutDiffManager = new CheckoutDiffManager({
     logger,
     paseoHome: config.paseoHome,
     workspaceGitService,
   });
-  const archiveWorkspaceRecordExternal = async (workspaceId: string) => {
+  const archiveWorkspaceRecordExternal = async (
+    workspaceId: string,
+    context?: WorkspaceArchiveContext,
+  ) => {
     const existingWorkspace = await archivePersistedWorkspaceRecord({
       workspaceId,
       workspaceRegistry,
+      context,
     });
     if (!existingWorkspace || existingWorkspace.archivedAt) return;
     teardownArchivedWorkspaceRuntime(workspaceId);
@@ -914,20 +1019,20 @@ export async function createPaseoDaemon(
   };
   const markWorkspaceArchivingExternal = (workspaceIds: Iterable<string>, archivingAt: string) => {
     const workspaceIdList = Array.from(workspaceIds);
-    for (const session of wsServer?.listTrustedSessions() ?? []) {
+    for (const session of wsServer?.listSessions() ?? []) {
       session.markWorkspaceArchivingForExternalMutation(workspaceIdList, archivingAt);
     }
   };
   const clearWorkspaceArchivingExternal = (workspaceIds: Iterable<string>) => {
     const workspaceIdList = Array.from(workspaceIds);
-    for (const session of wsServer?.listTrustedSessions() ?? []) {
+    for (const session of wsServer?.listSessions() ?? []) {
       session.clearWorkspaceArchivingForExternalMutation(workspaceIdList);
     }
   };
   const emitWorkspaceUpdatesExternal = async (workspaceIds: Iterable<string>) => {
     const workspaceIdList = Array.from(workspaceIds);
     await Promise.all(
-      (wsServer?.listTrustedSessions() ?? []).map((session) =>
+      (wsServer?.listSessions() ?? []).map((session) =>
         session.emitWorkspaceUpdatesForExternalWorkspaceIds(workspaceIdList),
       ),
     );
@@ -976,6 +1081,8 @@ export async function createPaseoDaemon(
     logger,
     findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
     listActiveWorkspaces: listActiveWorkspacesExternal,
+    getAutoArchivedChangeRequestUrl: async (workspaceId) =>
+      (await workspaceRegistry.get(workspaceId))?.autoArchivedChangeRequestUrl ?? null,
     archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
     markWorkspaceArchiving: markWorkspaceArchivingExternal,
     clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
@@ -1005,7 +1112,7 @@ export async function createPaseoDaemon(
         warmWorkspaceGitData: async (workspace) => {
           await Promise.all(
             wsServer
-              ?.listTrustedSessions()
+              ?.listSessions()
               .map((session) => session.warmWorkspaceGitDataForWorkspace(workspace)) ?? [],
           );
         },
@@ -1015,6 +1122,10 @@ export async function createPaseoDaemon(
           await emitWorkspaceUpdatesExternal([workspaceId]);
         },
         cacheWorkspaceSetupSnapshot: () => {},
+        startWorkspaceSetup: (workspaceId, operation) =>
+          workspaceSetupRuntime.start(workspaceId, operation),
+        assertWorkspaceAutomationAllowed: (guardedWorkspaceId) =>
+          assertWorkspaceAutomationAllowedForWorkspace(workspaceRegistry, guardedWorkspaceId),
         emit: emitExternalSessionMessage,
         sessionLogger: logger,
         terminalManager,
@@ -1055,12 +1166,16 @@ export async function createPaseoDaemon(
         agentStorage,
         findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
         listActiveWorkspaces: listActiveWorkspacesExternal,
+        getWorkspace: (workspaceIdToGet) => workspaceRegistry.get(workspaceIdToGet),
         archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
         emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
         markWorkspaceArchiving: markWorkspaceArchivingExternal,
         clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
         killTerminalsForWorkspace: (workspaceIdToKill) =>
           killTerminalsForWorkspace({ terminalManager, sessionLogger: logger }, workspaceIdToKill),
+        stopWorkspaceSetup: (workspaceIdToStop) => workspaceSetupRuntime.stop(workspaceIdToStop),
+        assertWorkspaceAutomationAllowed: (guardedWorkspaceId) =>
+          assertWorkspaceAutomationAllowedForWorkspace(workspaceRegistry, guardedWorkspaceId),
         sessionLogger: logger,
       },
       { scope: { kind: "workspace", workspaceId }, requestId },
@@ -1079,7 +1194,7 @@ export async function createPaseoDaemon(
     listActiveWorkspaces: listActiveWorkspacesExternal,
     archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
     emit: emitExternalSessionMessage,
-    emitAgentRemove: () => undefined,
+    emitAgentRemove: async () => undefined,
     emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
     markWorkspaceArchiving: markWorkspaceArchivingExternal,
     clearWorkspaceArchiving: clearWorkspaceArchivingExternal,
@@ -1089,6 +1204,7 @@ export async function createPaseoDaemon(
   });
   const hubRelationships = new HubRelationshipController({
     paseoHome: config.paseoHome,
+    hostname: getHostname(),
     serverId,
     daemonPublicKey: daemonKeyPair.publicKeyB64,
     logger,
@@ -1098,7 +1214,27 @@ export async function createPaseoDaemon(
     createDaemonId: dependencies.createHubDaemonId,
     attachSocket: async (socket, options) => {
       if (!wsServer) throw new Error("WebSocket server is not running");
-      await wsServer.attachHubSocket(socket, options);
+      await wsServer.attachExternalSocket(
+        socket,
+        { transport: "hub", hubDaemonId: options.daemonId },
+        {
+          principalId: options.principalId,
+          permissions: options.permissions,
+          hubExecutionAgents: options.agents,
+        },
+        options.sessionProtocol === "legacy"
+          ? {
+              type: "hello",
+              clientId: `hub:${options.daemonId}`,
+              clientType: "hub",
+              protocolVersion: 1,
+            }
+          : undefined,
+      );
+    },
+    updateAttachedPermissions: (principalId, permissions) => {
+      if (!wsServer) throw new Error("WebSocket server is not running");
+      wsServer.updatePrincipalPermissions(principalId, permissions);
     },
     createExecutionAgents: (daemonId) =>
       new DaemonExecutions({
@@ -1107,24 +1243,12 @@ export async function createPaseoDaemon(
         agentStorage,
         createAgent,
         interruptAgent: (agentId) => cancelAgentRunCommand({ agentManager, logger }, agentId),
-        archiveAgent: (agentId) =>
-          archiveAgentCommand({ agentManager, agentStorage, logger }, agentId),
-        listActiveWorkspaces: listActiveWorkspacesExternal,
         archiveWorkspace: archiveWorkspaceByIdExternal,
         cleanupFailedCreate: (input) =>
           hubAgentLifecycle.cleanupCreatedWorktreeAfterFailedAgentCreate(input),
       }),
   });
 
-  const loopService = new LoopService({
-    paseoHome: config.paseoHome,
-    logger,
-    agentManager,
-    createAgent,
-    ensureWorkspaceForCreate: ensureWorkspaceForCreateAndBroadcastExternal,
-  });
-  await loopService.initialize();
-  logger.info({ elapsed: elapsed() }, "Loop service initialized");
   const createScheduleLocalWorkspaceExternal = async (input: {
     cwd: string;
     firstAgentContext: FirstAgentContext;
@@ -1163,6 +1287,7 @@ export async function createPaseoDaemon(
         agentStorage,
         findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
         listActiveWorkspaces: listActiveWorkspacesExternal,
+        getWorkspace: (workspaceIdToGet) => workspaceRegistry.get(workspaceIdToGet),
         archiveWorkspaceRecord: archiveWorkspaceRecordExternal,
         emitWorkspaceUpdatesForWorkspaceIds: emitWorkspaceUpdatesExternal,
         markWorkspaceArchiving: markWorkspaceArchivingExternal,
@@ -1175,6 +1300,9 @@ export async function createPaseoDaemon(
             },
             workspaceIdToKill,
           ),
+        stopWorkspaceSetup: (workspaceIdToStop) => workspaceSetupRuntime.stop(workspaceIdToStop),
+        assertWorkspaceAutomationAllowed: (guardedWorkspaceId) =>
+          assertWorkspaceAutomationAllowedForWorkspace(workspaceRegistry, guardedWorkspaceId),
         sessionLogger: logger,
       },
       {
@@ -1194,39 +1322,6 @@ export async function createPaseoDaemon(
     archiveWorkspace: archiveScheduleWorkspaceExternal,
   });
   await scheduleService.start();
-  let inFlightIdleAgentCollection: Promise<void> | null = null;
-  const collectIdleAgentRuntimes = async () => {
-    const protectedAgentIds = await scheduleService.listActiveAgentTargetIds();
-    const cutoff = new Date(Date.now() - IDLE_AGENT_RUNTIME_TTL_MS);
-    const result = await agentManager.collectIdleAgents({ cutoff, protectedAgentIds });
-    for (const collected of result.collected) {
-      logger.info(collected, "Collected idle agent runtime");
-    }
-    for (const failure of result.failures) {
-      const { error, ...context } = failure;
-      logger.warn({ ...context, err: error }, "Failed to collect idle agent runtime");
-    }
-  };
-  const runIdleAgentCollection = () => {
-    if (inFlightIdleAgentCollection) {
-      return;
-    }
-    const collection = collectIdleAgentRuntimes()
-      .catch((error) => {
-        logger.warn({ err: error }, "Idle agent runtime sweep failed");
-      })
-      .finally(() => {
-        if (inFlightIdleAgentCollection === collection) {
-          inFlightIdleAgentCollection = null;
-        }
-      });
-    inFlightIdleAgentCollection = collection;
-  };
-  const idleAgentCollectionTimer = setInterval(
-    runIdleAgentCollection,
-    IDLE_AGENT_RUNTIME_SWEEP_INTERVAL_MS,
-  );
-  idleAgentCollectionTimer.unref();
   agentManager.setAgentArchivedCallback(async (agentId) => {
     try {
       await scheduleService.completeForAgent(agentId);
@@ -1255,6 +1350,7 @@ export async function createPaseoDaemon(
     getDaemonTcpPort: () => (boundListenTarget?.type === "tcp" ? boundListenTarget.port : null),
     scheduleService,
     providerSnapshotManager,
+    daemonConfigStore,
     github,
     workspaceGitService,
     findWorkspaceIdForCwd: findWorkspaceIdForCwdExternal,
@@ -1288,6 +1384,8 @@ export async function createPaseoDaemon(
       // status updates fan out to every connected client.
       emit: (message) => wsServer?.broadcast(wrapSessionMessage(message)),
       spawnWorkspaceScript,
+      assertAutomationAllowed: (workspaceId) =>
+        assertWorkspaceAutomationAllowedForWorkspace(workspaceRegistry, workspaceId),
       globalServicePorts: loadPersistedConfig(config.paseoHome).worktrees?.servicePorts,
     }),
     markWorkspaceArchiving: markWorkspaceArchivingExternal,
@@ -1296,6 +1394,9 @@ export async function createPaseoDaemon(
     createPaseoWorktree: createAgentCommandDependencies.createPaseoWorktree,
     browserToolsEnabled: browserToolsPolicy.isEnabled(),
     browserToolsBroker,
+    paseoToolPolicy:
+      runtime.paseoToolPolicy ??
+      (runtime.callerAgentId ? agentManager.getPaseoToolPolicy(runtime.callerAgentId) : undefined),
     paseoHome: config.paseoHome,
     worktreesRoot: config.worktreesRoot,
     callerAgentId: runtime.callerAgentId,
@@ -1307,17 +1408,26 @@ export async function createPaseoDaemon(
   });
   const createAgentToolCatalog = (runtime: PaseoToolRuntimeContext) =>
     createPaseoToolCatalog(createAgentToolHostDependencies(runtime));
+  const setAgentProviderToolsEnabled = (enabled: boolean) => {
+    agentProviderRuntime.setPaseoToolCatalog(enabled ? createAgentToolCatalog({}) : null);
+  };
   agentManager.setPaseoToolCatalogFactory(createAgentToolCatalog);
   agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
+  setAgentProviderToolsEnabled(config.mcpEnabled !== false && config.mcpInjectIntoAgents !== false);
 
-  const mcpEnabled = config.mcpEnabled ?? true;
+  let mcpEnabled = config.mcpEnabled ?? true;
   let agentMcpBaseUrl: string | null = null;
-  if (mcpEnabled) {
+  {
     const agentMcpRoute = "/mcp/agents";
 
     const createAgentMcpSession = async (callerAgentId?: string) => {
       const agentMcpServer = await createAgentMcpServer(
-        createAgentToolHostDependencies({ callerAgentId }),
+        createAgentToolHostDependencies({
+          callerAgentId,
+          paseoToolPolicy: callerAgentId
+            ? agentManager.getPaseoToolPolicy(callerAgentId)
+            : undefined,
+        }),
       );
 
       // Stateless mode: each HTTP request builds a fresh server + transport that is
@@ -1345,6 +1455,10 @@ export async function createPaseoDaemon(
       req: express.Request,
       res: express.Response,
     ): Promise<void> => {
+      if (!mcpEnabled) {
+        res.status(404).json({ error: "Agent MCP endpoint disabled" });
+        return;
+      }
       // This route is exempt from the global daemon-password middleware, so it
       // authenticates here using the injected capability token (or a valid
       // daemon password). Without this, a password-protected daemon would be
@@ -1365,8 +1479,8 @@ export async function createPaseoDaemon(
             method: req.method,
             url: req.originalUrl,
             sessionId: req.header("mcp-session-id"),
-            authorization: req.header("authorization") ? REDACTED_LOG_VALUE : undefined,
-            body: summarizeAgentMcpDebugBody(req.body),
+            authorization: req.header("authorization") ? MCP_DEBUG_SECRET : undefined,
+            body: describeMcpDebugPayload(req.body),
           },
           "Agent MCP request",
         );
@@ -1426,9 +1540,7 @@ export async function createPaseoDaemon(
     app.post(agentMcpRoute, handleAgentMcpRequest);
     app.get(agentMcpRoute, handleAgentMcpRequest);
     app.delete(agentMcpRoute, handleAgentMcpRequest);
-    logger.info({ route: agentMcpRoute }, "Agent MCP server mounted on main app");
-  } else {
-    logger.info("Agent MCP HTTP endpoint disabled");
+    logger.info({ route: agentMcpRoute, enabled: mcpEnabled }, "Agent MCP route mounted");
   }
 
   const speechService = createSpeechService({
@@ -1469,13 +1581,22 @@ export async function createPaseoDaemon(
           mainStarted = true;
           const logAndResolve = async () => {
             boundListenTarget = resolveBoundListenTarget(listenTarget, httpServer);
-            const mcpBaseUrl = mcpEnabled ? createAgentMcpBaseUrl(boundListenTarget) : null;
-            agentMcpBaseUrl = config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
+            const mcpBaseUrl = createAgentMcpBaseUrl(boundListenTarget);
+            agentMcpBaseUrl =
+              !mcpEnabled || config.mcpInjectIntoAgents === false ? null : mcpBaseUrl;
             agentManager.setMcpBaseUrl(agentMcpBaseUrl);
-            agentManager.setPaseoToolsEnabled(config.mcpInjectIntoAgents !== false);
+            agentManager.setPaseoToolsEnabled(mcpEnabled && config.mcpInjectIntoAgents !== false);
+            daemonConfigStore.onFieldChange("mcp.enabled", (value) => {
+              mcpEnabled = value !== false;
+              const inject = daemonConfigStore.get().mcp.injectIntoAgents !== false;
+              agentManager.setMcpBaseUrl(mcpEnabled && inject ? mcpBaseUrl : null);
+              agentManager.setPaseoToolsEnabled(mcpEnabled && inject);
+              setAgentProviderToolsEnabled(mcpEnabled && inject);
+            });
             daemonConfigStore.onFieldChange("mcp.injectIntoAgents", (value) => {
-              agentManager.setMcpBaseUrl(value ? mcpBaseUrl : null);
-              agentManager.setPaseoToolsEnabled(value !== false);
+              agentManager.setMcpBaseUrl(mcpEnabled && value ? mcpBaseUrl : null);
+              agentManager.setPaseoToolsEnabled(mcpEnabled && value !== false);
+              setAgentProviderToolsEnabled(mcpEnabled && value !== false);
             });
             daemonConfigStore.onFieldChange("appendSystemPrompt", (value) => {
               agentManager.setAppendSystemPrompt(typeof value === "string" ? value : "");
@@ -1485,8 +1606,6 @@ export async function createPaseoDaemon(
             const relayPublicEndpoint = config.relayPublicEndpoint ?? relayEndpoint;
             const relayUseTls = config.relayUseTls ?? relayEndpoint === "relay.paseo.sh:443";
             const relayPublicUseTls = config.relayPublicUseTls ?? relayUseTls;
-            const appBaseUrl = config.appBaseUrl ?? "https://app.paseo.sh";
-
             if (boundListenTarget.type === "tcp") {
               logger.info(
                 {
@@ -1521,7 +1640,13 @@ export async function createPaseoDaemon(
               config.paseoHome,
               daemonConfigStore,
               mcpBaseUrl,
-              { allowedOrigins, hostnames: configuredHostnames },
+              {
+                getAllowedOrigins: () => allowedOrigins,
+                getHostnames: () => configuredHostnames,
+                daemonStatusRpc: dependencies.serverFeatureOverrides?.daemonStatusRpc,
+                relayConfig: dependencies.serverFeatureOverrides?.relayConfig,
+                startPaused: true,
+              },
               workspaceAutoName,
               config.auth,
               speechService,
@@ -1539,8 +1664,6 @@ export async function createPaseoDaemon(
               },
               projectRegistry,
               workspaceRegistry,
-              chatService,
-              loopService,
               scheduleService,
               checkoutDiffManager,
               serviceProxy,
@@ -1556,49 +1679,50 @@ export async function createPaseoDaemon(
               {
                 listen: formatListenTarget(boundListenTarget ?? listenTarget),
                 worktreesRoot: config.worktreesRoot,
-                appBaseUrl: config.appBaseUrl,
-                desktopManaged: config.desktopManaged === true,
-                relay: {
-                  enabled: relayEnabled,
-                  endpoint: relayEndpoint,
-                  publicEndpoint: relayPublicEndpoint,
-                  useTls: relayUseTls,
-                  publicUseTls: relayPublicUseTls,
+                get appBaseUrl() {
+                  return appBaseUrl;
                 },
+                desktopManaged: config.desktopManaged === true,
+                getRelayConfig: () =>
+                  relayRuntime?.getConfig() ?? {
+                    enabled: daemonConfigStore.get().relay?.enabled ?? relayEnabled,
+                    endpoint: relayEndpoint,
+                    publicEndpoint: relayPublicEndpoint,
+                    useTls: relayUseTls,
+                    publicUseTls: relayPublicUseTls,
+                  },
               },
               serviceProxyPublicBaseUrl,
               browserToolsBroker,
               hubRelationships,
+              workspaceSetupRuntime,
+              pluginRuntime,
+              orchestrationSkills,
+              workspaceLabelService,
             );
+            pluginRuntime.bindPaseoSessionHost(wsServer);
+            await pluginRuntime.start();
+            wsServer.beginAcceptingConnections();
+            relayRuntime = createRelayRuntime({
+              config: {
+                enabled: relayEnabled,
+                endpoint: relayEndpoint,
+                publicEndpoint: relayPublicEndpoint,
+                useTls: relayUseTls,
+                publicUseTls: relayPublicUseTls,
+              },
+              logger,
+              attachSocket: async (ws, metadata) => {
+                if (!wsServer) throw new Error("WebSocket server is not ready");
+                await wsServer.attachExternalSocket(ws, metadata);
+              },
+              serverId,
+              daemonKeyPair: daemonKeyPair.keyPair,
+            });
+            daemonConfigStore.onFieldChange("relay.enabled", (value) => {
+              relayRuntime?.setEnabled(value === true);
+            });
             await hubRelationships.start();
-
-            if (relayEnabled) {
-              const offer = await createConnectionOfferV2({
-                serverId,
-                daemonPublicKeyB64: daemonKeyPair.publicKeyB64,
-                relay: {
-                  endpoint: relayPublicEndpoint,
-                  useTls: relayPublicUseTls,
-                },
-              });
-
-              encodeOfferToFragmentUrl({ offer, appBaseUrl });
-
-              relayTransport?.stop().catch(() => undefined);
-              relayTransport = startRelayTransport({
-                logger,
-                attachSocket: (ws, metadata) => {
-                  if (!wsServer) {
-                    throw new Error("WebSocket server not initialized");
-                  }
-                  return wsServer.attachExternalSocket(ws, metadata);
-                },
-                relayEndpoint,
-                relayUseTls,
-                serverId,
-                daemonKeyPair: daemonKeyPair.keyPair,
-              });
-            }
           };
 
           logAndResolve().then(resolve, reject);
@@ -1621,7 +1745,9 @@ export async function createPaseoDaemon(
       speechService.start();
       scriptHealthMonitor.start();
     } catch (error) {
+      await pluginRuntime.stopAllPlugins().catch(() => undefined);
       await serviceProxy.stopStandalone().catch(() => undefined);
+      await agentProviderRuntime.shutdown().catch(() => undefined);
       if (mainStarted) {
         httpServer.closeAllConnections();
         await new Promise<void>((resolve) => httpServer.close(() => resolve()));
@@ -1631,11 +1757,10 @@ export async function createPaseoDaemon(
   };
 
   const stop = async () => {
+    await pluginRuntime.stopAllPlugins();
     await hubRelationships.stop();
     workspaceReconciliation.dispose();
     scriptHealthMonitor.stop();
-    clearInterval(idleAgentCollectionTimer);
-    await inFlightIdleAgentCollection;
     // Freeze both ingress and registration before taking the agent closure snapshot.
     wsServer?.prepareForShutdown();
     agentManager.prepareForShutdown();
@@ -1643,11 +1768,11 @@ export async function createPaseoDaemon(
     await agentManager.flushForShutdown().catch(() => undefined);
     detachAgentStoragePersistence();
     await agentStorage.flush().catch(() => undefined);
-    await providerSnapshotManager.shutdown();
+    await agentProviderRuntime.shutdown();
     terminalManager.killAll();
-    speechService.stop();
+    await speechService.stop();
     await scheduleService.stop().catch(() => undefined);
-    await relayTransport?.stop().catch(() => undefined);
+    await relayRuntime?.stop().catch(() => undefined);
     if (wsServer) {
       await wsServer.close();
     }

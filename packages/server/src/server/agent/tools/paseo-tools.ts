@@ -2,8 +2,10 @@ import { z } from "zod";
 import { ensureValidJson } from "../../json-utils.js";
 import type { Logger } from "pino";
 
-import type { AgentMode, AgentProvider } from "../agent-sdk-types.js";
+import type { AgentMode, AgentProvider, AgentSessionConfig } from "../agent-sdk-types.js";
 import type { AgentManager } from "../agent-manager.js";
+import { AgentProfileSchema } from "@getpaseo/protocol/messages";
+import type { DaemonConfigStore } from "../../daemon-config-store.js";
 import {
   AgentFeatureSchema,
   AgentPermissionRequestPayloadSchema,
@@ -90,6 +92,8 @@ import type {
   PaseoToolExecutionContext,
   PaseoToolResult,
 } from "./types.js";
+import type { ProviderPaseoToolsPolicy } from "@getpaseo/protocol/provider-config";
+import { isPaseoToolEnabled } from "../paseo-tool-policy.js";
 
 export interface PaseoToolHostDependencies {
   agentManager: AgentManager;
@@ -98,6 +102,7 @@ export interface PaseoToolHostDependencies {
   getDaemonTcpPort?: () => number | null;
   scheduleService?: ScheduleService | null;
   providerSnapshotManager: ProviderSnapshotManager;
+  daemonConfigStore?: Pick<DaemonConfigStore, "get">;
   github?: ForgeService;
   workspaceGitService?: Pick<
     WorkspaceGitService,
@@ -108,7 +113,7 @@ export interface PaseoToolHostDependencies {
   archiveWorkspaceRecord?: ArchiveDependencies["archiveWorkspaceRecord"];
   emitWorkspaceUpdatesForWorkspaceIds?: ArchiveDependencies["emitWorkspaceUpdatesForWorkspaceIds"];
   workspaceRegistry?: Pick<WorkspaceRegistry, "get" | "list" | "upsert">;
-  projectRegistry?: Pick<ProjectRegistry, "get">;
+  projectRegistry?: Pick<ProjectRegistry, "get" | "list">;
   createDirectoryWorkspace?: (
     cwd: string,
     title?: string | null,
@@ -125,6 +130,7 @@ export interface PaseoToolHostDependencies {
   ) => Promise<string>;
   browserToolsEnabled?: boolean;
   browserToolsBroker?: BrowserToolsBroker | null;
+  paseoToolPolicy?: ProviderPaseoToolsPolicy;
   paseoHome?: string;
   worktreesRoot?: string;
   /**
@@ -543,6 +549,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     workspaceScripts,
     scheduleService,
     providerSnapshotManager,
+    daemonConfigStore,
     callerAgentId,
     resolveSpeakHandler,
     resolveCallerContext,
@@ -572,6 +579,9 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Tool handlers are schema-validated at registration boundaries.
     handler: (input: any, context: PaseoToolExecutionContext) => Promise<PaseoToolResult>,
   ) => {
+    if (!isPaseoToolEnabled(options.paseoToolPolicy, name)) {
+      return;
+    }
     tools.set(name, {
       name,
       title: config.title,
@@ -630,6 +640,16 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
       throw new Error(`Parent agent ${callerAgentId} not found`);
     }
     return parentAgent;
+  };
+
+  const resolveInheritedProviderConfig = (
+    selectedProvider: string,
+  ): Pick<AgentSessionConfig, "providerOptions"> | undefined => {
+    const callerAgent = resolveCallerAgent();
+    if (callerAgent?.provider !== selectedProvider || !callerAgent.config?.providerOptions) {
+      return undefined;
+    }
+    return { providerOptions: callerAgent.config.providerOptions };
   };
 
   const resolveScopedCwd = (requestedCwd?: string, opts?: { required?: boolean }): string => {
@@ -691,22 +711,15 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
 
   const buildCallerAgentScheduleConfigExtras = (
     callerAgent: NonNullable<ReturnType<typeof resolveCallerAgent>>,
+    resolvedProvider: string,
   ): Record<string, unknown> => {
     return {
       ...(callerAgent.config.thinkingOptionId
         ? { thinkingOptionId: callerAgent.config.thinkingOptionId }
         : {}),
-      ...(callerAgent.config.approvalPolicy
-        ? { approvalPolicy: callerAgent.config.approvalPolicy }
+      ...(callerAgent.provider === resolvedProvider && callerAgent.config.providerOptions
+        ? { providerOptions: callerAgent.config.providerOptions }
         : {}),
-      ...(callerAgent.config.sandboxMode ? { sandboxMode: callerAgent.config.sandboxMode } : {}),
-      ...(typeof callerAgent.config.networkAccess === "boolean"
-        ? { networkAccess: callerAgent.config.networkAccess }
-        : {}),
-      ...(typeof callerAgent.config.webSearch === "boolean"
-        ? { webSearch: callerAgent.config.webSearch }
-        : {}),
-      ...(callerAgent.config.extra ? { extra: callerAgent.config.extra } : {}),
       ...(callerAgent.config.featureValues
         ? { featureValues: callerAgent.config.featureValues }
         : {}),
@@ -742,7 +755,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           }
         : {}),
       ...(resolvedModel ? { model: resolvedModel } : {}),
-      ...buildCallerAgentScheduleConfigExtras(callerAgent),
+      ...buildCallerAgentScheduleConfigExtras(callerAgent, resolvedProvider),
     };
   };
 
@@ -1422,6 +1435,8 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
         requestedBackground = resolvedArgs.parsedArgs.background;
         notifyOnFinish = resolvedArgs.parsedArgs.notifyOnFinish ?? false;
       }
+      const selectedProvider = resolveRequiredProviderModel(parsedArgs.provider).provider;
+      const inheritedConfig = resolveInheritedProviderConfig(selectedProvider);
       const {
         snapshot,
         background: createdInBackground,
@@ -1445,6 +1460,7 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           provider: parsedArgs.provider,
           title: parsedArgs.title,
           initialPrompt: parsedArgs.initialPrompt,
+          config: inheritedConfig,
           cwd: resolvedArgs.cwd,
           workspaceId: resolvedArgs.workspaceId,
           thinking: parsedArgs.settings?.thinkingOptionId,
@@ -2909,6 +2925,30 @@ export function createPaseoToolCatalog(options: PaseoToolHostDependencies): Pase
           provider,
           models,
         }),
+      };
+    },
+  );
+
+  registerTool(
+    "list_profiles",
+    {
+      title: "List agent profiles",
+      description:
+        "List agent profiles: named provider/model/mode bundles a human configured for specific " +
+        "kinds of work. Read each profile's `notes` to pick the one that fits the task you're " +
+        "delegating, then copy its `provider`, `model`, `modeId`, `thinkingOptionId`, and " +
+        "`featureValues` into create_agent (there is no `profile` parameter). Returns an empty " +
+        "list if none are configured.",
+      inputSchema: {},
+      outputSchema: {
+        profiles: z.array(AgentProfileSchema),
+      },
+    },
+    async () => {
+      const profiles = daemonConfigStore?.get().agentProfiles ?? [];
+      return {
+        content: [],
+        structuredContent: ensureValidJson({ profiles }),
       };
     },
   );

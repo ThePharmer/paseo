@@ -7,34 +7,12 @@ import { useHorizontalScrollOptional } from "@/contexts/horizontal-scroll-contex
 import { usePanelStore } from "@/stores/panel-store";
 import { canBeginMobilePanelGesture, isMobilePanelGestureCurrent } from "./model";
 import { useMobilePanelsRuntime } from "./provider";
+import { resolveMobilePanelGestureIntent } from "./gesture-intent";
 
 const MOBILE_WEB_EDGE_SWIPE_WIDTH = 32;
-const PAN_INTENT_FAIL = -1;
-const PAN_INTENT_WAIT = 0;
-const PAN_INTENT_ACTIVATE = 1;
-type PanDirection = -1 | 1;
-type PanIntent = typeof PAN_INTENT_ACTIVATE | typeof PAN_INTENT_FAIL | typeof PAN_INTENT_WAIT;
 
 function isCurrentSelection(startedRevision: number): boolean {
   return usePanelStore.getState().mobilePanel.revision === startedRevision;
-}
-
-function getHorizontalPanIntent(
-  deltaX: number,
-  deltaY: number,
-  direction: PanDirection,
-): PanIntent {
-  "worklet";
-  const directedDelta = deltaX * direction;
-  const absDeltaX = Math.abs(deltaX);
-  const absDeltaY = Math.abs(deltaY);
-  if (directedDelta <= -10 || (absDeltaY > 10 && absDeltaY > absDeltaX)) {
-    return PAN_INTENT_FAIL;
-  }
-  if (directedDelta >= 15 && absDeltaX > absDeltaY) {
-    return PAN_INTENT_ACTIVATE;
-  }
-  return PAN_INTENT_WAIT;
 }
 
 function useGestureState() {
@@ -62,6 +40,7 @@ export function useOpenAgentListGesture(enabled: boolean) {
     finishGesture,
     leftOpenGestureRef,
     motionState,
+    openGesturesBlocked,
     position,
     updateGesture,
     windowWidth,
@@ -96,22 +75,27 @@ export function useOpenAgentListGesture(enabled: boolean) {
             return;
           }
 
-          const panIntent = getHorizontalPanIntent(deltaX, deltaY, 1);
+          const panIntent = resolveMobilePanelGestureIntent({
+            deltaX,
+            deltaY,
+            direction: 1,
+            openGesturesBlocked: openGesturesBlocked.value,
+          });
           if (
             !canBeginMobilePanelGesture(motionState.value, "agent", position.value) ||
             horizontalScroll?.isAnyScrolledRight.value ||
             (isWeb && touchStartX.value > MOBILE_WEB_EDGE_SWIPE_WIDTH) ||
-            panIntent === PAN_INTENT_FAIL
+            panIntent === "fail"
           ) {
             stateManager.fail();
             return;
           }
-          if (panIntent === PAN_INTENT_ACTIVATE) {
+          if (panIntent === "activate") {
             stateManager.activate();
           }
         })
         .onStart(() => {
-          startedRevision.value = beginGesture({ origin: "agent", preview: "agent-list" });
+          startedRevision.value = beginGesture({ origin: "agent" });
         })
         .onUpdate((event) => {
           updateGesture(startedRevision.value, -event.translationX / windowWidth);
@@ -135,6 +119,7 @@ export function useOpenAgentListGesture(enabled: boolean) {
       horizontalScroll?.isAnyScrolledRight,
       leftOpenGestureRef,
       motionState,
+      openGesturesBlocked,
       position,
       startedRevision,
       touchStartX,
@@ -183,22 +168,26 @@ export function useCloseAgentListGesture() {
             return;
           }
 
-          const panIntent = getHorizontalPanIntent(deltaX, deltaY, -1);
+          const panIntent = resolveMobilePanelGestureIntent({
+            deltaX,
+            deltaY,
+            direction: -1,
+            openGesturesBlocked: false,
+          });
           if (
             !canBeginMobilePanelGesture(motionState.value, "agent-list", position.value) ||
-            panIntent === PAN_INTENT_FAIL
+            panIntent === "fail"
           ) {
             stateManager.fail();
             return;
           }
-          if (panIntent === PAN_INTENT_ACTIVATE) {
+          if (panIntent === "activate") {
             stateManager.activate();
           }
         })
         .onStart(() => {
           startedRevision.value = beginGesture({
             origin: "agent-list",
-            preview: "agent-list",
           });
         })
         .onUpdate((event) => {
@@ -244,6 +233,7 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
     finishGesture,
     leftOpenGestureRef,
     motionState,
+    openGesturesBlocked,
     position,
     rightOpenGestureRef,
     updateGesture,
@@ -278,23 +268,27 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
             return;
           }
 
-          const panIntent = getHorizontalPanIntent(deltaX, deltaY, -1);
+          const panIntent = resolveMobilePanelGestureIntent({
+            deltaX,
+            deltaY,
+            direction: -1,
+            openGesturesBlocked: openGesturesBlocked.value,
+          });
           if (
             !canBeginMobilePanelGesture(motionState.value, "agent", position.value) ||
             (isWeb && touchStartX.value < windowWidth - MOBILE_WEB_EDGE_SWIPE_WIDTH) ||
-            panIntent === PAN_INTENT_FAIL
+            panIntent === "fail"
           ) {
             stateManager.fail();
             return;
           }
-          if (panIntent === PAN_INTENT_ACTIVATE) {
+          if (panIntent === "activate") {
             stateManager.activate();
           }
         })
         .onStart(() => {
           startedRevision.value = beginGesture({
             origin: "agent",
-            preview: "file-explorer",
           });
         })
         .onUpdate((event) => {
@@ -318,6 +312,7 @@ export function useOpenFileExplorerGesture({ enabled, onOpen }: OpenFileExplorer
       finishGesture,
       leftOpenGestureRef,
       motionState,
+      openGesturesBlocked,
       position,
       rightOpenGestureRef,
       startedRevision,
@@ -340,6 +335,7 @@ export function useCloseFileExplorerGesture() {
     windowWidth,
   } = useMobilePanelsRuntime();
   const { startedRevision, touchStartX, touchStartY } = useGestureState();
+  const horizontalScroll = useHorizontalScrollOptional();
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
   const commit = useRevisionCommit(showMobileAgent);
 
@@ -367,22 +363,27 @@ export function useCloseFileExplorerGesture() {
             return;
           }
 
-          const panIntent = getHorizontalPanIntent(deltaX, deltaY, 1);
+          const panIntent = resolveMobilePanelGestureIntent({
+            deltaX,
+            deltaY,
+            direction: 1,
+            openGesturesBlocked: false,
+          });
           if (
             !canBeginMobilePanelGesture(motionState.value, "file-explorer", position.value) ||
-            panIntent === PAN_INTENT_FAIL
+            horizontalScroll?.activeGestureStartedScrolled.value ||
+            panIntent === "fail"
           ) {
             stateManager.fail();
             return;
           }
-          if (panIntent === PAN_INTENT_ACTIVATE) {
+          if (panIntent === "activate") {
             stateManager.activate();
           }
         })
         .onStart(() => {
           startedRevision.value = beginGesture({
             origin: "file-explorer",
-            preview: "file-explorer",
           });
         })
         .onUpdate((event) => {
@@ -403,6 +404,7 @@ export function useCloseFileExplorerGesture() {
       beginGesture,
       commit,
       finishGesture,
+      horizontalScroll?.activeGestureStartedScrolled,
       motionState,
       position,
       rightCloseGestureRef,

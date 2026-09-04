@@ -4,6 +4,7 @@ import type pino from "pino";
 import { createBranchChangeRouteHandler } from "./script-route-branch-handler.js";
 import { createServiceProxySubsystem, type ServiceProxySubsystem } from "./service-proxy.js";
 import { Session, type SessionOptions } from "./session.js";
+import { OWNER_PERMISSIONS } from "./authorization/index.js";
 import { asInternals, createStub } from "./test-utils/class-mocks.js";
 import { createProviderSnapshotManagerStub } from "./test-utils/session-stubs.js";
 import { createTestLogger } from "../test-utils/test-logger.js";
@@ -55,6 +56,15 @@ type WorkspaceUpdatePayload = Extract<
   SessionOutboundMessage,
   { type: "workspace_update" }
 >["payload"];
+
+function getWorkspaceUpdates(
+  emitted: Array<{ type: string; payload: unknown }>,
+): Array<{ type: "workspace_update"; payload: WorkspaceUpdatePayload }> {
+  return emitted.filter((message) => message.type === "workspace_update") as Array<{
+    type: "workspace_update";
+    payload: WorkspaceUpdatePayload;
+  }>;
+}
 
 const REPO_CWD = path.resolve("/tmp/repo");
 const REPO_SUBSCRIPTION_REQUEST_ID = `subscription:${REPO_CWD}`;
@@ -182,11 +192,11 @@ function createSessionForWorkspaceGitWatchTests(options?: {
 
   const session = new Session({
     clientId: "test-client",
-    scopes: ["*"],
+    permissions: OWNER_PERMISSIONS,
     onMessage: (message) => emitted.push(message as { type: string; payload: unknown }),
     logger: createStub<pino.Logger>(logger),
     downloadTokenStore: createStub<SessionOptions["downloadTokenStore"]>({}),
-    pushTokenStore: createStub<SessionOptions["pushTokenStore"]>({}),
+    pushNotifications: createStub<SessionOptions["pushNotifications"]>({}),
     paseoHome: "/tmp/paseo-test",
     agentManager: createStub<SessionOptions["agentManager"]>({
       subscribe: () => () => {},
@@ -363,12 +373,9 @@ describe("workspace git watch targets", () => {
       }),
     );
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(getWorkspaceUpdates(emitted)).toHaveLength(1));
 
-    const workspaceUpdates = emitted.filter(
-      (message) => message.type === "workspace_update",
-    ) as Array<{ type: "workspace_update"; payload: WorkspaceUpdatePayload }>;
+    const workspaceUpdates = getWorkspaceUpdates(emitted);
     expect(workspaceUpdates).toHaveLength(1);
     expect(workspaceUpdates[0]?.payload).toMatchObject({
       kind: "upsert",

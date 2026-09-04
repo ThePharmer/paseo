@@ -52,6 +52,8 @@ import type { ForgeService } from "../../services/forge-service.js";
 import { areEquivalentPaths } from "../../utils/path.js";
 import type { TerminalManager } from "../../terminal/terminal-manager.js";
 import { PARENT_AGENT_ID_LABEL } from "@getpaseo/protocol/agent-labels";
+import { MutableDaemonConfigSchema, type AgentProfile } from "@getpaseo/protocol/messages";
+import type { DaemonConfigStore } from "../daemon-config-store.js";
 import type { BrowserToolsBroker, BrowserToolsExecuteInput } from "../browser-tools/broker.js";
 import type { BrowserToolsResponsePayload } from "../browser-tools/errors.js";
 import { readPaseoWorktreeMetadata } from "../../utils/worktree-metadata.js";
@@ -969,8 +971,85 @@ describe("browser MCP tools", () => {
       logger,
     });
 
+    const client = await connectInMemoryMcpClient(server);
+    try {
+      const listedTools = await client.listTools();
+      const toolNames = listedTools.tools.map((tool) => tool.name);
+
+      expect(toolNames).not.toContain("browser_list_tabs");
+      expect(toolNames).not.toContain("browser_snapshot");
+      expect(toolNames).toEqual(expect.arrayContaining(["create_agent", "list_agents"]));
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it("applies provider policy after the browser-tools host gate", async () => {
+    const agentManager = new BoundaryAgentManagerFake();
+    const agentStorage = new BoundaryAgentStorageFake();
+    const broker = new FakeBrowserToolsBroker({
+      requestId: "req-browser-policy",
+      ok: true,
+      result: { command: "list_tabs", tabs: [] },
+    });
+    const server = await createAgentMcpServer({
+      agentManager: agentManager as AgentManager,
+      agentStorage: agentStorage as AgentStorage,
+      providerSnapshotManager:
+        new BoundaryProviderSnapshotManagerFake() as unknown as ProviderSnapshotManager,
+      browserToolsEnabled: true,
+      browserToolsBroker: broker as BrowserToolsBroker,
+      callerAgentId: "agent-1",
+      paseoToolPolicy: { disabledTools: ["browser_list_tabs"] },
+      logger,
+    });
+
     expect(lookupTool(server, "browser_list_tabs")).toBeUndefined();
-    expect(lookupTool(server, "browser_snapshot")).toBeUndefined();
+    expect(lookupTool(server, "browser_snapshot")).toBeDefined();
+  });
+
+  it("filters policy-disabled tools from MCP listing and calls", async () => {
+    const agentManager = new BoundaryAgentManagerFake();
+    const agentStorage = new BoundaryAgentStorageFake();
+    const broker = new FakeBrowserToolsBroker({
+      requestId: "req-browser-policy-call",
+      ok: true,
+      result: { command: "list_tabs", tabs: [] },
+    });
+    const server = await createAgentMcpServer({
+      agentManager: agentManager as AgentManager,
+      agentStorage: agentStorage as AgentStorage,
+      providerSnapshotManager:
+        new BoundaryProviderSnapshotManagerFake() as unknown as ProviderSnapshotManager,
+      browserToolsEnabled: true,
+      browserToolsBroker: broker as BrowserToolsBroker,
+      callerAgentId: "agent-1",
+      paseoToolPolicy: { disabledTools: ["list_agents", "browser_list_tabs"] },
+      logger,
+    });
+    const client = await connectInMemoryMcpClient(server);
+
+    try {
+      const listedTools = await client.listTools();
+      const toolNames = listedTools.tools.map((tool) => tool.name);
+
+      expect(toolNames).not.toContain("list_agents");
+      expect(toolNames).not.toContain("browser_list_tabs");
+      expect(toolNames).toEqual(expect.arrayContaining(["create_agent", "browser_snapshot"]));
+      await expect(client.callTool({ name: "list_agents", arguments: {} })).resolves.toEqual({
+        content: [{ type: "text", text: "MCP error -32602: Tool list_agents not found" }],
+        isError: true,
+      });
+      await expect(client.callTool({ name: "browser_list_tabs", arguments: {} })).resolves.toEqual({
+        content: [{ type: "text", text: "MCP error -32602: Tool browser_list_tabs not found" }],
+        isError: true,
+      });
+      expect(broker.calls).toEqual([]);
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 
   it("wires browser tools through the browser tools broker", async () => {
@@ -2158,9 +2237,12 @@ describe("create_agent MCP tool", () => {
     const workspaceAutoName = new WorkspaceAutoName({
       agentManager,
       workspaceRegistry: {
-        get: async (workspaceId) => workspaceRecords.get(workspaceId) ?? null,
-        upsert: async (record) => {
-          workspaceRecords.set(record.workspaceId, record);
+        update: async (workspaceId, updater) => {
+          const current = workspaceRecords.get(workspaceId);
+          if (!current) return null;
+          const updated = updater(current);
+          workspaceRecords.set(workspaceId, updated);
+          return updated;
         },
       },
       workspaceGitService,
@@ -2564,6 +2646,7 @@ describe("create_agent MCP tool", () => {
       providerSnapshotManager: createOpenCodeManager().manager,
       projectRegistry: {
         get: async (projectId) => (projectId === project.projectId ? project : null),
+        list: async () => [project],
       },
       createPaseoWorktree,
       logger,
@@ -3229,6 +3312,64 @@ describe("create_agent MCP tool", () => {
         },
         workspaceId: "wks_parent",
       },
+    );
+  });
+
+  it("inherits provider options only when the child uses the caller provider", async () => {
+    const { agentManager, agentStorage, spies } = createTestDeps();
+    const parentAgent = {
+      id: "parent-agent",
+      cwd: existingCwd,
+      workspaceId: "wks_parent",
+      provider: "codex",
+      currentModeId: null,
+      config: {
+        providerOptions: {
+          sandbox_mode: "workspace-write",
+          sandbox_workspace_write: { writable_roots: ["/tmp/shared"] },
+        },
+      },
+    } as ManagedAgent;
+    spies.agentManager.getAgent.mockReturnValue(parentAgent);
+    spies.agentManager.createAgent.mockResolvedValue({
+      id: "child-agent",
+      cwd: existingCwd,
+      lifecycle: "idle",
+      currentModeId: null,
+      availableModes: [],
+      config: { title: "Child" },
+    } as ManagedAgent);
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      callerAgentId: "parent-agent",
+      logger,
+    });
+
+    await registeredTool(server, "create_agent").handler({
+      ...subagentCurrentWorkspace(),
+      title: "Codex child",
+      provider: "codex/gpt-5.4",
+      initialPrompt: "Do work",
+    });
+    expect(spies.agentManager.createAgent).toHaveBeenLastCalledWith(
+      expect.objectContaining({ providerOptions: parentAgent.config.providerOptions }),
+      undefined,
+      expect.any(Object),
+    );
+
+    await registeredTool(server, "create_agent").handler({
+      ...subagentCurrentWorkspace(),
+      title: "Claude child",
+      provider: "claude/sonnet",
+      initialPrompt: "Do work",
+      settings: { modeId: "default" },
+    });
+    expect(spies.agentManager.createAgent).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ providerOptions: expect.anything() }),
+      undefined,
+      expect.any(Object),
     );
   });
 
@@ -4836,6 +4977,78 @@ describe("provider listing MCP tool", () => {
         },
       ],
     });
+  });
+});
+
+function daemonConfigStoreStub(agentProfiles?: AgentProfile[]): Pick<DaemonConfigStore, "get"> {
+  const config = MutableDaemonConfigSchema.parse({
+    relay: { enabled: true },
+    mcp: { injectIntoAgents: true },
+    ...(agentProfiles !== undefined ? { agentProfiles } : {}),
+  });
+  return { get: () => config };
+}
+
+describe("agent profile listing MCP tool", () => {
+  const logger = createTestLogger();
+
+  it("returns configured profiles, including notes", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const profiles: AgentProfile[] = [
+      {
+        id: "ui-profile",
+        name: "UI work",
+        provider: "claude",
+        model: "claude-test-model",
+        modeId: "bypassPermissions",
+        thinkingOptionId: "high",
+        featureValues: { fast_mode: true },
+        notes: "Use for UI work: components, layout, design tokens. Not for backend.",
+      },
+    ];
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      daemonConfigStore: daemonConfigStoreStub(profiles),
+      logger,
+    });
+    const tool = registeredTool(server, "list_profiles");
+
+    const response = await tool.handler({});
+
+    expect(response.structuredContent).toEqual({ profiles });
+  });
+
+  it("returns an empty array when no profiles are configured", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      daemonConfigStore: daemonConfigStoreStub(),
+      logger,
+    });
+    const tool = registeredTool(server, "list_profiles");
+
+    const response = await tool.handler({});
+
+    expect(response.structuredContent).toEqual({ profiles: [] });
+  });
+
+  it("returns an empty array when no daemon config store is provided", async () => {
+    const { agentManager, agentStorage } = createTestDeps();
+    const server = await createAgentMcpServer({
+      agentManager,
+      agentStorage,
+      providerSnapshotManager: createOpenCodeManager().manager,
+      logger,
+    });
+    const tool = registeredTool(server, "list_profiles");
+
+    const response = await tool.handler({});
+
+    expect(response.structuredContent).toEqual({ profiles: [] });
   });
 });
 

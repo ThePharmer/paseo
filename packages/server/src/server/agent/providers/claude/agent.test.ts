@@ -2,15 +2,17 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { PermissionResult, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import { createTestLogger } from "../../../../test-utils/test-logger.js";
 import * as executableUtils from "../../../../executable-resolution/executable-resolution.js";
+import { buildAgentAttentionNotificationPayload } from "@getpaseo/protocol/agent-attention-notification";
 import {
   ClaudeAgentClient,
   convertClaudeHistoryEntry,
   normalizeClaudeAskUserQuestionRequestInput,
   normalizeClaudeAskUserQuestionUpdatedInput,
+  resolveClaudeCodeVersion,
   toClaudeSdkMcpConfig,
 } from "./agent.js";
 import { claudeProjectDirSync } from "./project-dir.js";
@@ -19,6 +21,13 @@ import type { AgentSession, AgentTimelineItem, AgentStreamEvent } from "../../ag
 
 interface TestClaudeSession {
   translateMessageToEvents(message: SDKMessage): AgentStreamEvent[];
+  close(): Promise<void>;
+}
+
+function isPermissionResolvedEvent(
+  event: AgentStreamEvent,
+): event is Extract<AgentStreamEvent, { type: "permission_resolved" }> {
+  return event.type === "permission_resolved";
 }
 
 afterEach(() => {
@@ -405,6 +414,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
       const client = new ClaudeAgentClient({
         logger,
         resolveBinary: async () => "/test/claude/bin",
+        resolveVersion: async () => "2.1.219",
         configDir: emptyConfigDir,
       });
       const { models } = await client.fetchCatalog({
@@ -415,10 +425,13 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
 
       expect(models.map((m) => m.id)).toEqual([
         "claude-opus-5",
+        "claude-fable-5-1",
         "claude-fable-5",
+        "claude-fable-5[1m]",
         "claude-opus-4-8[1m]",
         "claude-opus-4-8",
         "claude-sonnet-5",
+        "claude-sonnet-5[1m]",
         "claude-opus-4-7[1m]",
         "claude-opus-4-7",
         "claude-opus-4-6[1m]",
@@ -427,6 +440,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
         "claude-sonnet-4-6",
         "claude-haiku-4-5",
       ]);
+      expect(models.find((model) => model.id === "claude-fable-5[1m]")?.isSelectable).toBe(false);
 
       for (const model of models) {
         expect(model.provider).toBe("claude");
@@ -440,12 +454,36 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
     }
   });
 
+  test("preserves the catalog when Claude Code version detection fails", async () => {
+    const emptyConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-models-empty-"));
+    try {
+      const client = new ClaudeAgentClient({
+        logger,
+        resolveVersion: async () => {
+          throw new Error("unrecognized version output");
+        },
+        configDir: emptyConfigDir,
+      });
+      const { models } = await client.fetchCatalog({
+        scope: "workspace",
+        cwd: "/tmp/claude-models",
+        force: false,
+      });
+
+      expect(models.find((model) => model.isDefault)?.id).toBe("claude-opus-5");
+      expect(models.map((model) => model.id)).toContain("claude-fable-5");
+    } finally {
+      await fs.rm(emptyConfigDir, { recursive: true, force: true });
+    }
+  });
+
   test("exposes Ultra Code on xhigh-capable Claude models", async () => {
     const emptyConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-models-empty-"));
     try {
       const client = new ClaudeAgentClient({
         logger,
         resolveBinary: async () => "/test/claude/bin",
+        resolveVersion: async () => "2.1.219",
         configDir: emptyConfigDir,
       });
       const { models } = await client.fetchCatalog({
@@ -458,6 +496,7 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
       };
 
       expect(getThinkingIds("claude-opus-5")).toContain("ultracode");
+      expect(getThinkingIds("claude-fable-5-1")).toContain("ultracode");
       expect(getThinkingIds("claude-fable-5")).toContain("ultracode");
       expect(getThinkingIds("claude-opus-4-8[1m]")).toContain("ultracode");
       expect(getThinkingIds("claude-opus-4-8")).toContain("ultracode");
@@ -474,6 +513,10 @@ describe("ClaudeAgentClient.fetchCatalog", () => {
 
 describe("ClaudeAgentClient binary resolution", () => {
   const logger = createTestLogger();
+
+  test("resolves the installed Claude Code version", async () => {
+    await expect(resolveClaudeCodeVersion()).resolves.toMatch(/^\d+\.\d+\.\d+$/);
+  });
 
   test("loads user, project, and local Claude settings", async () => {
     const queryReturn = vi.fn();
@@ -594,6 +637,141 @@ describe("ClaudeAgentSession features", () => {
     return { queryFactory, queryMock, launches };
   }
 
+  test("publishes a resolution when the SDK aborts a permission callback", async () => {
+    const { queryFactory } = createQueryMock();
+    const session = await new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd(), modeId: "default" });
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("run the tool");
+      const canUseTool = queryFactory.mock.calls[0]?.[0].options.canUseTool;
+      if (!canUseTool) throw new Error("Expected canUseTool callback");
+      const abort = new AbortController();
+      const permission = canUseTool(
+        "Bash",
+        { command: "printf test" },
+        { signal: abort.signal, toolUseID: "tool-aborted" },
+      );
+      abort.abort();
+
+      await expect(permission).rejects.toThrow("Permission request aborted");
+      expect(events.find(isPermissionResolvedEvent)).toMatchObject({
+        type: "permission_resolved",
+        provider: "claude",
+        requestId: expect.any(String),
+        resolution: { behavior: "deny", message: "Permission request canceled" },
+      });
+      expect(session.getPendingPermissions()).toEqual([]);
+    } finally {
+      unsubscribe();
+      await session.close();
+    }
+  });
+
+  test("does not duplicate a resolution when interruption later aborts the SDK callback", async () => {
+    const { queryFactory } = createQueryMock();
+    const session = await new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    }).createSession({ provider: "claude", cwd: process.cwd(), modeId: "default" });
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+
+    try {
+      await session.startTurn("run the tool");
+      const canUseTool = queryFactory.mock.calls[0]?.[0].options.canUseTool;
+      if (!canUseTool) throw new Error("Expected canUseTool callback");
+      const abort = new AbortController();
+      const permission = canUseTool(
+        "Bash",
+        { command: "printf test" },
+        { signal: abort.signal, toolUseID: "tool-interrupted" },
+      );
+
+      await session.interrupt();
+      abort.abort();
+
+      await expect(permission).rejects.toThrow("Permission request canceled");
+      expect(events.filter(isPermissionResolvedEvent)).toEqual([
+        expect.objectContaining({
+          provider: "claude",
+          resolution: { behavior: "deny", message: "Permission request canceled" },
+        }),
+      ]);
+      expect(session.getPendingPermissions()).toEqual([]);
+    } finally {
+      unsubscribe();
+      await session.close();
+    }
+  });
+
+  test("passes exact configured Fable 5 IDs through to Claude Code", async () => {
+    const { queryFactory, queryMock } = createQueryMock();
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+      model: "claude-fable-5[1m]",
+    });
+
+    await (
+      session as unknown as {
+        ensureQuery(): Promise<unknown>;
+      }
+    ).ensureQuery();
+    expect(queryFactory.mock.calls[0]?.[0].options.model).toBe("claude-fable-5[1m]");
+
+    await session.setModel?.("claude-fable-5[1m]");
+    expect(queryMock.setModel).toHaveBeenCalledWith("claude-fable-5[1m]");
+    await session.close();
+  });
+
+  test("preapproves only granted Hub MCP tools while preserving Claude denies", async () => {
+    const { queryFactory } = createQueryMock();
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+      providerOptions: {
+        allowedTools: ["Read"],
+        disallowedTools: ["Bash", "mcp__hub__reply"],
+        sandbox: { enabled: true, failIfUnavailable: true },
+      },
+      mcpServers: { hub: { type: "http", url: "http://127.0.0.1/hub" } },
+      toolPolicy: {
+        preapproved: [{ kind: "mcp", server: "hub", tool: "finish_execution" }],
+      },
+    });
+
+    await (
+      session as unknown as {
+        ensureQuery(): Promise<unknown>;
+      }
+    ).ensureQuery();
+
+    expect(queryFactory.mock.calls[0]?.[0].options).toMatchObject({
+      allowedTools: ["Read", "mcp__hub__finish_execution"],
+      disallowedTools: ["Bash", "mcp__hub__reply"],
+      sandbox: { enabled: true, failIfUnavailable: true },
+    });
+    expect(queryFactory.mock.calls[0]?.[0].options.allowedTools).not.toContain("mcp__hub__reply");
+    await session.close();
+  });
+
   test("lists fast mode only for supported Opus models", async () => {
     const client = new ClaudeAgentClient({ logger, resolveBinary: async () => "/test/claude/bin" });
 
@@ -625,7 +803,23 @@ describe("ClaudeAgentSession features", () => {
       client.listFeatures({
         provider: "claude",
         cwd: process.cwd(),
+        model: "claude-opus-5",
+      }),
+    ).resolves.toEqual([expect.objectContaining({ id: "fast_mode", value: false })]);
+
+    await expect(
+      client.listFeatures({
+        provider: "claude",
+        cwd: process.cwd(),
         model: "openrouter/anthropic/claude-opus-4-8",
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(
+      client.listFeatures({
+        provider: "claude",
+        cwd: process.cwd(),
+        model: "claude-sonnet-5",
       }),
     ).resolves.toEqual([]);
 
@@ -717,9 +911,161 @@ describe("ClaudeAgentSession features", () => {
     await session.close();
   });
 
+  test("pushes a steer into the exact active Claude query without starting another turn", async () => {
+    const { queryFactory } = createQueryMock();
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+    try {
+      const { turnId } = await session.startTurn("first turn");
+      const input = queryFactory.mock.calls[0]?.[0].prompt as AsyncIterable<SDKUserMessage>;
+      const iterator = input[Symbol.asyncIterator]();
+      await expect(iterator.next()).resolves.toMatchObject({ value: { type: "user" } });
+
+      await expect(
+        session.steerActiveTurn?.("same turn follow-up", {
+          expectedTurnId: turnId,
+          clientMessageId: "steer-client-id",
+        }),
+      ).resolves.toEqual({ status: "accepted" });
+      await expect(iterator.next()).resolves.toMatchObject({
+        value: {
+          type: "user",
+          priority: "next",
+          message: { content: [{ type: "text", text: "same turn follow-up" }] },
+        },
+      });
+      expect(events.filter((event) => event.type === "turn_started")).toHaveLength(1);
+
+      await expect(
+        session.steerActiveTurn?.("/rewind submitted-message-id", { expectedTurnId: turnId }),
+      ).resolves.toEqual({ status: "unavailable" });
+      let rewindReachedLiveInput = false;
+      void iterator.next().then(() => {
+        rewindReachedLiveInput = true;
+        return undefined;
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(rewindReachedLiveInput).toBe(false);
+    } finally {
+      unsubscribe();
+      await session.close();
+    }
+  });
+
+  test("a human steer supersedes blocking permissions until Claude reads it", async () => {
+    const { queryFactory } = createQueryMock();
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+    const internal = session as unknown as {
+      handlePermissionRequest(
+        name: string,
+        input: Record<string, unknown>,
+        options: Record<string, unknown>,
+      ): Promise<PermissionResult>;
+      translateMessageToEvents(message: SDKMessage): AgentStreamEvent[];
+    };
+
+    try {
+      const { turnId } = await session.startTurn("first turn");
+      const input = queryFactory.mock.calls[0]?.[0].prompt as AsyncIterable<SDKUserMessage>;
+      const iterator = input[Symbol.asyncIterator]();
+      await iterator.next();
+
+      const firstPermission = internal.handlePermissionRequest(
+        "ExitPlanMode",
+        { plan: "First plan" },
+        { toolUseID: "tool-1" },
+      );
+      expect(session.getPendingPermissions()).toHaveLength(1);
+
+      await expect(
+        session.steerActiveTurn?.("review this instead", {
+          expectedTurnId: turnId,
+          clearPendingPermissions: true,
+        }),
+      ).resolves.toEqual({ status: "accepted" });
+      await expect(firstPermission).resolves.toMatchObject({
+        behavior: "deny",
+        interrupt: undefined,
+        message: expect.stringContaining("message instead of approving"),
+      });
+
+      const steer = await iterator.next();
+      const steerUuid = steer.value?.uuid;
+      expect(steerUuid).toEqual(expect.any(String));
+
+      await expect(
+        internal.handlePermissionRequest(
+          "Write",
+          { file_path: "SECOND.md" },
+          { toolUseID: "tool-2" },
+        ),
+      ).resolves.toMatchObject({ behavior: "deny", interrupt: undefined });
+
+      internal.translateMessageToEvents({
+        type: "command_lifecycle",
+        command_uuid: steerUuid,
+        state: "started",
+      } as unknown as SDKMessage);
+      const laterPermission = internal.handlePermissionRequest(
+        "Write",
+        { file_path: "LATER.md" },
+        { toolUseID: "tool-3" },
+      );
+      expect(session.getPendingPermissions()).toHaveLength(1);
+      const requestId = session.getPendingPermissions()[0]!.id;
+      await session.respondToPermission(requestId, { behavior: "deny", message: "test cleanup" });
+      await expect(laterPermission).resolves.toMatchObject({ behavior: "deny" });
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("a non-human steer leaves a pending permission for the user", async () => {
+    const { queryFactory } = createQueryMock();
+    const client = new ClaudeAgentClient({
+      logger,
+      queryFactory,
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+    const internal = session as unknown as {
+      handlePermissionRequest(
+        name: string,
+        input: Record<string, unknown>,
+        options: Record<string, unknown>,
+      ): Promise<PermissionResult>;
+    };
+
+    try {
+      const { turnId } = await session.startTurn("first turn");
+      const permission = internal.handlePermissionRequest("Write", {}, { toolUseID: "tool-1" });
+      await expect(
+        session.steerActiveTurn?.("system notification", { expectedTurnId: turnId }),
+      ).resolves.toEqual({ status: "accepted" });
+      expect(session.getPendingPermissions()).toHaveLength(1);
+      const requestId = session.getPendingPermissions()[0]!.id;
+      await session.respondToPermission(requestId, { behavior: "deny", message: "test cleanup" });
+      await expect(permission).resolves.toMatchObject({ behavior: "deny" });
+    } finally {
+      await session.close();
+    }
+  });
+
   test.each([
     ["supported model", "claude-opus-4-8", { type: "disabled" }, undefined],
-    ["unsupported model", "claude-fable-5", { type: "adaptive" }, "low"],
+    ["unsupported model", "claude-fable-5", { type: "adaptive" }, "high"],
     ["custom model", "openrouter/anthropic/claude-opus-4-8", undefined, undefined],
     ["provider default", null, undefined, undefined],
   ])("reconciles Off when switching to a %s", async (_label, modelId, thinking, effort) => {
@@ -1002,6 +1348,64 @@ describe("normalizeClaudeAskUserQuestionUpdatedInput", () => {
     }
   });
 
+  test("denying a plan leaves the plan readable in the timeline", async () => {
+    const client = new ClaudeAgentClient({
+      logger: createTestLogger(),
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({
+      provider: "claude",
+      cwd: process.cwd(),
+    });
+
+    const request = {
+      id: "permission-plan-1",
+      provider: "claude",
+      name: "ExitPlanMode",
+      kind: "plan",
+      input: { plan: "Ship the thing" },
+    };
+
+    const events: AgentStreamEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+
+    new Promise<unknown>((resolve, reject) => {
+      (
+        session as unknown as {
+          pendingPermissions: Map<
+            string,
+            {
+              request: typeof request;
+              resolve: (value: unknown) => void;
+              reject: (error: Error) => void;
+            }
+          >;
+        }
+      ).pendingPermissions.set(request.id, { request, resolve, reject });
+    }).catch(() => undefined);
+
+    try {
+      await session.respondToPermission(request.id, {
+        behavior: "deny",
+        message: "The user answered with a message instead of approving.",
+      });
+
+      const planRow = events.find(
+        (event) =>
+          event.type === "timeline" &&
+          event.item.type === "tool_call" &&
+          event.item.name === "plan_approval",
+      );
+      expect(planRow).toBeDefined();
+      const item = (planRow as { item: Extract<AgentTimelineItem, { type: "tool_call" }> }).item;
+      expect(item.detail).toEqual({ type: "plan", text: "Ship the thing" });
+      expect(item.metadata).toMatchObject({ approved: false });
+    } finally {
+      unsubscribe();
+      await session.close();
+    }
+  });
+
   test("respondToPermission maps other answer text back to Claude question keys", async () => {
     const client = new ClaudeAgentClient({
       logger: createTestLogger(),
@@ -1084,6 +1488,62 @@ describe("normalizeClaudeAskUserQuestionUpdatedInput", () => {
 });
 
 describe("ClaudeAgentClient.listImportableSessions", () => {
+  test("uses the latest native custom title and leaves fixture mtimes unchanged", async () => {
+    const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-import-"));
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir;
+
+    try {
+      const projectDir = path.join(tmpConfigDir, "projects", "native-title-fixture");
+      await fs.mkdir(projectDir, { recursive: true });
+      const sessionFile = path.join(projectDir, "native-title-session.jsonl");
+      await fs.copyFile(
+        new URL("./test-fixtures/import-session-native-titles.jsonl", import.meta.url),
+        sessionFile,
+      );
+      const olderSessionFile = path.join(projectDir, "older-native-title-session.jsonl");
+      await fs.copyFile(
+        new URL("./test-fixtures/import-session-native-titles.jsonl", import.meta.url),
+        olderSessionFile,
+      );
+      const timestamp = new Date("2026-08-13T01:53:11.000Z");
+      await fs.utimes(sessionFile, timestamp, timestamp);
+      const olderTimestamp = new Date("2026-08-12T01:53:11.000Z");
+      await fs.utimes(olderSessionFile, olderTimestamp, olderTimestamp);
+      const fixtureFiles = [sessionFile, olderSessionFile];
+      const mtimesBefore = await Promise.all(
+        fixtureFiles.map(async (file) => (await fs.stat(file)).mtimeMs),
+      );
+
+      const client = new ClaudeAgentClient({
+        logger: createTestLogger(),
+        resolveBinary: async () => "/test/claude/bin",
+      });
+
+      await expect(client.listImportableSessions({ limit: 1 })).resolves.toEqual([
+        {
+          providerHandleId: "native-title-session",
+          cwd: "/tmp/paseo-claude-native-title",
+          title: "My research session",
+          firstPromptPreview: "Review this project",
+          lastPromptPreview: "Focus on the import flow",
+          lastActivityAt: timestamp,
+        },
+      ]);
+      const mtimesAfter = await Promise.all(
+        fixtureFiles.map(async (file) => (await fs.stat(file)).mtimeMs),
+      );
+      expect(mtimesAfter).toEqual(mtimesBefore);
+    } finally {
+      if (previousConfigDir === undefined) {
+        delete process.env.CLAUDE_CONFIG_DIR;
+      } else {
+        process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      }
+      await fs.rm(tmpConfigDir, { recursive: true, force: true });
+    }
+  });
+
   test("scopes candidates to the requested cwd before applying the limit", async () => {
     const tmpConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "paseo-claude-import-"));
     const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
@@ -1276,6 +1736,52 @@ describe("ClaudeAgentSession context window usage", () => {
       model: options?.model,
     });
   }
+
+  test("emits canonical task snapshots from Claude TaskCreate results", async () => {
+    const session = await createSessionForTest();
+    try {
+      session.translateMessageToEvents({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "task-create-1",
+              name: "TaskCreate",
+              input: { subject: "Inspect provider", activeForm: "Inspecting provider" },
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+
+      const events = session.translateMessageToEvents({
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "task-create-1", content: "created" }],
+        },
+        toolUseResult: { task: { id: "1", subject: "Inspect provider" } },
+      } as unknown as SDKMessage);
+
+      expect(events).toContainEqual({
+        type: "timeline",
+        provider: "claude",
+        item: {
+          type: "todo",
+          items: [
+            {
+              id: "1",
+              text: "Inspect provider",
+              activeForm: "Inspecting provider",
+              status: "pending",
+              completed: false,
+            },
+          ],
+        },
+      });
+    } finally {
+      await session.close();
+    }
+  });
 
   async function collectStreamEvents(session: AgentSession, prompt = "turn") {
     const events: AgentStreamEvent[] = [];
@@ -1474,6 +1980,22 @@ describe("ClaudeAgentSession context window usage", () => {
       ...overrides,
     };
   }
+
+  test("emits turn_started before the submitted user message", async () => {
+    const session = await createSessionForTurns([[]]);
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    await session.startTurn("turn", { clientMessageId: "client-message-1" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(events.slice(0, 2).map((event) => event.type)).toEqual(["turn_started", "timeline"]);
+    expect(events[1]).toMatchObject({
+      type: "timeline",
+      item: { type: "user_message", clientMessageId: "client-message-1" },
+    });
+    await session.close();
+  });
 
   test("passes persistSession through to the Claude SDK query options", async () => {
     const createResultTurn = (sessionId: string) => [
@@ -2083,10 +2605,10 @@ describe("ClaudeAgentSession context window usage", () => {
     }
   });
 
-  test("native 1M Claude models seed active context window usage from the catalog", async () => {
+  test("selected 1M Claude models seed active context window usage from the catalog", async () => {
     const session = await createSessionForTurns(
       [[createInitMessage(), createMessageStartEvent(), createSuccessResult()]],
-      { model: "claude-sonnet-5" },
+      { model: "claude-sonnet-5[1m]" },
     );
 
     try {
@@ -2522,5 +3044,118 @@ describe("toClaudeSdkMcpConfig", () => {
     });
     expect(result.type).toBe("stdio");
     expect(result.alwaysLoad).toBeUndefined();
+  });
+});
+
+describe("Claude question permission notifications", () => {
+  // Regression for #2612: the attention notification serialized the raw
+  // AskUserQuestion input, so both the iOS push and the desktop app showed
+  // JSON instead of the question.
+  async function requestPermission(
+    toolName: string,
+    input: Record<string, unknown>,
+  ): Promise<Extract<AgentStreamEvent, { type: "permission_requested" }>["request"]> {
+    const client = new ClaudeAgentClient({
+      logger: createTestLogger(),
+      resolveBinary: async () => "/test/claude/bin",
+    });
+    const session = await client.createSession({ provider: "claude", cwd: process.cwd() });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+
+    try {
+      const internal = session as unknown as {
+        handlePermissionRequest: (
+          toolName: string,
+          input: Record<string, unknown>,
+          options: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      void internal.handlePermissionRequest(toolName, input, {}).catch(() => undefined);
+
+      const requested = events.find(
+        (event): event is Extract<AgentStreamEvent, { type: "permission_requested" }> =>
+          event.type === "permission_requested",
+      );
+      if (!requested) {
+        throw new Error(`no permission was requested for ${toolName}`);
+      }
+      return requested.request;
+    } finally {
+      await session.close();
+    }
+  }
+
+  test("renders the notification as the question and its options", async () => {
+    const request = await requestPermission("AskUserQuestion", {
+      questions: [
+        {
+          question: "Which library should we use?",
+          header: "Library",
+          options: [{ label: "date-fns" }, { label: "Luxon" }],
+          multiSelect: false,
+        },
+      ],
+    });
+
+    const payload = buildAgentAttentionNotificationPayload({
+      reason: "permission",
+      serverId: "srv-2612",
+      workspaceId: "workspace-2612",
+      agentId: "agent-2612",
+      permissionRequest: request,
+    });
+
+    expect(payload.body).toBe("Which library should we use? - date-fns / Luxon");
+    expect(payload.body).not.toContain('"questions"');
+  });
+
+  test("keeps the full question payload for the permission UI", async () => {
+    const request = await requestPermission("AskUserQuestion", {
+      questions: [
+        {
+          question: "Which library should we use?",
+          header: "Library",
+          options: [{ label: "date-fns" }, { label: "Luxon" }],
+          multiSelect: false,
+        },
+      ],
+    });
+
+    expect(request.input).toEqual(
+      normalizeClaudeAskUserQuestionRequestInput("AskUserQuestion", {
+        questions: [
+          {
+            question: "Which library should we use?",
+            header: "Library",
+            options: [{ label: "date-fns" }, { label: "Luxon" }],
+            multiSelect: false,
+          },
+        ],
+      }),
+    );
+  });
+
+  test("falls back to the question alone when it has no options", async () => {
+    const request = await requestPermission("AskUserQuestion", {
+      questions: [{ question: "Ready to deploy?", header: "Deploy", options: [] }],
+    });
+
+    const payload = buildAgentAttentionNotificationPayload({
+      reason: "permission",
+      serverId: "srv-2612",
+      workspaceId: "workspace-2612",
+      agentId: "agent-2612",
+      permissionRequest: request,
+    });
+
+    expect(payload.body).toBe("Ready to deploy?");
+  });
+
+  test("leaves other tools unsummarised", async () => {
+    const request = await requestPermission("Bash", { command: "ls" });
+
+    expect(request.title).toBeUndefined();
+    expect(request.description).toBeUndefined();
   });
 });
