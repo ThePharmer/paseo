@@ -316,9 +316,10 @@ export interface DaemonClientConfig {
   password?: string;
   authHeader?: string;
   /**
-   * Extra WebSocket handshake headers. Only transports that can set handshake
-   * headers honour them (React Native, Node); browser WebSockets ignore them.
-   * The Authorization header derived from `password` always wins over a custom entry.
+   * Extra WebSocket handshake headers. Only a WebSocket constructor that accepts an
+   * options object honours them (React Native's global, or an injected `ws`-style
+   * factory); the browser two-argument constructor ignores them. The Authorization
+   * header derived from `password` or `authHeader` replaces a custom entry under any casing.
    */
   headers?: Record<string, string>;
   suppressSendErrors?: boolean;
@@ -1067,6 +1068,25 @@ interface PingProbe {
   drivesLivenessFailure: boolean;
 }
 
+/**
+ * Header names are case-insensitive, so the derived Authorization value replaces
+ * a custom entry under any spelling, not just the canonical one.
+ */
+function buildHandshakeHeaders(
+  customHeaders: Record<string, string> | undefined,
+  authorization: string | undefined,
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const [name, value] of Object.entries(customHeaders ?? {})) {
+    if (authorization && name.toLowerCase() === "authorization") continue;
+    headers[name] = value;
+  }
+  if (authorization) {
+    headers.Authorization = authorization;
+  }
+  return headers;
+}
+
 export class DaemonClient {
   private transport: DaemonTransport | null = null;
   private transportCleanup: Array<() => void> = [];
@@ -1204,13 +1224,11 @@ export class DaemonClient {
       return;
     }
 
-    const headers: Record<string, string> = { ...this.config.headers };
     const password = normalizePassword(this.config.password);
-    if (password) {
-      headers.Authorization = `Bearer ${password}`;
-    } else if (this.config.authHeader) {
-      headers.Authorization = this.config.authHeader;
-    }
+    const headers = buildHandshakeHeaders(
+      this.config.headers,
+      password ? `Bearer ${password}` : this.config.authHeader,
+    );
     const protocols = password ? [`paseo.bearer.${password}`] : undefined;
 
     try {
