@@ -1,0 +1,306 @@
+name: Native headers APK release
+
+# Publishes a fork-only Android APK for every upstream release: the upstream
+# release tag plus the fork's native direct-connection headers commit
+# (getpaseo/paseo#4290). Lives on fork main because schedules only run there.
+
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream release tag to build (blank = latest upstream release)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: native-headers-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  UPSTREAM_REPO: getpaseo/paseo
+  FEATURE_COMMIT: d555d08d92f3990db6960ce18a5aaf924fc0ddda
+  FEATURE_BRANCH: feat/native-direct-connection-headers
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      fork_tag: ${{ steps.resolve.outputs.fork_tag }}
+      upstream_url: ${{ steps.resolve.outputs.upstream_url }}
+      needed: ${{ steps.resolve.outputs.needed }}
+    steps:
+      - name: Resolve the upstream tag and the fork release tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${INPUT_TAG:-}" ]]; then
+            tag="$INPUT_TAG"
+            upstream_url="https://github.com/$UPSTREAM_REPO/releases/tag/$tag"
+          else
+            tag="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .tag_name)"
+            upstream_url="$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq .html_url)"
+          fi
+          fork_tag="${tag}-native-headers"
+
+          needed=true
+          if gh release view "$fork_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            needed=false
+            echo "Fork release $fork_tag already exists; nothing to do."
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "fork_tag=$fork_tag"
+            echo "upstream_url=$upstream_url"
+            echo "needed=$needed"
+          } >> "$GITHUB_OUTPUT"
+          echo "upstream=$tag fork=$fork_tag needed=$needed"
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.artifact_name }}
+      signing: ${{ steps.signing.outputs.mode }}
+      cherry_picked: ${{ steps.source.outputs.cherry_picked }}
+      commit: ${{ steps.source.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build the source tree for the release
+        id: source
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags upstream "refs/tags/$TAG:refs/tags/$TAG"
+          git fetch --no-tags origin "refs/heads/$FEATURE_BRANCH:refs/remotes/fork/$FEATURE_BRANCH"
+          git checkout --detach "refs/tags/$TAG"
+
+          if git grep -q 'headers: z.record' "$TAG" -- packages/protocol/src/host-connection-schema.ts; then
+            echo "Feature is already in $TAG; skipping the cherry-pick."
+            cherry_picked=false
+          elif git cherry-pick -x "$FEATURE_COMMIT"; then
+            cherry_picked=true
+          else
+            conflicts="$(git diff --name-only --diff-filter=U | paste -sd' ' -)"
+            git cherry-pick --abort || true
+            echo "::error::Cherry-picking $FEATURE_COMMIT onto $TAG conflicted in: ${conflicts:-unknown}. Rebase $FEATURE_BRANCH onto $TAG, update FEATURE_COMMIT in this workflow, then re-run. No release was published."
+            exit 1
+          fi
+
+          {
+            echo "cherry_picked=$cherry_picked"
+            echo "commit=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Configure APK signing
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${ANDROID_KEYSTORE_BASE64:-}" && -n "${ANDROID_KEYSTORE_PASSWORD:-}" \
+                && -n "${ANDROID_KEY_ALIAS:-}" && -n "${ANDROID_KEY_PASSWORD:-}" ]]; then
+            keystore="$RUNNER_TEMP/release.jks"
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+            # Read by the eas-build.gradle script that configureEasBuildAsync installs.
+            jq -n \
+              --arg keystorePath "$keystore" \
+              --arg keystorePassword "$ANDROID_KEYSTORE_PASSWORD" \
+              --arg keyAlias "$ANDROID_KEY_ALIAS" \
+              --arg keyPassword "$ANDROID_KEY_PASSWORD" \
+              '{android: {keystore: {keystorePath: $keystorePath, keystorePassword: $keystorePassword, keyAlias: $keyAlias, keyPassword: $keyPassword}}}' \
+              > packages/app/credentials.json
+            echo "EAS_BUILD=1" >> "$GITHUB_ENV"
+            echo "mode=keystore" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No Android keystore secrets set; the APK will be signed with the Expo template debug key."
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # setup-gradle owns Gradle caching and stops the daemon in its post step.
+      - uses: gradle/actions/setup-gradle@v4
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install JS dependencies
+        run: node scripts/npm-retry.mjs ci
+
+      - name: Build workspace packages
+        run: |
+          npm run build:app-deps
+          npm --prefix packages/app run build:terminal-webview
+
+      # The feature is cherry-picked onto a tag it was never written against;
+      # these suites are the ones the change touches.
+      - name: Test the feature on this tag
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -uo pipefail
+          fail() {
+            echo "::error::The native headers feature no longer passes $1 on upstream $TAG. Rebase $FEATURE_BRANCH onto $TAG and update FEATURE_COMMIT in this workflow. No APK was built and no release was published."
+            exit 1
+          }
+
+          for pkg in protocol client app; do
+            (cd "packages/$pkg" && npx tsgo --noEmit) || fail "the typecheck in packages/$pkg"
+          done
+
+          for pkg in protocol client; do
+            (cd "packages/$pkg" && npx vitest run) || fail "the packages/$pkg test suite"
+          done
+
+          (cd packages/app && npx vitest run --testTimeout=60000 \
+            src/utils/test-daemon-connection.test.ts \
+            src/utils/connection-headers.test.ts \
+            src/types/host-connection.test.ts \
+            src/runtime/host-runtime.test.ts \
+            src/i18n/resources.test.ts \
+            src/i18n/locales.test.ts) || fail "the targeted packages/app tests"
+
+      - name: Prebuild and assemble the release APK
+        env:
+          APP_VARIANT: production
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          GRADLE_OPTS: >-
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+            -Dorg.gradle.parallel=false
+            -Dorg.gradle.workers.max=1
+            -Dorg.gradle.daemon=false
+        run: |
+          set -euo pipefail
+          cd packages/app
+          npx expo prebuild --platform android --clean --non-interactive
+          if [[ "$SIGNING_MODE" == "keystore" ]]; then
+            node -e '(async () => require("expo/node_modules/@expo/config-plugins").AndroidConfig.EasBuild.configureEasBuildAsync(process.cwd()))().catch((error) => { console.error(error); process.exitCode = 1; })'
+          fi
+          cd android
+          ./gradlew \
+            :app:assembleRelease \
+            --max-workers=1 \
+            -x lint \
+            -x lintVitalAnalyzeRelease \
+            -x lintVitalRelease \
+            -x generateReleaseLintModel \
+            -x generateReleaseLintVitalModel
+
+      - name: Name and verify the APK
+        id: artifact
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+        run: |
+          set -euo pipefail
+          name="paseo-${TAG}-native-headers-android.apk"
+          cp packages/app/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/$name"
+          apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          certs="$("$apksigner" verify --print-certs "$RUNNER_TEMP/$name")"
+          printf '%s\n' "$certs" | head -n 4
+          if [[ "$SIGNING_MODE" == "keystore" ]] && printf '%s' "$certs" | grep -q "CN=Android Debug"; then
+            echo "::error::Keystore secrets were set but the APK is debug-signed; check credentials.json handling."
+            exit 1
+          fi
+          echo "artifact_name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.artifact_name }}
+          path: ${{ runner.temp }}/${{ steps.artifact.outputs.artifact_name }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # The release job has no copy of the cherry-picked commit, so the tag is
+      # pushed here (tag ref only, no branch) once the build has succeeded.
+      - name: Push the fork release tag
+        env:
+          FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
+        run: git push origin "HEAD:refs/tags/$FORK_TAG"
+
+  release:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: ${{ runner.temp }}/apk
+
+      - name: Publish the fork release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
+          UPSTREAM_URL: ${{ needs.resolve.outputs.upstream_url }}
+          ARTIFACT: ${{ needs.build.outputs.artifact_name }}
+          SIGNING_MODE: ${{ needs.build.outputs.signing }}
+          CHERRY_PICKED: ${{ needs.build.outputs.cherry_picked }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$CHERRY_PICKED" == "true" ]]; then
+            feature_line="Cherry-picked $FEATURE_COMMIT (getpaseo/paseo#4290) onto $TAG."
+          else
+            feature_line="Already present in upstream $TAG; no cherry-pick was needed."
+          fi
+
+          if [[ "$SIGNING_MODE" == "keystore" ]]; then
+            signing_line="Signed with the fork's release keystore, so later builds from this workflow install over this one."
+            install_line="Install: adb install -r $ARTIFACT, or open the APK on the device."
+          else
+            signing_line="DEBUG-SIGNED. No keystore secrets are configured on this repository, so the Expo template debug key was used. Anyone can produce an APK with this signature; treat it as a test build, and note that a future keystore-signed build will NOT install over it."
+            install_line="Install: uninstall any existing sh.paseo build first (adb uninstall sh.paseo), then adb install $ARTIFACT."
+          fi
+
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          Fork build of upstream $TAG with the native direct-connection headers feature.
+
+          - Upstream release: $UPSTREAM_URL
+          - Feature: $feature_line
+          - Signing: $signing_line
+          - applicationId is sh.paseo, the same id as the Play Store build. This APK REPLACES the store app; the two cannot coexist on one device.
+          - $install_line
+          - Built from commit $COMMIT.
+          EOF
+
+          gh release create "$FORK_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Paseo $TAG (native headers)" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --prerelease \
+            "$RUNNER_TEMP/apk/$ARTIFACT"
