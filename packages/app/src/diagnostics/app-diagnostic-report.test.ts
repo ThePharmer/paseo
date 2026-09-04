@@ -24,7 +24,7 @@ function makeHost(): HostProfile {
         endpoint: "secret.example.test:6767",
         useTls: true,
         password: "tcp-password",
-        headers: { "CF-Access-Client-Secret": "header-secret-value" },
+        headers: { "CF-Access-Client-Secret": "header-secret-value", "X-Feature": "on" },
       },
       {
         id: "relay:relay.secret.test:443",
@@ -124,5 +124,11 @@ describe("app diagnostics report", () => {
     expect(redacted).not.toContain("tcp-password");
     expect(redacted).not.toContain("header-secret-value");
     expect(redacted).not.toContain("pairing-secret");
+  });
+
+  test("leaves short header values alone so they cannot corrupt unrelated text", () => {
+    const redacted = redactAppDiagnosticReport("connection status: online", [makeHost()]);
+
+    expect(redacted).toBe("connection status: online");
   });
 });
