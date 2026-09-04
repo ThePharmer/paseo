@@ -36,6 +36,12 @@ export function prepareConnectionHeaders(drafts: readonly ConnectionHeaderDraft[
     }
 
     const normalizedName = name.toLowerCase();
+    if (normalizedName === "__proto__") {
+      // A legal token, but a plain object cannot hold it as an own property:
+      // assignment hits the inherited setter and the header silently vanishes.
+      // zod's record parsing also strips it on reload, so reject it loudly.
+      return { issue: { type: "invalidName", name } };
+    }
     if (normalizedNames.has(normalizedName)) {
       return { issue: { type: "duplicateName", name } };
     }

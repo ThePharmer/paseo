@@ -33,6 +33,15 @@ describe("prepareConnectionHeaders", () => {
     ).toEqual({ issue: { type: "duplicateName", name: "x-tenant" } });
   });
 
+  it("rejects __proto__ instead of silently dropping it", () => {
+    expect(prepareConnectionHeaders([{ id: 1, name: "__proto__", value: "x" }])).toEqual({
+      issue: { type: "invalidName", name: "__proto__" },
+    });
+    expect(prepareConnectionHeaders([{ id: 1, name: "__PROTO__", value: "x" }])).toEqual({
+      issue: { type: "invalidName", name: "__PROTO__" },
+    });
+  });
+
   it("rejects line breaks in values", () => {
     expect(prepareConnectionHeaders([{ id: 1, name: "X-Test", value: "one\ntwo" }])).toEqual({
       issue: { type: "invalidValue", name: "X-Test" },
