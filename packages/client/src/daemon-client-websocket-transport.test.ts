@@ -1,31 +1,31 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 import {
-  defaultWebSocketFactory,
-  nativeWebSocketFactory,
+  createWebSocketFactories,
+  type WebSocketConstructor,
 } from "./daemon-client-websocket-transport.js";
 
-type MockSocketArgs = [
-  string,
-  string | string[] | undefined,
-  { headers?: Record<string, string> }?,
-];
+type ConstructorArgs = [string, (string | string[])?, { headers?: Record<string, string> }?];
 
-function installMockWebSocket(): { calls: MockSocketArgs[] } {
-  const calls: MockSocketArgs[] = [];
-  function MockWebSocket(this: unknown, ...args: MockSocketArgs) {
-    calls.push(args);
+function createFakeWebSocketConstructor(): {
+  FakeWebSocket: WebSocketConstructor;
+  calls: ConstructorArgs[];
+} {
+  const calls: ConstructorArgs[] = [];
+  class FakeWebSocket {
+    readyState = 0;
+    constructor(...args: ConstructorArgs) {
+      calls.push(args);
+    }
+    send(): void {}
+    close(): void {}
   }
-  vi.stubGlobal("WebSocket", MockWebSocket);
-  return { calls };
+  return { FakeWebSocket, calls };
 }
 
 describe("daemon-client WebSocket factories", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
   test("nativeWebSocketFactory forwards handshake headers as the React Native options argument", () => {
-    const { calls } = installMockWebSocket();
+    const { FakeWebSocket, calls } = createFakeWebSocketConstructor();
+    const { nativeWebSocketFactory } = createWebSocketFactories(() => FakeWebSocket);
 
     nativeWebSocketFactory("ws://example.test/ws", {
       protocols: ["paseo.bearer.secret"],
@@ -42,7 +42,8 @@ describe("daemon-client WebSocket factories", () => {
   });
 
   test("defaultWebSocketFactory keeps the browser two-argument constructor and drops headers", () => {
-    const { calls } = installMockWebSocket();
+    const { FakeWebSocket, calls } = createFakeWebSocketConstructor();
+    const { defaultWebSocketFactory } = createWebSocketFactories(() => FakeWebSocket);
 
     defaultWebSocketFactory("ws://example.test/ws", {
       protocols: ["paseo.bearer.secret"],
@@ -50,5 +51,14 @@ describe("daemon-client WebSocket factories", () => {
     });
 
     expect(calls).toEqual([["ws://example.test/ws", ["paseo.bearer.secret"]]]);
+  });
+
+  test("defaultWebSocketFactory omits the protocols argument when none are given", () => {
+    const { FakeWebSocket, calls } = createFakeWebSocketConstructor();
+    const { defaultWebSocketFactory } = createWebSocketFactories(() => FakeWebSocket);
+
+    defaultWebSocketFactory("ws://example.test/ws");
+
+    expect(calls).toEqual([["ws://example.test/ws"]]);
   });
 });
