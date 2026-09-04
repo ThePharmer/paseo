@@ -130,6 +130,7 @@ function collectSensitiveHostValues(hosts: HostProfile[]): string[] {
       if (connection.type === "directTcp") {
         values.add(connection.endpoint);
         if (connection.password) values.add(connection.password);
+        for (const value of Object.values(connection.headers ?? {})) values.add(value);
       } else if (connection.type === "relay") {
         values.add(connection.relayEndpoint);
         values.add(connection.daemonPublicKeyB64);
