@@ -254,7 +254,12 @@ function ConnectionHeaderRow({
     [draft.id, onUpdate],
   );
   const handleRemove = useCallback(() => onRemove(draft.id), [draft.id, onRemove]);
+  const [isValueVisible, setIsValueVisible] = useState(false);
+  const handleToggleValueVisibility = useCallback(() => {
+    setIsValueVisible((current) => !current);
+  }, []);
   const inputStyle = useMemo(() => [styles.input, styles.headerInput], []);
+  const ValueIcon = isValueVisible ? EyeOff : Eye;
 
   return (
     <View style={styles.headerRow}>
@@ -282,8 +287,23 @@ function ConnectionHeaderRow({
         style={inputStyle}
         autoCapitalize="none"
         autoCorrect={false}
+        secureTextEntry={!isValueVisible}
         editable={!disabled}
       />
+      <Pressable
+        style={styles.iconButton}
+        onPress={handleToggleValueVisibility}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityLabel={
+          isValueVisible
+            ? t("pairing.direct.passwordVisibility.hide")
+            : t("pairing.direct.passwordVisibility.show")
+        }
+        testID={`direct-header-value-visibility-${index}`}
+      >
+        <ValueIcon size={18} color={iconColor} />
+      </Pressable>
       <Pressable
         style={styles.iconButton}
         onPress={handleRemove}
