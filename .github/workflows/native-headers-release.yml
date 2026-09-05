@@ -14,6 +14,11 @@ on:
         required: false
         default: ""
         type: string
+      force:
+        description: "Rebuild even if the fork release already exists (replaces its APK and notes)"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: native-headers-release
@@ -41,6 +46,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.upstream_tag }}
+          FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
           if [[ -n "${INPUT_TAG:-}" ]]; then
@@ -54,8 +60,12 @@ jobs:
 
           needed=true
           if gh release view "$fork_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            needed=false
-            echo "Fork release $fork_tag already exists; nothing to do."
+            if [[ "${FORCE:-false}" == "true" ]]; then
+              echo "Fork release $fork_tag already exists; force set, rebuilding and replacing it."
+            else
+              needed=false
+              echo "Fork release $fork_tag already exists; nothing to do."
+            fi
           fi
 
           {
@@ -303,7 +313,10 @@ jobs:
       - name: Push the fork release tag
         env:
           FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
-        run: git push origin "HEAD:refs/tags/$FORK_TAG"
+        run: |
+          # A forced rebuild re-creates the cherry-pick commit, so the old tag must go first.
+          git push origin ":refs/tags/$FORK_TAG" || true
+          git push origin "HEAD:refs/tags/$FORK_TAG"
 
   release:
     needs: [resolve, build]
@@ -362,9 +375,21 @@ jobs:
           - Built from commit $COMMIT.
           EOF
 
-          gh release create "$FORK_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Paseo $TAG (native headers)" \
-            --notes-file "$RUNNER_TEMP/notes.md" \
-            --prerelease \
-            "$RUNNER_TEMP/apk/$ARTIFACT"
+          if gh release view "$FORK_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$FORK_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Paseo $TAG (native headers)" \
+              --notes-file "$RUNNER_TEMP/notes.md" \
+              --prerelease
+            gh release upload "$FORK_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              "$RUNNER_TEMP/apk/$ARTIFACT"
+          else
+            gh release create "$FORK_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Paseo $TAG (native headers)" \
+              --notes-file "$RUNNER_TEMP/notes.md" \
+              --prerelease \
+              "$RUNNER_TEMP/apk/$ARTIFACT"
+          fi
