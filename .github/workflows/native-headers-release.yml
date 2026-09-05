@@ -376,11 +376,14 @@ jobs:
           EOF
 
           if gh release view "$FORK_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Re-creating the tag in the build job flips the release to a draft;
+            # --draft=false re-publishes it against the new tag.
             gh release edit "$FORK_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "Paseo $TAG (native headers)" \
               --notes-file "$RUNNER_TEMP/notes.md" \
-              --prerelease
+              --prerelease \
+              --draft=false
             gh release upload "$FORK_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --clobber \
