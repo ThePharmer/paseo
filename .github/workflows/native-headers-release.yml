@@ -74,6 +74,7 @@ jobs:
     outputs:
       artifact_name: ${{ steps.artifact.outputs.artifact_name }}
       signing: ${{ steps.signing.outputs.mode }}
+      push: ${{ steps.push.outputs.mode }}
       cherry_picked: ${{ steps.source.outputs.cherry_picked }}
       commit: ${{ steps.source.outputs.commit }}
     steps:
@@ -140,6 +141,56 @@ jobs:
             echo "mode=debug" >> "$GITHUB_OUTPUT"
           fi
 
+      # Push notifications need a Firebase client config baked into the APK and
+      # an Expo project that holds the matching FCM service-account key. Upstream
+      # app.config.js names the maintainers' Expo project, which this fork cannot
+      # use, so the fork's own project id is patched in for the build only.
+      - name: Configure Firebase push credentials
+        id: push
+        env:
+          GOOGLE_SERVICES_JSON_BASE64: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+          EXPO_PROJECT_ID: ${{ vars.EXPO_PROJECT_ID }}
+          EXPO_OWNER: ${{ vars.EXPO_OWNER }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GOOGLE_SERVICES_JSON_BASE64:-}" || -z "${EXPO_PROJECT_ID:-}" ]]; then
+            echo "::warning::GOOGLE_SERVICES_JSON_BASE64 secret or EXPO_PROJECT_ID variable is not set; the APK will not support push notifications."
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ ! "$EXPO_PROJECT_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+            echo "::error::EXPO_PROJECT_ID is not a UUID."
+            exit 1
+          fi
+          if [[ -n "${EXPO_OWNER:-}" && ! "$EXPO_OWNER" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+            echo "::error::EXPO_OWNER is not a valid Expo account slug."
+            exit 1
+          fi
+
+          # app.config.js falls back to this path when GOOGLE_SERVICES_FILE_PROD is unset.
+          mkdir -p packages/app/.secrets
+          printf '%s' "$GOOGLE_SERVICES_JSON_BASE64" | base64 --decode > packages/app/.secrets/google-services.prod.json
+          jq -e '.client[] | select(.client_info.android_client_info.package_name == "sh.paseo")' \
+            packages/app/.secrets/google-services.prod.json >/dev/null \
+            || { echo "::error::google-services.json has no Android client for package sh.paseo."; exit 1; }
+
+          node - "$EXPO_PROJECT_ID" "${EXPO_OWNER:-}" <<'EOF'
+          const fs = require("node:fs");
+          const [projectId, owner] = process.argv.slice(2);
+          const file = "packages/app/app.config.js";
+          const before = fs.readFileSync(file, "utf8");
+          let src = before.replace(/projectId:\s*"[0-9a-f-]{36}"/, `projectId: "${projectId}"`);
+          if (owner) {
+            src = src.replace(/owner:\s*"[^"]+"/, `owner: "${owner}"`);
+          }
+          if (src === before) {
+            console.error("app.config.js: projectId/owner pattern not found; upstream config changed.");
+            process.exit(1);
+          }
+          fs.writeFileSync(file, src);
+          EOF
+          echo "mode=firebase" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -195,6 +246,7 @@ jobs:
         env:
           APP_VARIANT: production
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          PUSH_MODE: ${{ steps.push.outputs.mode }}
           GRADLE_OPTS: >-
             -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
             -Dorg.gradle.parallel=false
@@ -204,6 +256,10 @@ jobs:
           set -euo pipefail
           cd packages/app
           npx expo prebuild --platform android --clean --non-interactive
+          if [[ "$PUSH_MODE" == "firebase" && ! -f android/app/google-services.json ]]; then
+            echo "::error::Push credentials were configured but prebuild did not emit android/app/google-services.json."
+            exit 1
+          fi
           if [[ "$SIGNING_MODE" == "keystore" ]]; then
             node -e '(async () => require("expo/node_modules/@expo/config-plugins").AndroidConfig.EasBuild.configureEasBuildAsync(process.cwd()))().catch((error) => { console.error(error); process.exitCode = 1; })'
           fi
@@ -268,6 +324,7 @@ jobs:
           UPSTREAM_URL: ${{ needs.resolve.outputs.upstream_url }}
           ARTIFACT: ${{ needs.build.outputs.artifact_name }}
           SIGNING_MODE: ${{ needs.build.outputs.signing }}
+          PUSH_MODE: ${{ needs.build.outputs.push }}
           CHERRY_PICKED: ${{ needs.build.outputs.cherry_picked }}
           COMMIT: ${{ needs.build.outputs.commit }}
         run: |
@@ -287,12 +344,19 @@ jobs:
             install_line="Install: uninstall any existing sh.paseo build first (adb uninstall sh.paseo), then adb install $ARTIFACT."
           fi
 
+          if [[ "$PUSH_MODE" == "firebase" ]]; then
+            push_line="Push notifications: enabled. Built with the fork's Firebase client config and Expo project, so the daemon can register a push token for this install."
+          else
+            push_line="Push notifications: NOT available. No Firebase credentials were configured on this repository."
+          fi
+
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           Fork build of upstream $TAG with the native direct-connection headers feature.
 
           - Upstream release: $UPSTREAM_URL
           - Feature: $feature_line
           - Signing: $signing_line
+          - $push_line
           - applicationId is sh.paseo, the same id as the Play Store build. This APK REPLACES the store app; the two cannot coexist on one device.
           - $install_line
           - Built from commit $COMMIT.
