@@ -3,10 +3,11 @@ name: Native headers APK release
 # Publishes a fork-only Android APK for every upstream release: the upstream
 # release tag plus the fork's native direct-connection headers commit
 # (getpaseo/paseo#4290). Lives on fork main because schedules only run there.
+# Polls every 15 minutes; a run with no new upstream tag ends in seconds.
 
 on:
   schedule:
-    - cron: "23 7 * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
       upstream_tag:
