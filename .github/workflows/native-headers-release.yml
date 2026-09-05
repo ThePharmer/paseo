@@ -275,8 +275,11 @@ jobs:
             node -e '(async () => require("expo/node_modules/@expo/config-plugins").AndroidConfig.EasBuild.configureEasBuildAsync(process.cwd()))().catch((error) => { console.error(error); process.exitCode = 1; })'
           fi
           cd android
+          # Phones are arm64; dropping armeabi-v7a/x86/x86_64 cuts the APK to
+          # roughly a third. This APK will not run on x86 emulators.
           ./gradlew \
             :app:assembleRelease \
+            -PreactNativeArchitectures=arm64-v8a \
             --max-workers=1 \
             -x lint \
             -x lintVitalAnalyzeRelease \
@@ -371,6 +374,7 @@ jobs:
           - Feature: $feature_line
           - Signing: $signing_line
           - $push_line
+          - Architecture: arm64-v8a only, to keep the APK small. Not for x86 emulators.
           - applicationId is sh.paseo, the same id as the Play Store build. This APK REPLACES the store app; the two cannot coexist on one device.
           - $install_line
           - Built from commit $COMMIT.
