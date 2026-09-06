@@ -32,6 +32,11 @@ env:
   UPSTREAM_REPO: getpaseo/paseo
   FEATURE_COMMIT: d555d08d92f3990db6960ce18a5aaf924fc0ddda
   FEATURE_BRANCH: feat/native-direct-connection-headers
+  # Fork-only fixes cherry-picked after the feature, in order, until upstream
+  # ships them. One "<sha> <branch> <upstream PR>" per line; the branch is
+  # fetched so the sha is reachable. A sha already in the tag is skipped.
+  EXTRA_FIXES: |
+    1f33b1a024fd0efb87f90f5838d0e1904fed5081 fix/question-card-multiselect-other getpaseo/paseo#4372
 
 jobs:
   resolve:
@@ -87,6 +92,7 @@ jobs:
       signing: ${{ steps.signing.outputs.mode }}
       push: ${{ steps.push.outputs.mode }}
       cherry_picked: ${{ steps.source.outputs.cherry_picked }}
+      fixes: ${{ steps.source.outputs.fixes }}
       commit: ${{ steps.source.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
@@ -119,8 +125,26 @@ jobs:
             exit 1
           fi
 
+          fixes=""
+          while read -r sha branch pr; do
+            [[ -z "${sha:-}" ]] && continue
+            git fetch --no-tags origin "refs/heads/$branch:refs/remotes/fork/$branch"
+            if git cherry-pick -x "$sha"; then
+              fixes="${fixes:+$fixes, }${sha:0:9} ($pr)"
+            elif [[ -z "$(git diff --name-only --diff-filter=U)" ]]; then
+              git cherry-pick --skip
+              echo "Fix $sha ($pr) is already in $TAG; skipped."
+            else
+              conflicts="$(git diff --name-only --diff-filter=U | paste -sd' ' -)"
+              git cherry-pick --abort || true
+              echo "::error::Cherry-picking fix $sha ($pr) onto $TAG conflicted in: ${conflicts:-unknown}. Rebase $branch onto $TAG, update EXTRA_FIXES in this workflow, then re-run. No release was published."
+              exit 1
+            fi
+          done <<< "$EXTRA_FIXES"
+
           {
             echo "cherry_picked=$cherry_picked"
+            echo "fixes=$fixes"
             echo "commit=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
 
@@ -251,7 +275,8 @@ jobs:
             src/types/host-connection.test.ts \
             src/runtime/host-runtime.test.ts \
             src/i18n/resources.test.ts \
-            src/i18n/locales.test.ts) || fail "the targeted packages/app tests"
+            src/i18n/locales.test.ts \
+            src/components/question-form-card-core.test.ts) || fail "the targeted packages/app tests"
 
       - name: Prebuild and assemble the release APK
         env:
@@ -343,6 +368,7 @@ jobs:
           SIGNING_MODE: ${{ needs.build.outputs.signing }}
           PUSH_MODE: ${{ needs.build.outputs.push }}
           CHERRY_PICKED: ${{ needs.build.outputs.cherry_picked }}
+          FIXES: ${{ needs.build.outputs.fixes }}
           COMMIT: ${{ needs.build.outputs.commit }}
         run: |
           set -euo pipefail
@@ -361,6 +387,12 @@ jobs:
             install_line="Install: uninstall any existing sh.paseo build first (adb uninstall sh.paseo), then adb install $ARTIFACT."
           fi
 
+          if [[ -n "${FIXES:-}" ]]; then
+            fixes_line="Fork-only fixes cherry-picked on top: $FIXES."
+          else
+            fixes_line="Fork-only fixes cherry-picked on top: none."
+          fi
+
           if [[ "$PUSH_MODE" == "firebase" ]]; then
             push_line="Push notifications: enabled. Built with the fork's Firebase client config and Expo project, so the daemon can register a push token for this install."
           else
@@ -372,6 +404,7 @@ jobs:
 
           - Upstream release: $UPSTREAM_URL
           - Feature: $feature_line
+          - $fixes_line
           - Signing: $signing_line
           - $push_line
           - Architecture: arm64-v8a only, to keep the APK small. Not for x86 emulators.
