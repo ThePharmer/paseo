@@ -1,5 +1,7 @@
 # Development
 
+For work specific to ThePharmer/paseo, use the [fork experiment plan](fork-experiments.md).
+
 ## Prerequisites
 
 - Node.js (see `.tool-versions` for exact version)
