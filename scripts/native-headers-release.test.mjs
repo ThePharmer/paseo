@@ -39,7 +39,7 @@ function fixture(t) {
   const ref = "refs/tags/v0.8.0-native-headers";
   const output = join(dir, "output");
   writeFileSync(output, "");
-  const env = { ...process.env, FORK_TAG: ref.slice(10), GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1", GITHUB_OUTPUT: output, COMMIT: commit, PREVIOUS_TAG: "" };
+  const env = { ...process.env, GH_TOKEN: "test-token", FORK_TAG: ref.slice(10), GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1", GITHUB_OUTPUT: output, COMMIT: commit, PREVIOUS_TAG: "" };
   const run = (script, extra = {}) => spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], { cwd, env: { ...env, ...extra }, encoding: "utf8" });
   const target = () => git("ls-remote", "--refs", remote, ref).split("\t")[0];
   const seed = (sha = old) => git("-C", cwd, "push", "--force", "origin", `${sha}:${ref}`);

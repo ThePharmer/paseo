@@ -98,9 +98,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Test tag publishing safeguards
-        run: node --test scripts/native-headers-release.test.mjs
+      - name: Prepare and test release workflow tools
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/release-tools"
+          "$RUNNER_TEMP/release-tools/bin/pip" install --disable-pip-version-check PyYAML==6.0.3
+          node --test scripts/native-headers-release.test.mjs
+          "$RUNNER_TEMP/release-tools/bin/python" scripts/native-headers-workflow-filters.test.py
+          cp scripts/native-headers-workflow-filters.py "$RUNNER_TEMP/release-tools/filters.py"
 
       - name: Build the source tree for the release
         id: source
@@ -145,18 +152,39 @@ jobs:
             fi
           done <<< "$EXTRA_FIXES"
 
+          # The tag carries upstream's workflows, not those on fork main. Exclude
+          # fork publication tags in that tree before an App-authenticated push.
+          "$RUNNER_TEMP/release-tools/bin/python" "$RUNNER_TEMP/release-tools/filters.py" .github/workflows
+          git add .github/workflows
+          if ! git diff --cached --quiet; then
+            git commit -m "Exclude native-headers publication tags from upstream workflows"
+          fi
+
           {
             echo "cherry_picked=$cherry_picked"
             echo "fixes=$fixes"
             echo "commit=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Create App token for publishing preflight
+        id: preflight_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+
       - name: Check tag publishing before building
         id: publish_check
         env:
+          GH_TOKEN: ${{ steps.preflight_token.outputs.token }}
           FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
         run: |
           set -euo pipefail
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           release_ref="refs/tags/$FORK_TAG"
           git check-ref-format "$release_ref"
           # Record the exact ref object (including annotated tags) for the final lease.
@@ -374,13 +402,26 @@ jobs:
 
       # The release job has no copy of the cherry-picked commit, so the tag is
       # pushed here (tag ref only, no branch) once the build has succeeded.
+      - name: Create App token for release tag publishing
+        id: publish_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+
       - name: Push the fork release tag
         env:
           FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
+          GH_TOKEN: ${{ steps.publish_token.outputs.token }}
           PREVIOUS_TAG: ${{ steps.publish_check.outputs.previous_tag }}
           COMMIT: ${{ steps.source.outputs.commit }}
         run: |
           set -euo pipefail
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           release_ref="refs/tags/$FORK_TAG"
           # One compare-and-swap: a rejected push preserves the old tag and release.
           # An empty expected value means the tag must still be absent.
@@ -449,6 +490,7 @@ jobs:
           - Architecture: arm64-v8a only, to keep the APK small. Not for x86 emulators.
           - applicationId is sh.paseo, the same id as the Play Store build. This APK REPLACES the store app; the two cannot coexist on one device.
           - $install_line
+          - Fork publication tags are excluded from upstream push workflows in the release source to prevent competing builds and release updates.
           - Built from commit $COMMIT.
           EOF
 
