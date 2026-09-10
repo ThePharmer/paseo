@@ -99,6 +99,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Test tag publishing safeguards
+        run: node --test scripts/native-headers-release.test.mjs
+
       - name: Build the source tree for the release
         id: source
         env:
@@ -147,6 +150,38 @@ jobs:
             echo "fixes=$fixes"
             echo "commit=$(git rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Check tag publishing before building
+        id: publish_check
+        env:
+          FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
+        run: |
+          set -euo pipefail
+          release_ref="refs/tags/$FORK_TAG"
+          git check-ref-format "$release_ref"
+          # Record the exact ref object (including annotated tags) for the final lease.
+          existing="$(git ls-remote --refs origin "$release_ref")"
+          echo "previous_tag=${existing%%$'\t'*}" >> "$GITHUB_OUTPUT"
+
+          # --dry-run does not exercise GitHub's server-side workflow permission check.
+          # Use the actual source commit, but never expose an unbuilt release tag.
+          probe_ref="refs/tags/native-headers-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          commit="$(git rev-parse HEAD)"
+          created=false
+          cleanup() {
+            if [[ "$created" == "true" ]]; then
+              if ! git push --force-with-lease="$probe_ref:$commit" origin ":$probe_ref"; then
+                echo "::error::Could not remove temporary tag $probe_ref. Remove it after checking its target; no APK build will start."
+                exit 1
+              fi
+            fi
+          }
+          trap cleanup EXIT
+          if ! git push --force-with-lease="$probe_ref:" origin "$commit:$probe_ref"; then
+            echo "::error::Tag publishing preflight failed. Check the push error above; if GitHub reports missing workflows permission, configure publishing credentials with Contents and Workflows write access. No APK build was started and the release tag was not changed."
+            exit 1
+          fi
+          created=true
 
       - name: Configure APK signing
         id: signing
@@ -342,10 +377,14 @@ jobs:
       - name: Push the fork release tag
         env:
           FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
+          PREVIOUS_TAG: ${{ steps.publish_check.outputs.previous_tag }}
+          COMMIT: ${{ steps.source.outputs.commit }}
         run: |
-          # A forced rebuild re-creates the cherry-pick commit, so the old tag must go first.
-          git push origin ":refs/tags/$FORK_TAG" || true
-          git push origin "HEAD:refs/tags/$FORK_TAG"
+          set -euo pipefail
+          release_ref="refs/tags/$FORK_TAG"
+          # One compare-and-swap: a rejected push preserves the old tag and release.
+          # An empty expected value means the tag must still be absent.
+          git push --force-with-lease="$release_ref:$PREVIOUS_TAG" origin "$COMMIT:$release_ref"
 
   release:
     needs: [resolve, build]
@@ -414,8 +453,7 @@ jobs:
           EOF
 
           if gh release view "$FORK_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # Re-creating the tag in the build job flips the release to a draft;
-            # --draft=false re-publishes it against the new tag.
+            # The tag is updated in place; keep the existing release published.
             gh release edit "$FORK_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "Paseo $TAG (native headers)" \
