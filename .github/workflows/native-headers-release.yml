@@ -307,8 +307,12 @@ jobs:
       - name: Install JS dependencies
         run: node scripts/npm-retry.mjs ci
 
+      # The client tests spawn a plain node subprocess that resolves
+      # @getpaseo/relay through its "node" export condition, which points at
+      # dist. Upstream's sdk-tests job builds relay for the same reason.
       - name: Build workspace packages
         run: |
+          npm run build:relay
           npm run build:app-deps
           npm --prefix packages/app run build:terminal-webview
 
