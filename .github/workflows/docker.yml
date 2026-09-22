@@ -1,33 +1,35 @@
 name: Docker
 
-on:
+'on':
   push:
-    branches: [main]
+    branches:
+    - main
     tags:
-      - "v*"
+    - v*
+    - '!**-native-headers'
+    - '!native-headers-preflight-**'
   workflow_dispatch:
     inputs:
       paseo_version:
-        description: "Expected source version to build. Required when publish is true."
+        description: Expected source version to build. Required when publish is true.
         required: false
-        default: ""
+        default: ''
       publish:
-        description: "Publish the image to GHCR. Manual publishes require paseo_version."
+        description: Publish the image to GHCR. Manual publishes require paseo_version.
         required: false
-        default: "false"
+        default: 'false'
         type: choice
         options:
-          - "false"
-          - "true"
+        - 'false'
+        - 'true'
       publish_latest:
-        description: "Also publish ghcr.io/getpaseo/paseo:latest. Ignored for prereleases."
+        description: Also publish ghcr.io/getpaseo/paseo:latest. Ignored for prereleases.
         required: false
-        default: "false"
+        default: 'false'
         type: choice
         options:
-          - "false"
-          - "true"
-
+        - 'false'
+        - 'true'
 concurrency:
   group: docker-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
