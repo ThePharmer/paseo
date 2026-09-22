@@ -302,7 +302,7 @@ jobs:
       # setup-gradle owns Gradle caching and stops the daemon in its post step.
       - uses: gradle/actions/setup-gradle@v4
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
 
       - name: Install JS dependencies
         run: node scripts/npm-retry.mjs ci
