@@ -41,6 +41,7 @@ env:
   # fetched so the sha is reachable. A sha already in the tag is skipped.
   EXTRA_FIXES: |
     1f33b1a024fd0efb87f90f5838d0e1904fed5081 fix/question-card-multiselect-other getpaseo/paseo#4372
+    c340c5c0d6e88466667b83a2fd13368ecb3eeb19 fix/native-download-headers getpaseo/paseo#4290
 
 jobs:
   resolve:
