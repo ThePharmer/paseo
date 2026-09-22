@@ -1889,6 +1889,7 @@ export const ar: TranslationResources = {
     hostUnavailable: "مضيف التنزيل غير متاح.",
     cancelled: "تم إلغاء التنزيل.",
     failed: "فشل تنزيل الملف.",
+    httpError: "فشل التنزيل بالحالة {{status}}.",
     shareFile: "مشاركة الملف",
     shareFileNamed: "مشاركة{{fileName}}",
   },
