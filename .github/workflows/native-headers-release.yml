@@ -357,7 +357,40 @@ jobs:
             -Dorg.gradle.daemon=false
         run: |
           set -euo pipefail
+          # Hosted runners give this build no headroom: Gradle's 4 GB heap, a
+          # Kotlin daemon that inherits the same 4 GB, hermesc, and the C++
+          # builds together exceed the machine, and the kernel kills the runner
+          # worker. GitHub reports that as "The operation was canceled" with no
+          # further output (actions/runner#2468). Free disk, cap the Kotlin
+          # daemon, drop the unused C++ prototype module, and sample memory so
+          # a failure leaves evidence in the log.
+          sudo rm -rf /usr/share/dotnet /usr/local/.ghcup /opt/ghc /usr/share/swift /usr/local/share/powershell /opt/hostedtoolcache/CodeQL
+          echo "cpus=$(nproc)"
+          free -m
+          df -h /
+          (
+            while true; do
+              printf '[mem %s] %s disk_avail=%sM top: %s\n' "$(date -u +%H:%M:%S)" \
+                "$(free -m | awk '/Mem:/{printf "used=%dM avail=%dM", $3, $7} /Swap:/{printf " swap=%dM/%dM", $3, $2}')" \
+                "$(df -m --output=avail / | tail -n 1 | tr -d ' ')" \
+                "$(ps -eo rss=,comm= --sort=-rss | head -n 4 | awk '{printf "%s=%dM ", $2, $1/1024}')"
+              sleep 20
+            done
+          ) &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
           cd packages/app
+          # modules/paseo-diff-prototype is an Android-only C++ layout experiment
+          # that the app never calls (its README says so). It links Skia for all
+          # four ABIs on every build, so leave it out of the fork APK.
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.expo = pkg.expo ?? {};
+            pkg.expo.autolinking = pkg.expo.autolinking ?? {};
+            pkg.expo.autolinking.exclude = [...new Set([...(pkg.expo.autolinking.exclude ?? []), "paseo-diff-prototype"])];
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
           npx expo prebuild --platform android --clean --non-interactive
           if [[ "$PUSH_MODE" == "firebase" && ! -f android/app/google-services.json ]]; then
             echo "::error::Push credentials were configured but prebuild did not emit android/app/google-services.json."
@@ -377,7 +410,9 @@ jobs:
             -x lintVitalAnalyzeRelease \
             -x lintVitalRelease \
             -x generateReleaseLintModel \
-            -x generateReleaseLintVitalModel
+            -x generateReleaseLintVitalModel \
+            -Pkotlin.daemon.jvmargs=-Xmx2g \
+            || { echo "::group::kernel log tail"; sudo dmesg 2>/dev/null | tail -n 60; echo "::endgroup::"; exit 1; }
 
       - name: Name and verify the APK
         id: artifact
