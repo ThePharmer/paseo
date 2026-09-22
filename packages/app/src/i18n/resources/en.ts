@@ -1769,6 +1769,7 @@ export const en = {
     hostUnavailable: "Download host is unavailable.",
     cancelled: "Download was cancelled.",
     failed: "Failed to download file.",
+    httpError: "Download failed with status {{status}}.",
     shareFile: "Share file",
     shareFileNamed: "Share {{fileName}}",
   },

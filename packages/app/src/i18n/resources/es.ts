@@ -1805,6 +1805,7 @@ export const es: TranslationResources = {
     hostUnavailable: "El host de descarga no está disponible.",
     cancelled: "La descarga fue cancelada.",
     failed: "No se pudo descargar el archivo.",
+    httpError: "La descarga falló con el estado {{status}}.",
     shareFile: "compartir archivo",
     shareFileNamed: "Compartir{{fileName}}",
   },
