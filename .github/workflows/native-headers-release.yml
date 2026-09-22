@@ -357,14 +357,16 @@ jobs:
             -Dorg.gradle.daemon=false
         run: |
           set -euo pipefail
-          # Hosted runners give this build no headroom: Gradle's 4 GB heap, a
-          # Kotlin daemon that inherits the same 4 GB, hermesc, and the C++
-          # builds together exceed the machine, and the kernel kills the runner
-          # worker. GitHub reports that as "The operation was canceled" with no
-          # further output (actions/runner#2468). Cap the Kotlin daemon, drop
-          # the unused C++ prototype module, and sample memory so a failure
-          # leaves evidence in the log. (The runner has 16 GB RAM, 3 GB swap,
-          # and about 97 GB of free disk; disk is not the constraint.)
+          # Hosted runners (4 CPU, 16 GB RAM, 3 GB swap) give this build no
+          # headroom. Sampled on v0.9.0: hermesc went from 1.4 GB to 5.8 GB in
+          # 20 s and was still climbing on top of a 2.5 GB Gradle JVM and a
+          # 1.7 GB Kotlin daemon when the runner killed the step. GitHub
+          # reports that as "The operation was canceled" or exit code 143 with
+          # no further output (actions/runner#2468). So: compile Kotlin inside
+          # the Gradle JVM, skip the Hermes source map, leave out the unused
+          # C++ prototype module, add swap as a backstop, and sample memory so
+          # a failure leaves evidence in the log.
+          sudo fallocate -l 12G /swapfile2 && sudo chmod 600 /swapfile2 && sudo mkswap -q /swapfile2 && sudo swapon /swapfile2
           echo "cpus=$(nproc)"
           free -m
           df -h /
@@ -399,6 +401,20 @@ jobs:
           if [[ "$SIGNING_MODE" == "keystore" ]]; then
             node -e '(async () => require("expo/node_modules/@expo/config-plugins").AndroidConfig.EasBuild.configureEasBuildAsync(process.cwd()))().catch((error) => { console.error(error); process.exitCode = 1; })'
           fi
+          # Hermes source maps are the bulk of hermesc's memory and nothing
+          # consumes them for a fork APK. React Native's bundle task only
+          # composes source maps when the flag is present.
+          node - <<'EOF'
+          const fs = require("fs");
+          const file = "android/app/build.gradle";
+          const src = fs.readFileSync(file, "utf8");
+          const before = '// hermesFlags = ["-O", "-output-source-map"]';
+          if (!src.includes(before)) {
+            console.error("android/app/build.gradle: hermesFlags template line not found; upstream template changed.");
+            process.exit(1);
+          }
+          fs.writeFileSync(file, src.replace(before, 'hermesFlags = ["-O"]'));
+          EOF
           cd android
           # Phones are arm64; dropping armeabi-v7a/x86/x86_64 cuts the APK to
           # roughly a third. This APK will not run on x86 emulators.
@@ -416,7 +432,7 @@ jobs:
               -x lintVitalRelease \
               -x generateReleaseLintModel \
               -x generateReleaseLintVitalModel \
-              -Pkotlin.daemon.jvmargs=-Xmx2g \
+              -Pkotlin.compiler.execution.strategy=in-process \
               2>&1 | tee "$RUNNER_TEMP/gradle-attempt.log"
             return "${PIPESTATUS[0]}"
           }
