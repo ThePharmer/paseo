@@ -4,6 +4,7 @@ import * as LegacyFileSystem from "expo-file-system/legacy";
 import * as Sharing from "expo-sharing";
 import type { HostProfile } from "@/types/host-connection";
 import { buildDaemonWebSocketUrl } from "@/utils/daemon-endpoints";
+import { buildDownloadHeaders } from "@/utils/download-headers";
 import { openExternalUrl } from "@/utils/open-external-url";
 import { isWeb } from "@/constants/platform";
 import { i18n } from "@/i18n/i18next";
@@ -109,12 +110,14 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
 
       const downloadStartTime = Date.now();
       const targetFile = resolveDownloadTargetFile(resolvedFileName);
+      const requestHeaders = buildDownloadHeaders(
+        downloadTarget.headers ?? undefined,
+        downloadTarget.authHeader,
+      );
       const downloadResumable = LegacyFileSystem.createDownloadResumable(
         downloadUrl,
         targetFile.uri,
-        downloadTarget.authHeader
-          ? { headers: { Authorization: downloadTarget.authHeader } }
-          : undefined,
+        requestHeaders ? { headers: requestHeaders } : undefined,
         (data) => {
           const now = Date.now();
           const { totalBytesWritten, totalBytesExpectedToWrite } = data;
@@ -142,6 +145,9 @@ export const useDownloadStore = create<DownloadState>()((set, get) => ({
       const result = await downloadResumable.downloadAsync();
       if (!result) {
         throw new Error(i18n.t("downloads.cancelled"));
+      }
+      if (result.status < 200 || result.status >= 300) {
+        throw new Error(i18n.t("downloads.httpError", { status: result.status }));
       }
 
       get().completeDownload(id);
@@ -242,13 +248,16 @@ interface DownloadTarget {
   baseUrl: string | null;
   authHeader: string | null;
   authCredentials: { username: string; password: string } | null;
+  headers: Record<string, string> | null;
 }
 
 function resolveDaemonDownloadTarget(daemon?: HostProfile): DownloadTarget {
   const connection = daemon?.connections.find((conn) => conn.type === "directTcp") ?? null;
   if (!connection) {
-    return { baseUrl: null, authHeader: null, authCredentials: null };
+    return { baseUrl: null, authHeader: null, authCredentials: null, headers: null };
   }
+
+  const headers = connection.headers ?? null;
 
   let parsed: URL;
   try {
@@ -256,7 +265,7 @@ function resolveDaemonDownloadTarget(daemon?: HostProfile): DownloadTarget {
       buildDaemonWebSocketUrl(connection.endpoint, { useTls: connection.useTls ?? false }),
     );
   } catch {
-    return { baseUrl: null, authHeader: null, authCredentials: null };
+    return { baseUrl: null, authHeader: null, authCredentials: null, headers };
   }
 
   if (parsed.protocol === "ws:") {
@@ -282,7 +291,7 @@ function resolveDaemonDownloadTarget(daemon?: HostProfile): DownloadTarget {
     ? `Basic ${btoa(`${authCredentials.username}:${authCredentials.password}`)}`
     : null;
 
-  return { baseUrl, authHeader, authCredentials };
+  return { baseUrl, authHeader, authCredentials, headers };
 }
 
 function buildDownloadUrl(
