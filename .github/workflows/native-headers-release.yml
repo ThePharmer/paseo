@@ -30,13 +30,18 @@ permissions:
 
 env:
   UPSTREAM_REPO: getpaseo/paseo
-  FEATURE_COMMIT: d555d08d92f3990db6960ce18a5aaf924fc0ddda
-  FEATURE_BRANCH: feat/native-direct-connection-headers
+  # A single squashed commit holding the whole feat/native-direct-connection-headers
+  # branch, rebased onto the upstream tag it targets. Only this one commit is
+  # cherry-picked, so when the feature branch gains commits or the upstream tag
+  # moves, re-squash the branch onto the new tag and re-point both values here.
+  FEATURE_COMMIT: 4384d05accf6c03120ef0fc54a2f24b97d9b13a4
+  FEATURE_BRANCH: release/native-headers-v0.9.0
   # Fork-only fixes cherry-picked after the feature, in order, until upstream
   # ships them. One "<sha> <branch> <upstream PR>" per line; the branch is
   # fetched so the sha is reachable. A sha already in the tag is skipped.
   EXTRA_FIXES: |
     1f33b1a024fd0efb87f90f5838d0e1904fed5081 fix/question-card-multiselect-other getpaseo/paseo#4372
+    c340c5c0d6e88466667b83a2fd13368ecb3eeb19 fix/native-download-headers getpaseo/paseo#4290
 
 jobs:
   resolve:
@@ -131,7 +136,7 @@ jobs:
           else
             conflicts="$(git diff --name-only --diff-filter=U | paste -sd' ' -)"
             git cherry-pick --abort || true
-            echo "::error::Cherry-picking $FEATURE_COMMIT onto $TAG conflicted in: ${conflicts:-unknown}. Rebase $FEATURE_BRANCH onto $TAG, update FEATURE_COMMIT in this workflow, then re-run. No release was published."
+            echo "::error::Cherry-picking $FEATURE_COMMIT onto $TAG conflicted in: ${conflicts:-unknown}. Re-squash feat/native-direct-connection-headers onto $TAG on a new release/native-headers-<tag> branch, push it, update both FEATURE_COMMIT and FEATURE_BRANCH in this workflow, then re-run. No release was published."
             exit 1
           fi
 
@@ -324,7 +329,7 @@ jobs:
         run: |
           set -uo pipefail
           fail() {
-            echo "::error::The native headers feature no longer passes $1 on upstream $TAG. Rebase $FEATURE_BRANCH onto $TAG and update FEATURE_COMMIT in this workflow. No APK was built and no release was published."
+            echo "::error::The native headers feature no longer passes $1 on upstream $TAG. Fix it on feat/native-direct-connection-headers, re-squash onto $TAG on a new release/native-headers-<tag> branch, push it, and update both FEATURE_COMMIT and FEATURE_BRANCH in this workflow. No APK was built and no release was published."
             exit 1
           }
 
