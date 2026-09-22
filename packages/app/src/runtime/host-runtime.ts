@@ -551,6 +551,7 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
             useTls: connection.useTls ?? false,
           }),
           ...(connection.password ? { password: connection.password } : {}),
+          ...(connection.headers ? { headers: connection.headers } : {}),
         });
       }
       return new DaemonClient({
@@ -1709,6 +1710,7 @@ export class HostRuntimeStore {
     endpoint: string;
     useTls?: boolean;
     password?: string;
+    headers?: Record<string, string>;
     label?: string;
     existingClient?: DaemonClient;
   }): Promise<HostProfile> {
@@ -1723,6 +1725,7 @@ export class HostRuntimeStore {
         endpoint,
         useTls: input.useTls ?? false,
         ...(password ? { password } : {}),
+        ...(input.headers ? { headers: input.headers } : {}),
       },
       existingClient: input.existingClient,
     });
@@ -1764,6 +1767,7 @@ export class HostRuntimeStore {
     endpoint: string;
     useTls?: boolean;
     password?: string;
+    headers?: Record<string, string>;
     label?: string;
   }): Promise<{ profile: HostProfile; serverId: string; hostname: string | null }> {
     const endpoint = normalizeHostPort(input.endpoint);
@@ -1776,6 +1780,7 @@ export class HostRuntimeStore {
         endpoint,
         useTls: input.useTls ?? false,
         ...(password ? { password } : {}),
+        ...(input.headers ? { headers: input.headers } : {}),
       },
     });
   }
@@ -2585,12 +2590,14 @@ export interface HostMutations {
     endpoint: string;
     useTls?: boolean;
     password?: string;
+    headers?: Record<string, string>;
     label?: string;
   }) => Promise<HostProfile>;
   probeAndUpsertDirectConnection: (input: {
     endpoint: string;
     useTls?: boolean;
     password?: string;
+    headers?: Record<string, string>;
     label?: string;
   }) => Promise<{ profile: HostProfile; serverId: string; hostname: string | null }>;
   probeAndUpsertRemoteSshConnection: (input: {
