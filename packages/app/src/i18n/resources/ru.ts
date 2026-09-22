@@ -1831,6 +1831,7 @@ export const ru: TranslationResources = {
     hostUnavailable: "Хост загрузки недоступен.",
     cancelled: "Загрузка отменена.",
     failed: "Не удалось загрузить файл.",
+    httpError: "Загрузка завершилась с кодом {{status}}.",
     shareFile: "Поделиться файлом",
     shareFileNamed: "Поделиться {{fileName}}",
   },
