@@ -136,7 +136,7 @@ jobs:
           else
             conflicts="$(git diff --name-only --diff-filter=U | paste -sd' ' -)"
             git cherry-pick --abort || true
-            echo "::error::Cherry-picking $FEATURE_COMMIT onto $TAG conflicted in: ${conflicts:-unknown}. Rebase $FEATURE_BRANCH onto $TAG, update FEATURE_COMMIT in this workflow, then re-run. No release was published."
+            echo "::error::Cherry-picking $FEATURE_COMMIT onto $TAG conflicted in: ${conflicts:-unknown}. Re-squash feat/native-direct-connection-headers onto $TAG on a new release/native-headers-<tag> branch, push it, update both FEATURE_COMMIT and FEATURE_BRANCH in this workflow, then re-run. No release was published."
             exit 1
           fi
 
@@ -329,7 +329,7 @@ jobs:
         run: |
           set -uo pipefail
           fail() {
-            echo "::error::The native headers feature no longer passes $1 on upstream $TAG. Rebase $FEATURE_BRANCH onto $TAG and update FEATURE_COMMIT in this workflow. No APK was built and no release was published."
+            echo "::error::The native headers feature no longer passes $1 on upstream $TAG. Fix it on feat/native-direct-connection-headers, re-squash onto $TAG on a new release/native-headers-<tag> branch, push it, and update both FEATURE_COMMIT and FEATURE_BRANCH in this workflow. No APK was built and no release was published."
             exit 1
           }
 
