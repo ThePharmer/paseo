@@ -86,10 +86,13 @@ settle_system_ui() {
 }
 
 install_apk() {
+  # The cached AVD's data partition can still hold the app from the run that
+  # saved the cache; start from a fresh install so onboarding runs.
+  adb uninstall "${APP_ID}" >/dev/null 2>&1 || true
   for attempt in 1 2 3; do
     # -g grants runtime permissions up front, so no notification prompt
     # covers the app after it connects.
-    if adb install -r -g "${APK_PATH}"; then
+    if adb install -g "${APK_PATH}"; then
       return 0
     fi
     echo "::warning::APK install attempt ${attempt} failed; retrying."
