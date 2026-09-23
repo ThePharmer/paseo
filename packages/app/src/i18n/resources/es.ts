@@ -2017,6 +2017,7 @@ export const es: TranslationResources = {
       title: "Editor",
       vimKeybindings: "Atajos de Vim",
       vimHint: "Se aplica al editar archivos fuente.",
+      vimHardwareKeyboardHint: "Requiere un teclado físico con tecla Escape.",
     },
     notifications: {
       title: "Notificaciones",

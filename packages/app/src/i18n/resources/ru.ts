@@ -2002,6 +2002,7 @@ export const ru: TranslationResources = {
       title: "Редактор",
       vimKeybindings: "Сочетания клавиш Vim",
       vimHint: "Применяется при редактировании исходных файлов.",
+      vimHardwareKeyboardHint: "Нужна аппаратная клавиатура с клавишей Escape.",
     },
     notifications: {
       title: "Уведомления",

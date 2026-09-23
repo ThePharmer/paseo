@@ -2002,6 +2002,7 @@ export const ptBR: TranslationResources = {
       title: "Editor",
       vimKeybindings: "Atalhos do Vim",
       vimHint: "Aplica-se ao editar arquivos-fonte.",
+      vimHardwareKeyboardHint: "Requer um teclado físico com a tecla Escape.",
     },
     notifications: {
       title: "Notificações",
