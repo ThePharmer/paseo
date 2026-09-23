@@ -72,7 +72,8 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Check out the built commit
-        id: source
+        env:
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
         run: |
           set -euo pipefail
           info="$RUNNER_TEMP/build-source/build-info.json"
@@ -80,12 +81,12 @@ jobs:
           read_info() { jq -r "$1" "$info"; }
           commit="$(read_info .commit)"
           if ! jq -e '.abis | index("x86_64")' "$info" >/dev/null; then
-            echo "::error::Run ${{ inputs.build_run_id }} built $(read_info '.abis | join(",")') only. Android E2E needs a test build (native headers workflow with test_branch), which adds x86_64."
+            echo "::error::Run $BUILD_RUN_ID built $(read_info '.abis | join(",")') only. Android E2E needs a test build (native headers workflow with test_branch), which adds x86_64."
             exit 1
           fi
           mapfile -t apks < <(find "$RUNNER_TEMP/apk" -name '*.apk')
           if [[ "${#apks[@]}" -ne 1 ]]; then
-            echo "::error::Expected one APK in run ${{ inputs.build_run_id }}, found ${#apks[@]}."
+            echo "::error::Expected one APK in run $BUILD_RUN_ID, found ${#apks[@]}."
             exit 1
           fi
 
