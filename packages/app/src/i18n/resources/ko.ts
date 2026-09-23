@@ -1864,6 +1864,11 @@ export const ko: TranslationResources = {
         reload: "새로고침",
         reloadTitle: "디스크에서 다시 로드하시겠습니까?",
         reloadMessage: "로컬 변경사항이 손실됩니다.",
+        edit: "편집",
+        done: "완료",
+        tooLargeToEdit: "너무 커서 편집할 수 없습니다",
+        startFailedTitle: "편집기를 시작할 수 없습니다",
+        startFailedDescription: "파일을 읽기 전용으로 표시합니다.",
       },
     },
     files: {
@@ -1988,7 +1993,7 @@ export const ko: TranslationResources = {
     editor: {
       title: "편집기",
       vimKeybindings: "Vim 키 바인딩",
-      vimHint: "웹 및 데스크톱의 소스 파일에 적용됩니다.",
+      vimHint: "소스 파일을 편집할 때 적용됩니다.",
     },
     notifications: {
       title: "알림",

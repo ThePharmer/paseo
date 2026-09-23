@@ -27,12 +27,18 @@ import { useAppSettings } from "@/hooks/use-settings";
 import { useLiveFile } from "./live-file/hook";
 import { useFilePreview } from "./preview-lifecycle/hook";
 import { resolveFilePreviewLifecycle } from "./preview-lifecycle/model";
-import { FilePanelBar } from "./bar";
+import { FilePanelBar, type FilePanelEditing } from "./bar";
 import { FileHtmlPreview } from "./html-preview";
 import { FileMarkdownPreview } from "./markdown-preview";
 import { FileEditorModel, getFileConflictCallout, type FileConflictCallout } from "./editor/model";
 import { createFileObservationSource } from "./editor/observation-source";
+import {
+  FILE_EDITOR_POLICY,
+  resolveFileEditability,
+  type FileEditorPlatform,
+} from "./editor/policy";
 import { FileEditorView } from "./editor/view";
+import type { FileEditorViewHandle } from "./editor/view-contract";
 import { FileSourceView } from "./source/view";
 import type { FileConflictAlertState } from "./conflict-alert";
 import type { LiveFileModel } from "./live-file/model";
@@ -42,6 +48,9 @@ import type { Theme } from "@/styles/theme";
 import { ZoomableImage } from "@/components/zoomable-viewport/image";
 
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
+const EDITOR_PLATFORM: FileEditorPlatform = isWeb ? "web" : "native";
+const EDITOR_POLICY = FILE_EDITOR_POLICY[EDITOR_PLATFORM];
+const TOO_LARGE_TO_EDIT: FilePanelEditing = { kind: "tooLarge" };
 const foregroundMutedColorMapping = (theme: Theme) => ({
   color: theme.colors.foregroundMuted,
 });
@@ -281,10 +290,12 @@ export function FilePane({
   const { file: preview, imageAttachment } = resolveFilePreviewLifecycle(previewLifecycle);
   const imagePreviewUri = useAttachmentPreviewUrl(imageAttachment);
   const isRenderable = isRenderablePreview(preview, location.path);
-  const editable = isEditableTextFile({
-    preview,
+  const editability = resolveFileEditability({
+    platform: EDITOR_PLATFORM,
     supportsEditing,
+    file: preview,
   });
+  const showsTooLargeToEdit = editability === "tooLarge" && EDITOR_POLICY.hasEditToggle;
   const canTogglePreviewMode = isRenderable && !location.lineStart;
   const lineCount =
     preview?.kind === "text" ? (preview.content ?? "").split("\n").length : undefined;
@@ -308,7 +319,8 @@ export function FilePane({
       previewMode={canTogglePreviewMode ? previewMode : undefined}
       onPreviewModeChange={canTogglePreviewMode ? setPreviewMode : undefined}
       lineCount={lineCount}
-      editable={editable}
+      editable={editability === "editable"}
+      readOnlyEditing={showsTooLargeToEdit ? TOO_LARGE_TO_EDIT : undefined}
       disconnectedMessage={t("workspace.terminal.hostDisconnected")}
       errorMessage={errorMessage}
       isLoading={isLoading}
@@ -322,18 +334,6 @@ export function FilePane({
 
 function isRenderablePreview(preview: ExplorerFile | null, path: string): boolean {
   return preview?.kind === "text" && filePreviewRenderKind(path) !== null;
-}
-
-function isEditableTextFile(input: {
-  preview: ExplorerFile | null;
-  supportsEditing: boolean;
-}): boolean {
-  return Boolean(
-    isWeb &&
-    input.supportsEditing &&
-    input.preview?.kind === "text" &&
-    input.preview.size <= 1024 * 1024,
-  );
 }
 
 function FilePanePresentation({
@@ -350,6 +350,7 @@ function FilePanePresentation({
   onPreviewModeChange,
   lineCount,
   editable,
+  readOnlyEditing,
   disconnectedMessage,
   errorMessage,
   isLoading,
@@ -371,6 +372,7 @@ function FilePanePresentation({
   onPreviewModeChange?: (mode: "preview" | "source") => void;
   lineCount?: number;
   editable: boolean;
+  readOnlyEditing?: FilePanelEditing;
   disconnectedMessage: string;
   errorMessage: string | null;
   isLoading: boolean;
@@ -439,6 +441,7 @@ function FilePanePresentation({
           lineCount={lineCount}
           mode={previewMode}
           onModeChange={onPreviewModeChange}
+          editing={readOnlyEditing}
         />
       ) : null}
       <FilePreviewBody
@@ -489,6 +492,10 @@ function EditableFilePane({
   const { t } = useTranslation();
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [vimMode, setVimMode] = useState<string | null>(settings.vimKeybindings ? "NORMAL" : null);
+  const [presence, setPresence] = useState<EditorPresence>(
+    EDITOR_POLICY.opensInEditor ? "editing" : "viewing",
+  );
+  const editorRef = useRef<FileEditorViewHandle>(null);
   const session = useMemo(
     () => ({
       write(input: { content: string; expectedModifiedAt: string; expectedRevision?: string }) {
@@ -587,6 +594,26 @@ function EditableFilePane({
     [preview, snapshot.content, snapshot.version],
   );
   const showSource = mode !== "preview";
+  const showEditor = showSource && presence !== "viewing";
+  const startEditing = useCallback(() => {
+    setPresence("editing");
+    if (mode === "preview") onModeChange?.("source");
+  }, [mode, onModeChange]);
+  const finishEditing = useCallback(() => {
+    setPresence("finishing");
+    // The WebView editor posts edits on an interval; take the last ones before it unmounts.
+    void (editorRef.current?.flush() ?? Promise.resolve()).then(() => setPresence("viewing"));
+  }, []);
+  const openFind = useCallback(() => editorRef.current?.openFind(), []);
+  let editing: FilePanelEditing | undefined;
+  if (EDITOR_POLICY.hasEditToggle && presence === "viewing") {
+    editing = { kind: "viewing", onEdit: startEditing };
+  } else if (EDITOR_POLICY.hasEditToggle) {
+    const finishing = presence === "finishing";
+    editing = { kind: "editing", finishing, onFind: openFind, onDone: finishEditing };
+  }
+  // Leaving the editor goes through Done so its last edits are flushed first.
+  const canChangeMode = !EDITOR_POLICY.hasEditToggle || presence === "viewing";
 
   return (
     <View style={styles.container} testID="workspace-file-pane">
@@ -596,14 +623,16 @@ function EditableFilePane({
         }
         lineCount={snapshot.content.split("\n").length}
         editorStatus={snapshot.status}
-        cursor={showSource ? cursor : undefined}
-        vimMode={showSource ? vimMode : null}
+        cursor={showEditor ? cursor : undefined}
+        vimMode={showEditor ? vimMode : null}
         conflict={conflict}
         mode={mode}
-        onModeChange={onModeChange}
+        onModeChange={canChangeMode ? onModeChange : undefined}
+        editing={editing}
       />
-      {showSource ? (
+      {showEditor ? (
         <FileEditorView
+          ref={editorRef}
           model={model}
           filename={filename}
           location={location}
@@ -627,6 +656,8 @@ function EditableFilePane({
     </View>
   );
 }
+
+type EditorPresence = "viewing" | "editing" | "finishing";
 
 function fileConflictAlertState(input: {
   callout: FileConflictCallout | null;

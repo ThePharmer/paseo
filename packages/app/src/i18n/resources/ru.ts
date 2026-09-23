@@ -1888,6 +1888,11 @@ export const ru: TranslationResources = {
         reload: "Перезагрузить",
         reloadTitle: "Перезагрузить с диска?",
         reloadMessage: "Локальные изменения будут потеряны.",
+        edit: "Изменить",
+        done: "Готово",
+        tooLargeToEdit: "Слишком большой для редактирования",
+        startFailedTitle: "Не удалось запустить редактор",
+        startFailedDescription: "Файл показан только для чтения.",
       },
     },
     files: {
@@ -2012,7 +2017,7 @@ export const ru: TranslationResources = {
     editor: {
       title: "Редактор",
       vimKeybindings: "Сочетания клавиш Vim",
-      vimHint: "Применяется к исходным файлам в веб- и настольной версии.",
+      vimHint: "Применяется при редактировании исходных файлов.",
     },
     notifications: {
       title: "Уведомления",

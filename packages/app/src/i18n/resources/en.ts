@@ -1880,6 +1880,11 @@ export const en = {
         reload: "Reload",
         reloadTitle: "Reload from disk?",
         reloadMessage: "Your local changes will be lost.",
+        edit: "Edit",
+        done: "Done",
+        tooLargeToEdit: "Too large to edit",
+        startFailedTitle: "Couldn't start the editor",
+        startFailedDescription: "Showing the file read-only.",
       },
     },
     files: {
@@ -2039,7 +2044,7 @@ export const en = {
     editor: {
       title: "Editor",
       vimKeybindings: "Vim keybindings",
-      vimHint: "Applies to source files on web and desktop.",
+      vimHint: "Applies when editing source files.",
     },
     notifications: {
       title: "Notifications",
