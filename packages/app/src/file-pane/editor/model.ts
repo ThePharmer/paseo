@@ -66,6 +66,7 @@ export class FileEditorModel {
   private autosave: ReturnType<typeof setTimeout> | null = null;
   private saveSequence = 0;
   private disposed = false;
+  private autosaveSuspensions = 0;
   private observedWhileSaving: FileEditorObservation | null = null;
   private observed: ObservedDiskState;
   private lastReceivedObservation: FileEditorObservation | null = null;
@@ -191,6 +192,19 @@ export class FileEditorModel {
     this.applyFile(this.observed.file);
   }
 
+  /**
+   * Ends the model when its view goes away. Unsaved edits are written first unless
+   * autosave is suspended, which is how a "close without saving" confirmation
+   * holds the edits it is about to discard.
+   */
+  close(): void {
+    if (this.disposed) return;
+    const unsaved = this.snapshot.status === "dirty" || this.snapshot.status === "error";
+    // save() issues the write before its first await, so dispose() cannot cancel it.
+    if (unsaved && this.autosaveSuspensions === 0) void this.save();
+    this.dispose();
+  }
+
   dispose(): void {
     this.disposed = true;
     this.reloadRequested = false;
@@ -203,10 +217,12 @@ export class FileEditorModel {
   suspendAutosave(): () => void {
     const wasScheduled = this.autosave !== null;
     this.clearAutosave();
+    this.autosaveSuspensions += 1;
     let resumed = false;
     return () => {
       if (resumed || this.disposed) return;
       resumed = true;
+      this.autosaveSuspensions -= 1;
       if (wasScheduled && this.snapshot.status === "dirty") this.scheduleAutosave();
     };
   }
