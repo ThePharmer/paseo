@@ -184,6 +184,7 @@ import {
 import { resolveCloseAgentTabPolicy } from "@/subagents";
 import {
   getPanelInstanceAttributes,
+  holdModifiedPanelSaves,
   useModifiedPanelTabIds,
 } from "@/panels/panel-instance-attributes";
 import { findAdjacentPane } from "@/utils/split-navigation";
@@ -2835,14 +2836,15 @@ function WorkspaceScreenContent({
         const agent = useSessionStore.getState().sessions[normalizedServerId]?.agents?.get(agentId);
         return resolveCloseAgentTabPolicy(agent).kind === "layout-only" ? "layout-only" : "archive";
       });
-      const modifiedCount = tabsToClose.filter(
-        (tab) =>
-          getPanelInstanceAttributes({
-            serverId: normalizedServerId,
-            workspaceId: normalizedWorkspaceId,
-            tabId: tab.tabId,
-          }).modified,
-      ).length;
+      // The dialog promises to discard drafts, so hold their saves like the single-tab close.
+      const heldSaves = holdModifiedPanelSaves(
+        tabsToClose.map((tab) => ({
+          serverId: normalizedServerId,
+          workspaceId: normalizedWorkspaceId,
+          tabId: tab.tabId,
+        })),
+      );
+      const modifiedCount = heldSaves.modifiedCount;
       const bulkMessage = buildBulkCloseConfirmationMessage(groups, bulkCloseConfirmationLabels);
       const confirmed = await confirmDialog({
         title,
@@ -2855,6 +2857,7 @@ function WorkspaceScreenContent({
         destructive: true,
       });
       if (!confirmed) {
+        heldSaves.release();
         return false;
       }
 
