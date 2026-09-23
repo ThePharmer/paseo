@@ -1,0 +1,13 @@
+context platform=android timeout=60000
+env APP_ID=sh.paseo
+env MARKER=E2E_LOCAL_EDIT
+
+open "${APP_ID}"
+wait "id=\"file-conflict-alert\"" 15000
+is visible "text=\"Changed on disk\""
+press "id=\"file-conflict-overwrite\""
+wait absent "id=\"file-conflict-alert\"" 10000
+press "id=\"file-edit-done\""
+wait "id=\"file-edit\"" 15000
+wait "text" "${MARKER}" 10000
+close
