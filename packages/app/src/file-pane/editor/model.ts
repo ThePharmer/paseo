@@ -67,6 +67,8 @@ export class FileEditorModel {
   private saveSequence = 0;
   private disposed = false;
   private autosaveSuspensions = 0;
+  private closing = false;
+  private inFlightWrite: Promise<void> | null = null;
   private observedWhileSaving: FileEditorObservation | null = null;
   private observed: ObservedDiskState;
   private lastReceivedObservation: FileEditorObservation | null = null;
@@ -134,10 +136,12 @@ export class FileEditorModel {
     else this.clearAutosave();
   }
 
+  /** Does nothing while autosave is suspended: a close confirmation holds these edits. */
   async save(): Promise<void> {
     if (this.disposed || (this.snapshot.status !== "dirty" && this.snapshot.status !== "error")) {
       return;
     }
+    if (this.autosaveSuspensions > 0) return;
     if (this.snapshot.observedVersion.status !== "ready") {
       this.enterConflict(this.snapshot.observedVersion);
       return;
@@ -198,10 +202,22 @@ export class FileEditorModel {
    * holds the edits it is about to discard.
    */
   close(): void {
-    if (this.disposed) return;
-    const unsaved = this.snapshot.status === "dirty" || this.snapshot.status === "error";
-    // save() issues the write before its first await, so dispose() cannot cancel it.
-    if (unsaved && this.autosaveSuspensions === 0) void this.save();
+    if (this.disposed || this.closing) return;
+    if (this.autosaveSuspensions > 0) {
+      this.dispose();
+      return;
+    }
+    this.closing = true;
+    this.clearAutosave();
+    void this.saveThenDispose();
+  }
+
+  private async saveThenDispose(): Promise<void> {
+    // A write already in flight settles first, so the final write expects the version
+    // it produced instead of conflicting with it. With nothing in flight, save() issues
+    // its write before this method first awaits.
+    while (this.inFlightWrite) await this.inFlightWrite;
+    await this.save();
     this.dispose();
   }
 
@@ -215,7 +231,6 @@ export class FileEditorModel {
   }
 
   suspendAutosave(): () => void {
-    const wasScheduled = this.autosave !== null;
     this.clearAutosave();
     this.autosaveSuspensions += 1;
     let resumed = false;
@@ -223,11 +238,24 @@ export class FileEditorModel {
       if (resumed || this.disposed) return;
       resumed = true;
       this.autosaveSuspensions -= 1;
-      if (wasScheduled && this.snapshot.status === "dirty") this.scheduleAutosave();
+      // An autosave that fired while suspended skipped its write, so reschedule it too.
+      if (this.snapshot.status === "dirty") this.scheduleAutosave();
     };
   }
 
   private async performWrite(
+    expectedVersion: Extract<FileVersion, { status: "ready" }>,
+  ): Promise<void> {
+    const write = this.writeAndSettle(expectedVersion);
+    this.inFlightWrite = write;
+    try {
+      await write;
+    } finally {
+      if (this.inFlightWrite === write) this.inFlightWrite = null;
+    }
+  }
+
+  private async writeAndSettle(
     expectedVersion: Extract<FileVersion, { status: "ready" }>,
   ): Promise<void> {
     this.clearAutosave();
@@ -356,6 +384,7 @@ export class FileEditorModel {
 
   private scheduleAutosave(): void {
     this.clearAutosave();
+    if (this.closing) return;
     this.autosave = this.clock.setTimeout(() => {
       this.autosave = null;
       void this.save();

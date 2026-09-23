@@ -34,7 +34,7 @@ import { FileEditorModel, getFileConflictCallout, type FileConflictCallout } fro
 import { createFileObservationSource } from "./editor/observation-source";
 import {
   FILE_EDITOR_POLICY,
-  resolveFileEditability,
+  trackFileEditability,
   type FileEditability,
   type FileEditorPlatform,
 } from "./editor/policy";
@@ -291,9 +291,8 @@ export function FilePane({
   const { file: preview, imageAttachment } = resolveFilePreviewLifecycle(previewLifecycle);
   const imagePreviewUri = useAttachmentPreviewUrl(imageAttachment);
   const isRenderable = isRenderablePreview(preview, location.path);
-  // A disconnected host shows no editor, which ends its session.
   const editability = useFileEditability({
-    target: client ? targetKey : null,
+    connected: client !== null,
     supportsEditing,
     file: preview,
   });
@@ -334,25 +333,22 @@ export function FilePane({
   );
 }
 
-/**
- * Remembers which file has an editor open so the size limit only applies when one
- * opens; see `resolveFileEditability`.
- */
+/** Remembers which file has an editor open; see `trackFileEditability`. */
 function useFileEditability(input: {
-  target: string | null;
+  connected: boolean;
   supportsEditing: boolean;
   file: ExplorerFile | null;
 }): FileEditability {
-  const [sessionTarget, setSessionTarget] = useState<string | null>(null);
-  const editability = resolveFileEditability({
+  const [openEditorPath, setOpenEditorPath] = useState<string | null>(null);
+  const tracked = trackFileEditability({
     platform: EDITOR_PLATFORM,
     supportsEditing: input.supportsEditing,
+    connected: input.connected,
     file: input.file,
-    sessionOpen: input.target !== null && input.target === sessionTarget,
+    openEditorPath,
   });
-  const nextSessionTarget = editability === "editable" ? input.target : null;
-  if (nextSessionTarget !== sessionTarget) setSessionTarget(nextSessionTarget);
-  return editability;
+  if (tracked.openEditorPath !== openEditorPath) setOpenEditorPath(tracked.openEditorPath);
+  return tracked.editability;
 }
 
 function isRenderablePreview(preview: ExplorerFile | null, path: string): boolean {

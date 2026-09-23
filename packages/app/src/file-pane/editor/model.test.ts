@@ -124,6 +124,10 @@ function observeFile(model: FileEditorModel, file: FileEditorFile): void {
   model.receiveFileObservation({ status: "ready", file });
 }
 
+async function flushMicrotasks(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+}
+
 function observeVersion(model: FileEditorModel, version: FileEditorObservation): void {
   model.receiveFileObservation(version);
 }
@@ -632,6 +636,77 @@ describe("FileEditorModel", () => {
     resume();
     model.close();
 
+    expect(session.writes).toHaveLength(1);
+  });
+
+  test("close during an in-flight save writes the newer edits against the saved version", async () => {
+    const { model, session } = makeModel({ content: "a" });
+    model.edit("ab");
+    session.holdNextWrite();
+    const firstSave = model.save();
+    model.edit("abc");
+
+    model.close();
+    expect(session.writes).toEqual([
+      { content: "ab", expectedModifiedAt: "2026-07-18T00:00:00.000Z" },
+    ]);
+
+    session.finishHeldWrite({
+      status: "written",
+      modifiedAt: "2026-07-18T00:00:01.000Z",
+      size: 2,
+    });
+    await firstSave;
+    await flushMicrotasks();
+
+    expect(session.writes).toEqual([
+      { content: "ab", expectedModifiedAt: "2026-07-18T00:00:00.000Z" },
+      { content: "abc", expectedModifiedAt: "2026-07-18T00:00:01.000Z" },
+    ]);
+  });
+
+  test("close during an in-flight save writes nothing more when the save covered everything", async () => {
+    const { model, session } = makeModel({ content: "a" });
+    model.edit("ab");
+    session.holdNextWrite();
+    const firstSave = model.save();
+
+    model.close();
+    session.finishHeldWrite({
+      status: "written",
+      modifiedAt: "2026-07-18T00:00:01.000Z",
+      size: 2,
+    });
+    await firstSave;
+    await flushMicrotasks();
+
+    expect(session.writes).toHaveLength(1);
+  });
+
+  test("save does nothing while a close confirmation holds autosave", async () => {
+    const { model, session } = makeModel();
+    model.edit("held");
+    const resume = model.suspendAutosave();
+
+    await model.save();
+    expect(session.writes).toEqual([]);
+
+    resume();
+    await model.save();
+    expect(session.writes).toHaveLength(1);
+  });
+
+  test("resuming autosave reschedules an autosave that fired while suspended", async () => {
+    const { model, session, clock } = makeModel();
+    const resume = model.suspendAutosave();
+    model.edit("typed during the dialog");
+    clock.fire();
+    await Promise.resolve();
+    expect(session.writes).toEqual([]);
+
+    resume();
+    clock.fire();
+    await Promise.resolve();
     expect(session.writes).toHaveLength(1);
   });
 
