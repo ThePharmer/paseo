@@ -8,7 +8,6 @@ wait "id=\"workspace-header-menu-trigger\"" 30000
 press "id=\"workspace-explorer-toggle\""
 wait "id=\"explorer-tab-files\"" 10000
 press "id=\"explorer-tab-files\""
-press "id=\"files-refresh\""
 wait "text=\"${FILE}\"" 15000
 press "text=\"${FILE}\""
 wait "id=\"file-edit\"" 15000
