@@ -18,7 +18,7 @@ WorkflowLoader.yaml_implicit_resolvers = {
 WorkflowLoader.add_implicit_resolver(
     'tag:yaml.org,2002:bool', re.compile(r'^(?:true|false)$', re.I), list('tTfF')
 )
-EXCLUSIONS = ['**-native-headers', 'native-headers-preflight-**']
+EXCLUSIONS = ['**-native-headers', '**-native-headers-test', 'native-headers-preflight-**']
 
 
 def protect_workflow(source):
