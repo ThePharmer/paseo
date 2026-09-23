@@ -24,7 +24,7 @@ const SearchIcon = withUnistyles(Search, mutedIconColorMapping);
 export type FilePanelEditing =
   | { kind: "viewing"; onEdit(): void }
   | { kind: "tooLarge" }
-  | { kind: "editing"; finishing: boolean; onFind(): void; onDone(): void };
+  | { kind: "editing"; finishing: boolean; onFind?: () => void; onDone(): void };
 
 export function FilePanelBar({
   size,
@@ -148,9 +148,11 @@ function FilePanelEditingControls({ editing }: { editing: FilePanelEditing }) {
   }
   return (
     <View style={styles.status}>
-      <ToolbarButton label={t("paneFind.title")} compact={isCompact} onPress={editing.onFind}>
-        <SearchIcon size={paneContentToolbarIconSize(isCompact)} />
-      </ToolbarButton>
+      {editing.onFind ? (
+        <ToolbarButton label={t("paneFind.title")} compact={isCompact} onPress={editing.onFind}>
+          <SearchIcon size={paneContentToolbarIconSize(isCompact)} />
+        </ToolbarButton>
+      ) : null}
       <Button
         variant="ghost"
         size="xs"

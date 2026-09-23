@@ -155,14 +155,18 @@ export class FileEditorWebViewHost {
     if (this.state.status === "ready") this.post({ type: "findWidget", ...size });
   }
 
-  /** Resolves once the page has posted every edit it holds, or after the flush timeout. */
-  flush(): Promise<void> {
+  /**
+   * Resolves once the page has posted every edit it holds, or after the flush
+   * timeout. A final flush also stops the page taking edits, so nothing typed
+   * between the reply and the WebView unmounting is lost.
+   */
+  flush(input: { final: boolean }): Promise<void> {
     if (this.state.status !== "ready") return Promise.resolve();
     const requestId = this.nextFlushId++;
     return new Promise((resolve) => {
       const timer = this.clock.setTimeout(() => this.settleFlush(requestId), this.flushTimeoutMs);
       this.pendingFlushes.set(requestId, { resolve, timer });
-      this.post({ type: "flush", requestId });
+      this.post({ type: "flush", requestId, final: input.final });
     });
   }
 
