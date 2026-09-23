@@ -9,6 +9,7 @@
 #   PASEO_MOBILE_E2E_METRO      0 for a release build that embeds its bundle,
 #                               so no Metro is started or checked (default: 1).
 #   PASEO_MOBILE_E2E_METRO_PORT Metro port when Metro is used (default: 8081).
+#   PASEO_MOBILE_E2E_RECORD_VIDEO  1 to record every attempt into its artifacts.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -59,6 +60,9 @@ if [[ -n "${PLATFORM}" ]]; then
 fi
 if [[ -n "${APP_ID}" ]]; then
   TEST_ARGS+=(--env "APP_ID=${APP_ID}")
+fi
+if [[ "${PASEO_MOBILE_E2E_RECORD_VIDEO:-0}" == "1" ]]; then
+  TEST_ARGS+=(--record-video)
 fi
 
 if [[ "${USE_METRO}" != "0" ]]; then
