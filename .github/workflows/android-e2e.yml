@@ -1,0 +1,226 @@
+name: Android E2E
+
+# Runs the Android Agent Device suites on an emulator against an APK built by
+# the native headers workflow. Only test builds work: they are universal
+# (arm64-v8a + x86_64), so the x86_64 emulator runs the same APK the phone
+# installs. The daemon and the test scripts come from the exact commit the APK
+# was built from, rebuilt from the build's native-headers-build-source
+# artifact, because artifact-only builds push that commit nowhere.
+#
+# Each finished test build dispatches this workflow with its run ID (the e2e
+# job in native-headers-release.yml). Start it by hand the same way:
+#   gh workflow run android-e2e.yml --ref main -f build_run_id=<run id>
+# The result does not gate any release.
+
+run-name: Android E2E for native headers run ${{ inputs.build_run_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: "Run ID of the native headers test build whose APK to test"
+        required: true
+        type: string
+      e2e_ref:
+        description: "Iterate without rebuilding the APK: take packages/app/e2e/mobile and scripts/test-mobile-agent-device.sh from this fork branch instead of the built commit (blank = built commit)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: android-e2e-${{ inputs.build_run_id }}
+  cancel-in-progress: false
+
+env:
+  AGENT_DEVICE_VERSION: 0.21.12
+  APP_ID: sh.paseo
+  DAEMON_PORT: "7777"
+  EMULATOR_API_LEVEL: "35"
+  EMULATOR_TARGET: google_apis
+  EMULATOR_PROFILE: pixel_6
+  EMULATOR_OPTIONS: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ci
+          persist-credentials: false
+
+      - name: Download the build's source bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: native-headers-build-source
+          path: ${{ runner.temp }}/build-source
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Download the build's APK
+        uses: actions/download-artifact@v4
+        with:
+          pattern: paseo-*-android.apk
+          path: ${{ runner.temp }}/apk
+          merge-multiple: true
+          run-id: ${{ inputs.build_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Check out the built commit
+        id: source
+        run: |
+          set -euo pipefail
+          info="$RUNNER_TEMP/build-source/build-info.json"
+          cat "$info"
+          read_info() { jq -r "$1" "$info"; }
+          commit="$(read_info .commit)"
+          if ! jq -e '.abis | index("x86_64")' "$info" >/dev/null; then
+            echo "::error::Run ${{ inputs.build_run_id }} built $(read_info '.abis | join(",")') only. Android E2E needs a test build (native headers workflow with test_branch), which adds x86_64."
+            exit 1
+          fi
+          mapfile -t apks < <(find "$RUNNER_TEMP/apk" -name '*.apk')
+          if [[ "${#apks[@]}" -ne 1 ]]; then
+            echo "::error::Expected one APK in run ${{ inputs.build_run_id }}, found ${#apks[@]}."
+            exit 1
+          fi
+
+          # The bundle holds the commits on top of the upstream tag.
+          git init -q src
+          git -C src fetch -q --depth=1 --no-tags "https://github.com/$(read_info .upstream_repo).git" \
+            "refs/tags/$(read_info .tag):refs/tags/$(read_info .tag)"
+          git -C src fetch -q "$RUNNER_TEMP/build-source/source.bundle" HEAD
+          if [[ "$(git -C src rev-parse FETCH_HEAD)" != "$commit" ]]; then
+            echo "::error::The source bundle does not contain the built commit $commit."
+            exit 1
+          fi
+          git -C src checkout -q --detach FETCH_HEAD
+          echo "Testing ${apks[0]##*/} built from $commit (test branch: $(read_info .test_branch))."
+          {
+            echo "SRC_DIR=$GITHUB_WORKSPACE/src"
+            echo "APK_PATH=${apks[0]}"
+          } >> "$GITHUB_ENV"
+
+      - name: Take the E2E scripts from ${{ inputs.e2e_ref }}
+        if: inputs.e2e_ref != ''
+        env:
+          E2E_REF: ${{ inputs.e2e_ref }}
+        run: |
+          set -euo pipefail
+          git check-ref-format "refs/heads/$E2E_REF"
+          git -C src fetch -q --depth=1 --no-tags "https://github.com/$GITHUB_REPOSITORY.git" "refs/heads/$E2E_REF"
+          git -C src checkout FETCH_HEAD -- packages/app/e2e/mobile scripts/test-mobile-agent-device.sh
+          echo "::warning::E2E scripts come from $E2E_REF ($(git -C src rev-parse --short FETCH_HEAD)), not from the built commit."
+          git -C src status --short
+
+      - name: Check that the built commit can run Android E2E
+        run: |
+          set -euo pipefail
+          missing=()
+          grep -q PASEO_MOBILE_E2E_PLATFORM src/scripts/test-mobile-agent-device.sh || missing+=("Android support in scripts/test-mobile-agent-device.sh")
+          for file in packages/app/e2e/mobile/setup/connect-direct.android.ad packages/app/e2e/mobile/file-editor/android.sh; do
+            [[ -f "src/$file" ]] || missing+=("$file")
+          done
+          if [[ "${#missing[@]}" -gt 0 ]]; then
+            printf '::error::The built commit lacks %s. Base the test branch on feat/native-file-editor-e2e or cherry-pick its E2E commits.\n' "${missing[@]}"
+            exit 1
+          fi
+
+      # The system image, the AVD and node_modules share the runner's disk;
+      # drop toolchains this job never uses so the emulator does not run out.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/package-lock.json
+
+      - name: Install dependencies and build the daemon
+        working-directory: src
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
+        run: |
+          node scripts/npm-retry.mjs ci
+          npm run build:server
+
+      - name: Install Agent Device
+        run: npm install -g "agent-device@$AGENT_DEVICE_VERSION"
+
+      - name: Start the daemon with a fixture workspace
+        run: bash ci/scripts/android-e2e/start-daemon.sh src "$RUNNER_TEMP/e2e" "$DAEMON_PORT"
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Cache the AVD
+        id: avd-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ env.EMULATOR_API_LEVEL }}-${{ env.EMULATOR_TARGET }}-x86_64-${{ env.EMULATOR_PROFILE }}-v1
+
+      - name: Create the AVD and its boot snapshot
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ env.EMULATOR_API_LEVEL }}
+          target: ${{ env.EMULATOR_TARGET }}
+          arch: x86_64
+          profile: ${{ env.EMULATOR_PROFILE }}
+          disk-size: 4G
+          force-avd-creation: false
+          emulator-options: ${{ env.EMULATOR_OPTIONS }}
+          disable-animations: false
+          script: echo "Generated the AVD boot snapshot."
+
+      - name: Run the Android suites
+        timeout-minutes: 35
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          ARTIFACTS_DIR: ${{ runner.temp }}/e2e/artifacts
+        with:
+          api-level: ${{ env.EMULATOR_API_LEVEL }}
+          target: ${{ env.EMULATOR_TARGET }}
+          arch: x86_64
+          profile: ${{ env.EMULATOR_PROFILE }}
+          disk-size: 4G
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save ${{ env.EMULATOR_OPTIONS }}
+          disable-animations: true
+          disable-spellchecker: true
+          emulator-boot-timeout: 600
+          # The action runs each script line in its own shell; keep it one line.
+          script: bash ci/scripts/android-e2e/run-on-emulator.sh
+
+      - name: Stop the daemon
+        if: always()
+        run: |
+          if [[ -n "${DAEMON_PID:-}" ]]; then
+            kill "$DAEMON_PID" 2>/dev/null || true
+          fi
+          mkdir -p "$RUNNER_TEMP/e2e/artifacts"
+          cp "$RUNNER_TEMP/e2e/daemon.out" "$RUNNER_TEMP/e2e/artifacts/" 2>/dev/null || true
+          cp "${PASEO_HOME:-/nonexistent}"/daemon.log* "$RUNNER_TEMP/e2e/artifacts/" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-e2e-${{ inputs.build_run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/e2e/artifacts
+          if-no-files-found: warn
+          retention-days: 14
