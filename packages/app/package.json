@@ -37,6 +37,7 @@
     "deploy:web": "npm run build:web && wrangler pages deploy dist --project-name paseo-app --branch main",
     "build:terminal-webview": "node ./scripts/build-terminal-webview-html.mjs",
     "build:file-editor-webview": "node ./scripts/build-file-editor-webview-html.mjs",
+    "check:file-editor-webview": "node ./scripts/build-file-editor-webview-html.mjs --check",
     "build:mermaid-runtime": "node ./src/components/markdown/fence/mermaid/build-runtime.mjs"
   },
   "dependencies": {
