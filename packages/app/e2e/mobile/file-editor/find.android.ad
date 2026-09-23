@@ -16,8 +16,9 @@ wait "id=\"file-find\"" 20000
 press "id=\"file-find\""
 wait "label=\"Find in pane\"" 10000
 fill "label=\"Find in pane\"" "${QUERY}"
-press "label=\"Next match\""
 wait "text" "1 of 2" 10000
+press "label=\"Next match\""
+wait "text" "2 of 2" 10000
 press "label=\"Close Find\""
 wait absent "label=\"Find in pane\"" 10000
 press "id=\"file-edit-done\""
