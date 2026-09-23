@@ -1858,6 +1858,11 @@ export const ja: TranslationResources = {
         reload: "再読み込み",
         reloadTitle: "ディスクから再読み込みしますか？",
         reloadMessage: "ローカルの変更は失われます。",
+        edit: "編集",
+        done: "完了",
+        tooLargeToEdit: "大きすぎて編集できません",
+        startFailedTitle: "エディターを起動できませんでした",
+        startFailedDescription: "ファイルを読み取り専用で表示しています。",
       },
     },
     files: {
@@ -1983,7 +1988,7 @@ export const ja: TranslationResources = {
     editor: {
       title: "エディター",
       vimKeybindings: "Vim キーバインド",
-      vimHint: "Web とデスクトップのソースファイルに適用されます。",
+      vimHint: "ソースファイルの編集時に適用されます。",
     },
     notifications: {
       title: "通知",

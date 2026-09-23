@@ -135,7 +135,7 @@ import {
 } from "@/utils/host-routes";
 import { useLastWorkspaceSelection } from "@/stores/navigation-active-workspace-store";
 import { returnFromSettings, type SettingsView } from "@/navigation/settings-navigation";
-import { isNative, isWeb } from "@/constants/platform";
+import { isNative } from "@/constants/platform";
 
 // ---------------------------------------------------------------------------
 // View model
@@ -146,7 +146,6 @@ interface SidebarSectionItem {
   labelKey: string;
   icon: ComponentType<{ size: number; color: string }>;
   desktopOnly?: boolean;
-  webOnly?: boolean;
 }
 
 const SIDEBAR_SECTION_ITEMS: SidebarSectionItem[] = [
@@ -158,7 +157,7 @@ const SIDEBAR_SECTION_ITEMS: SidebarSectionItem[] = [
     icon: PanelsTopLeft,
     desktopOnly: true,
   },
-  { id: "editor", labelKey: "settings.sections.editor", icon: Code2, webOnly: true },
+  { id: "editor", labelKey: "settings.sections.editor", icon: Code2 },
   { id: "shortcuts", labelKey: "settings.sections.shortcuts", icon: Keyboard, desktopOnly: true },
   {
     id: "integrations",
@@ -1082,9 +1081,7 @@ function SettingsSidebar({
   const hasHosts = sortedHosts.length > 0;
   const enableBuiltInDaemonOption = useEnableBuiltInDaemonOption();
   const isDesktopApp = isElectronRuntime();
-  const items = SIDEBAR_SECTION_ITEMS.filter(
-    (item) => (!item.desktopOnly || isDesktopApp) && (!item.webOnly || isWeb),
-  );
+  const items = SIDEBAR_SECTION_ITEMS.filter((item) => !item.desktopOnly || isDesktopApp);
   const insets = useSafeAreaInsets();
   const isDesktop = layout === "desktop";
   const outerContainerStyle = useMemo(
@@ -1538,7 +1535,7 @@ export default function SettingsScreen({ view, openAddHostIntent = null }: Setti
           case "appearance":
             return <AppearanceSection />;
           case "editor":
-            return isWeb ? <EditorSection /> : null;
+            return <EditorSection />;
           case "shortcuts":
             return isDesktopApp ? <KeyboardShortcutsSection /> : null;
           case "integrations":

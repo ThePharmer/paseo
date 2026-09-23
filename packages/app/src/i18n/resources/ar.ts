@@ -1839,6 +1839,11 @@ export const ar: TranslationResources = {
         reload: "إعادة تحميل",
         reloadTitle: "إعادة التحميل من القرص؟",
         reloadMessage: "ستفقد تغييراتك المحلية.",
+        edit: "تعديل",
+        done: "تم",
+        tooLargeToEdit: "الملف أكبر من أن يُعدَّل",
+        startFailedTitle: "تعذّر تشغيل المحرر",
+        startFailedDescription: "يُعرض الملف للقراءة فقط.",
       },
     },
     files: {
@@ -1963,7 +1968,7 @@ export const ar: TranslationResources = {
     editor: {
       title: "المحرر",
       vimKeybindings: "اختصارات Vim",
-      vimHint: "تنطبق على ملفات المصدر في الويب وسطح المكتب.",
+      vimHint: "تنطبق عند تعديل ملفات المصدر.",
     },
     notifications: {
       title: "الإشعارات",

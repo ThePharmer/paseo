@@ -1887,6 +1887,11 @@ export const es: TranslationResources = {
         reload: "Recargar",
         reloadTitle: "¿Recargar desde el disco?",
         reloadMessage: "Se perderán tus cambios locales.",
+        edit: "Editar",
+        done: "Listo",
+        tooLargeToEdit: "Demasiado grande para editar",
+        startFailedTitle: "No se pudo iniciar el editor",
+        startFailedDescription: "El archivo se muestra en modo de solo lectura.",
       },
     },
     files: {
@@ -2011,7 +2016,7 @@ export const es: TranslationResources = {
     editor: {
       title: "Editor",
       vimKeybindings: "Atajos de Vim",
-      vimHint: "Se aplica a archivos fuente en web y escritorio.",
+      vimHint: "Se aplica al editar archivos fuente.",
     },
     notifications: {
       title: "Notificaciones",
