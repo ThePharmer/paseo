@@ -16,7 +16,8 @@ class WorkflowFiltersTest(unittest.TestCase):
     def test_positive_tag_filters_exclude_fork_tags_last(self):
         source = 'on:\n  push:\n    tags: ["v*", "!v*-beta.*"]\n'
         self.assertEqual(self.transform(source)['on']['push']['tags'],
-                         ['v*', '!v*-beta.*', '!**-native-headers', '!native-headers-preflight-**'])
+                         ['v*', '!v*-beta.*', '!**-native-headers', '!**-native-headers-test',
+                          '!native-headers-preflight-**'])
 
     def test_unfiltered_push_gets_ignored_tags(self):
         for source in ['on: push\n', 'on: [push, workflow_dispatch]\n', 'on:\n  push:\n']:

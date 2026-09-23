@@ -4,6 +4,9 @@ name: Native headers APK release
 # release tag plus the fork's native direct-connection headers commit
 # (getpaseo/paseo#4290). Lives on fork main because schedules only run there.
 # Polls every 15 minutes; a run with no new upstream tag ends in seconds.
+# A dispatch with test_branch also cherry-picks that branch's commits (linear
+# history based on the upstream tag), always builds, and publishes only to a separate
+# <tag>-native-headers-test prerelease. The <tag>-native-headers release is untouched.
 
 on:
   schedule:
@@ -20,9 +23,15 @@ on:
         required: false
         default: false
         type: boolean
+      test_branch:
+        description: "Test build: fork branch, rebased onto the upstream tag with no merges, whose commits are cherry-picked; publishes only to the <tag>-native-headers-test prerelease (blank = normal release)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
-  group: native-headers-release
+  # Test builds use their own group so a queued schedule run cannot cancel a pending test dispatch.
+  group: ${{ inputs.test_branch && 'native-headers-release-test' || 'native-headers-release' }}
   cancel-in-progress: false
 
 permissions:
@@ -51,6 +60,7 @@ jobs:
       fork_tag: ${{ steps.resolve.outputs.fork_tag }}
       upstream_url: ${{ steps.resolve.outputs.upstream_url }}
       needed: ${{ steps.resolve.outputs.needed }}
+      test_branch: ${{ steps.resolve.outputs.test_branch }}
     steps:
       - name: Resolve the upstream tag and the fork release tag
         id: resolve
@@ -58,6 +68,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.upstream_tag }}
           FORCE: ${{ inputs.force }}
+          TEST_BRANCH: ${{ inputs.test_branch }}
         run: |
           set -euo pipefail
           if [[ -n "${INPUT_TAG:-}" ]]; then
@@ -70,7 +81,15 @@ jobs:
           fork_tag="${tag}-native-headers"
 
           needed=true
-          if gh release view "$fork_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if [[ -n "${TEST_BRANCH:-}" ]]; then
+            if ! git check-ref-format "refs/heads/$TEST_BRANCH"; then
+              echo "::error::test_branch '$TEST_BRANCH' is not a valid branch name."
+              exit 1
+            fi
+            # Test builds always run and never touch the daily-driver release or its tag.
+            fork_tag="${tag}-native-headers-test"
+            echo "Test build of $TEST_BRANCH; publishing to prerelease $fork_tag."
+          elif gh release view "$fork_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             if [[ "${FORCE:-false}" == "true" ]]; then
               echo "Fork release $fork_tag already exists; force set, rebuilding and replacing it."
             else
@@ -84,8 +103,9 @@ jobs:
             echo "fork_tag=$fork_tag"
             echo "upstream_url=$upstream_url"
             echo "needed=$needed"
+            echo "test_branch=${TEST_BRANCH:-}"
           } >> "$GITHUB_OUTPUT"
-          echo "upstream=$tag fork=$fork_tag needed=$needed"
+          echo "upstream=$tag fork=$fork_tag needed=$needed test_branch=${TEST_BRANCH:-none}"
 
   build:
     needs: resolve
@@ -99,6 +119,7 @@ jobs:
       cherry_picked: ${{ steps.source.outputs.cherry_picked }}
       fixes: ${{ steps.source.outputs.fixes }}
       commit: ${{ steps.source.outputs.commit }}
+      test_commits: ${{ steps.source.outputs.test_commits }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,11 +134,13 @@ jobs:
           node --test scripts/native-headers-release.test.mjs
           "$RUNNER_TEMP/release-tools/bin/python" scripts/native-headers-workflow-filters.test.py
           cp scripts/native-headers-workflow-filters.py "$RUNNER_TEMP/release-tools/filters.py"
+          cp scripts/native-headers-apply-test-branch.sh "$RUNNER_TEMP/release-tools/apply-test-branch.sh"
 
       - name: Build the source tree for the release
         id: source
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
+          TEST_BRANCH: ${{ needs.resolve.outputs.test_branch }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -157,6 +180,11 @@ jobs:
             fi
           done <<< "$EXTRA_FIXES"
 
+          test_commits=""
+          if [[ -n "$TEST_BRANCH" ]]; then
+            test_commits="$(bash "$RUNNER_TEMP/release-tools/apply-test-branch.sh" "$TAG" "$TEST_BRANCH")"
+          fi
+
           # The tag carries upstream's workflows, not those on fork main. Exclude
           # fork publication tags in that tree before an App-authenticated push.
           "$RUNNER_TEMP/release-tools/bin/python" "$RUNNER_TEMP/release-tools/filters.py" .github/workflows
@@ -169,6 +197,7 @@ jobs:
             echo "cherry_picked=$cherry_picked"
             echo "fixes=$fixes"
             echo "commit=$(git rev-parse HEAD)"
+            echo "test_commits=$test_commits"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create App token for publishing preflight
@@ -326,9 +355,14 @@ jobs:
       - name: Test the feature on this tag
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
+          TEST_BRANCH: ${{ needs.resolve.outputs.test_branch }}
         run: |
           set -uo pipefail
           fail() {
+            if [[ -n "$TEST_BRANCH" ]]; then
+              echo "::error::Test build: $1 fails with test branch $TEST_BRANCH applied on upstream $TAG; the test commits may be the cause. No APK was built and no release was published."
+              exit 1
+            fi
             echo "::error::The native headers feature no longer passes $1 on upstream $TAG. Fix it on feat/native-direct-connection-headers, re-squash onto $TAG on a new release/native-headers-<tag> branch, push it, and update both FEATURE_COMMIT and FEATURE_BRANCH in this workflow. No APK was built and no release was published."
             exit 1
           }
@@ -456,11 +490,11 @@ jobs:
       - name: Name and verify the APK
         id: artifact
         env:
-          TAG: ${{ needs.resolve.outputs.tag }}
+          FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
         run: |
           set -euo pipefail
-          name="paseo-${TAG}-native-headers-android.apk"
+          name="paseo-${FORK_TAG}-android.apk"
           cp packages/app/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/$name"
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           certs="$("$apksigner" verify --print-certs "$RUNNER_TEMP/$name")"
@@ -528,8 +562,19 @@ jobs:
           CHERRY_PICKED: ${{ needs.build.outputs.cherry_picked }}
           FIXES: ${{ needs.build.outputs.fixes }}
           COMMIT: ${{ needs.build.outputs.commit }}
+          TEST_BRANCH: ${{ needs.resolve.outputs.test_branch }}
+          TEST_COMMITS: ${{ needs.build.outputs.test_commits }}
         run: |
           set -euo pipefail
+
+          title="Paseo $TAG (native headers)"
+          test_notes=""
+          latest_flag=()
+          if [[ -n "$TEST_BRANCH" ]]; then
+            title="Paseo $TAG (native headers TEST BUILD: $TEST_BRANCH)"
+            test_notes="**TEST BUILD** of work-in-progress branch $TEST_BRANCH, not the daily-driver $TAG-native-headers release. Test commits cherry-picked after the feature and fixes: $TEST_COMMITS."$'\n\n'
+            latest_flag=(--latest=false)
+          fi
 
           if [[ "$CHERRY_PICKED" == "true" ]]; then
             feature_line="Cherry-picked $FEATURE_COMMIT (getpaseo/paseo#4290) onto $TAG."
@@ -558,7 +603,7 @@ jobs:
           fi
 
           cat > "$RUNNER_TEMP/notes.md" <<EOF
-          Fork build of upstream $TAG with the native direct-connection headers feature.
+          ${test_notes}Fork build of upstream $TAG with the native direct-connection headers feature.
 
           - Upstream release: $UPSTREAM_URL
           - Feature: $feature_line
@@ -576,9 +621,10 @@ jobs:
             # The tag is updated in place; keep the existing release published.
             gh release edit "$FORK_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Paseo $TAG (native headers)" \
+              --title "$title" \
               --notes-file "$RUNNER_TEMP/notes.md" \
               --prerelease \
+              "${latest_flag[@]}" \
               --draft=false
             gh release upload "$FORK_TAG" \
               --repo "$GITHUB_REPOSITORY" \
@@ -587,8 +633,9 @@ jobs:
           else
             gh release create "$FORK_TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "Paseo $TAG (native headers)" \
+              --title "$title" \
               --notes-file "$RUNNER_TEMP/notes.md" \
               --prerelease \
+              "${latest_flag[@]}" \
               "$RUNNER_TEMP/apk/$ARTIFACT"
           fi
