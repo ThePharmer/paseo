@@ -15,6 +15,7 @@ press "id=\"file-edit\""
 wait "id=\"file-find\"" 20000
 press "id=\"file-find\""
 wait "label=\"Find in pane\"" 10000
+wait stable 1000 10000
 fill "label=\"Find in pane\"" "${QUERY}"
 wait "text" "1 of 2" 10000
 press "label=\"Next match\""
