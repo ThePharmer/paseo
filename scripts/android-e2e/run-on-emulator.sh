@@ -130,8 +130,10 @@ adb logcat -v threadtime >"${ARTIFACTS_DIR}/logcat.txt" 2>&1 &
 logcat_pid=$!
 settle_system_ui
 
+# Replays the connect script; its output goes to connect-attempt-<n>.log in the
+# artifact as well as the job log.
 connect_app() {
-  local status
+  local attempt="$1" status
   AGENT_DEVICE_STATE_DIR="${RUNNER_TEMP:-/tmp}/agent-device-connect" agent-device replay \
     "${SRC_DIR}/packages/app/e2e/mobile/setup/connect-direct.android.ad" \
     --platform android \
@@ -140,30 +142,50 @@ connect_app() {
     --env "DAEMON_HOST=127.0.0.1" \
     --env "DAEMON_PORT=${DAEMON_PORT}" \
     --env "SERVER_ID=${SERVER_ID}" \
-    --env "WORKSPACE_ID=${WORKSPACE_ID}"
-  status=$?
+    --env "WORKSPACE_ID=${WORKSPACE_ID}" 2>&1 | tee "${ARTIFACTS_DIR}/connect-attempt-${attempt}.log"
+  status="${PIPESTATUS[0]}"
   AGENT_DEVICE_STATE_DIR="${RUNNER_TEMP:-/tmp}/agent-device-connect" agent-device daemon stop --clean >/dev/null 2>&1 || true
   return "${status}"
 }
 
-# Connecting is setup, not a test, so it gets one fresh-install retry: on a
-# loaded runner the Direct connection sheet sometimes shows its backdrop and
-# never slides in. The suites below get no such retry.
+# Reports a used retry as a warning annotation and in the job summary, so a
+# green run still shows that the first attempt failed.
+report_connect_retry() {
+  local failed_step message
+  failed_step="$(grep -o -m 1 'Replay failed at step [0-9]* ([^)]*)' "${ARTIFACTS_DIR}/connect-attempt-1.log" || true)"
+  if grep -q 'id=\\"add-host-modal\\"' <<<"${failed_step}"; then
+    message="Direct connection sheet did not open on first attempt (known app bug, see connect-failure-1.png); retried"
+  else
+    message="Connecting the app failed on first attempt (${failed_step:-no replay step reported}; see connect-failure-1.png and connect-attempt-1.log); retried"
+  fi
+  echo "::warning::${message}"
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    echo "- :warning: ${message}" >>"${GITHUB_STEP_SUMMARY}"
+  fi
+}
+
+# TEMPORARY until the app bug where the Direct connection sheet shows its
+# backdrop but never slides in is fixed; then drop the retry. Connecting is
+# setup, not a test, so it gets exactly one retry on the same install: the
+# app is force-stopped, which dismisses the stuck sheet, and since the failed
+# attempt saved no host it relaunches to the welcome screen. The suites below
+# get no retry.
 connected=false
-for attempt in 1 2; do
-  if connect_app; then
+if connect_app 1; then
+  connected=true
+else
+  adb exec-out screencap -p >"${ARTIFACTS_DIR}/connect-failure-1.png" 2>/dev/null || true
+  report_connect_retry
+  adb shell am force-stop "${APP_ID}"
+  settle_system_ui
+  if connect_app 2; then
     connected=true
-    break
+  else
+    adb exec-out screencap -p >"${ARTIFACTS_DIR}/connect-failure-2.png" 2>/dev/null || true
   fi
-  adb exec-out screencap -p >"${ARTIFACTS_DIR}/connect-failure-${attempt}.png" 2>/dev/null || true
-  if [[ "${attempt}" -eq 1 ]]; then
-    echo "::warning::Connecting the app failed; reinstalling and trying once more."
-    install_apk || exit 1
-    settle_system_ui
-  fi
-done
+fi
 if [[ "${connected}" != "true" ]]; then
-  echo "::error::Could not connect the app to the E2E daemon; no suite ran."
+  echo "::error::Could not connect the app to the E2E daemon after one retry; no suite ran. See connect-failure-*.png and connect-attempt-*.log."
   exit 1
 fi
 
