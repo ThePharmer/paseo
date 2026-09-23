@@ -147,7 +147,6 @@ export PASEO_MOBILE_E2E_APP_ID="${APP_ID}"
 run_suite "Agent Device Android scripts" env \
   PASEO_MOBILE_E2E_PLATFORM=android \
   PASEO_MOBILE_E2E_METRO=0 \
-  PASEO_MOBILE_E2E_RECORD_VIDEO=1 \
   PASEO_MOBILE_E2E_ARTIFACTS_DIR="${ARTIFACTS_DIR}/agent-device" \
   bash "${SRC_DIR}/scripts/test-mobile-agent-device.sh"
 run_suite "File editor" env \
