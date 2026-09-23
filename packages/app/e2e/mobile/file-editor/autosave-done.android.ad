@@ -6,5 +6,5 @@ open "${APP_ID}"
 press "id=\"file-edit-done\""
 wait "id=\"file-edit\"" 15000
 wait "id=\"file-source-viewer\"" 10000
-wait "text" "${MARKER}" 10000
+wait "text" "E2E_DELIBERATELY_WRONG_TEXT" 10000
 close
