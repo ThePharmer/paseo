@@ -42,19 +42,24 @@ wait_for_device() {
   return 1
 }
 
-# A cold boot on a shared runner often leaves "Pixel Launcher isn't responding"
-# on screen, and that dialog covers the app for the rest of the run. Wait until
-# the launcher has focus, dismissing ANR dialogs on the way.
+# A cold boot on a shared runner often raises "Pixel Launcher isn't responding",
+# and that dialog covers the app for the rest of the run. hide_error_dialogs
+# stops the system from showing crash and ANR dialogs; the loop dismisses one
+# that is already up and waits until the launcher has focus.
 settle_system_ui() {
-  local focus
+  adb shell settings put global hide_error_dialogs 1 >/dev/null 2>&1 || true
+  local focus steady=0
   for _ in $(seq 1 60); do
     focus="$(adb shell dumpsys window 2>/dev/null | grep -m1 'mCurrentFocus=' || true)"
     if [[ "${focus}" == *"Not Responding"* || "${focus}" == *"Application Error"* ]]; then
       echo "Dismissing a system dialog: ${focus}"
+      steady=0
       adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
     elif [[ "${focus}" == *"launcher"* || "${focus}" == *"Launcher"* ]]; then
-      return 0
+      steady=$((steady + 1))
+      [[ "${steady}" -ge 3 ]] && return 0
     else
+      steady=0
       adb shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
     fi
     sleep 2
@@ -98,6 +103,7 @@ adb reverse "tcp:${DAEMON_PORT}" "tcp:${DAEMON_PORT}"
 adb logcat -c || true
 adb logcat -v threadtime >"${ARTIFACTS_DIR}/logcat.txt" 2>&1 &
 logcat_pid=$!
+settle_system_ui
 
 AGENT_DEVICE_STATE_DIR="${RUNNER_TEMP:-/tmp}/agent-device-connect" agent-device replay \
   "${SRC_DIR}/packages/app/e2e/mobile/setup/connect-direct.android.ad" \
