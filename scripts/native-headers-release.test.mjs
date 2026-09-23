@@ -359,18 +359,32 @@ function resolveRun(t, { releaseExists, ...inputs }) {
       encoding: "utf8",
     },
   );
-  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const written = readFileSync(output, "utf8").trim();
   const outputs = Object.fromEntries(
-    readFileSync(output, "utf8")
-      .trim()
-      .split("\n")
-      .map((line) => line.split(/=(.*)/s).slice(0, 2)),
+    (written ? written.split("\n") : []).map((line) => line.split(/=(.*)/s).slice(0, 2)),
   );
-  return { outputs, ghCalls: readFileSync(calls, "utf8") };
+  return {
+    status: result.status,
+    log: result.stdout + result.stderr,
+    outputs,
+    ghCalls: readFileSync(calls, "utf8"),
+  };
+}
+function resolveOk(t, inputs) {
+  const run = resolveRun(t, inputs);
+  assert.equal(run.status, 0, run.log);
+  return run;
 }
 
+test("resolve rejects an invalid test branch before anything runs", (t) => {
+  const run = resolveRun(t, { releaseExists: false, TEST_BRANCH: "feat/bad..name" });
+  assert.notEqual(run.status, 0);
+  assert.match(run.log, /::error::test_branch 'feat\/bad\.\.name' is not a valid branch name\./);
+  assert.deepEqual(run.outputs, {});
+});
+
 test("scheduled runs publish arm64-only APKs and skip existing releases", (t) => {
-  const { outputs } = resolveRun(t, { releaseExists: true });
+  const { outputs } = resolveOk(t, { releaseExists: true });
   assert.equal(outputs.publish, "true");
   assert.equal(outputs.abis, "arm64-v8a");
   assert.equal(outputs.fork_tag, "v1.2.3-native-headers");
@@ -378,14 +392,14 @@ test("scheduled runs publish arm64-only APKs and skip existing releases", (t) =>
 });
 
 test("daily dispatches build a missing release for arm64 only", (t) => {
-  const { outputs } = resolveRun(t, { releaseExists: false, PUBLISH: "true" });
+  const { outputs } = resolveOk(t, { releaseExists: false, PUBLISH: "true" });
   assert.equal(outputs.publish, "true");
   assert.equal(outputs.abis, "arm64-v8a");
   assert.equal(outputs.needed, "true");
 });
 
 test("test builds are universal and never consult the daily release", (t) => {
-  const { outputs, ghCalls } = resolveRun(t, {
+  const { outputs, ghCalls } = resolveOk(t, {
     releaseExists: true,
     PUBLISH: "true",
     TEST_BRANCH: "feat/editor",
@@ -399,12 +413,12 @@ test("test builds are universal and never consult the daily release", (t) => {
 });
 
 test("artifact-only runs always build, even when the release exists", (t) => {
-  const daily = resolveRun(t, { releaseExists: true, PUBLISH: "false" });
+  const daily = resolveOk(t, { releaseExists: true, PUBLISH: "false" });
   assert.equal(daily.outputs.publish, "false");
   assert.equal(daily.outputs.needed, "true");
   assert.equal(daily.outputs.abis, "arm64-v8a");
   assert.equal(daily.ghCalls, "");
-  const testBuild = resolveRun(t, {
+  const testBuild = resolveOk(t, {
     releaseExists: true,
     PUBLISH: "false",
     TEST_BRANCH: "feat/editor",
@@ -452,12 +466,44 @@ test("the APK is built for the ABIs that resolve chose", () => {
 
 test("finished test builds start the Android E2E workflow on their own ref", () => {
   const job = jobBlock("e2e");
+  // It needs the release job, which artifact-only runs skip; without a status
+  // function in its condition the hand-off would be skipped with it.
+  assert.match(job, /\n    if: \$\{\{ !cancelled\(\) && /);
   assert.match(job, /needs\.resolve\.outputs\.test_branch != ''/);
   assert.match(job, /needs\.build\.result == 'success'/);
   assert.match(job, /gh workflow run android-e2e\.yml/);
   assert.match(job, /--ref "\$GITHUB_REF_NAME"/);
   assert.match(job, /-f build_run_id="\$GITHUB_RUN_ID"/);
 });
+
+// Runs the record step in the fixture's work tree and returns what it wrote.
+function recordSource(t, f, env) {
+  const dir = mkdtempSync(join(tmpdir(), "paseo-source-bundle-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const result = spawnSync(
+    "bash",
+    ["-e", "-o", "pipefail", "-c", stepScript("Record the built source for Android E2E")],
+    {
+      cwd: f.git("rev-parse", "--show-toplevel"),
+      env: {
+        ...process.env,
+        RUNNER_TEMP: dir,
+        UPSTREAM_REPO: "getpaseo/paseo",
+        TAG: "v1",
+        FORK_TAG: "v1-native-headers-test",
+        TEST_BRANCH: "",
+        TEST_COMMITS: "",
+        PUBLISH: "false",
+        ABIS: "arm64-v8a,x86_64",
+        ...env,
+      },
+      encoding: "utf8",
+    },
+  );
+  const out = join(dir, "build-source");
+  const info = () => JSON.parse(readFileSync(join(out, "build-info.json"), "utf8"));
+  return { result, out, dir, info };
+}
 
 test("the recorded source bundle rebuilds the exact commit from the upstream tag", (t) => {
   const f = replayFixture(t);
@@ -467,39 +513,17 @@ test("the recorded source bundle rebuilds the exact commit from the upstream tag
   });
   f.git("cherry-pick", "-x", one);
   const commit = f.head();
-  const dir = mkdtempSync(join(tmpdir(), "paseo-source-bundle-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const run = (env) =>
-    spawnSync(
-      "bash",
-      ["-e", "-o", "pipefail", "-c", stepScript("Record the built source for Android E2E")],
-      {
-        cwd: f.git("rev-parse", "--show-toplevel"),
-        env: {
-          ...process.env,
-          RUNNER_TEMP: dir,
-          UPSTREAM_REPO: "getpaseo/paseo",
-          TAG: "v1",
-          FORK_TAG: "v1-native-headers-test",
-          TEST_BRANCH: "wip",
-          TEST_COMMITS: one.slice(0, 9),
-          PUBLISH: "false",
-          ABIS: "arm64-v8a,x86_64",
-          COMMIT: commit,
-          ...env,
-        },
-        encoding: "utf8",
-      },
-    );
+  const env = { TEST_BRANCH: "wip", TEST_COMMITS: one.slice(0, 9), COMMIT: commit };
 
-  const stale = run({ COMMIT: f.feature });
+  const stale = recordSource(t, f, { ...env, COMMIT: f.feature }).result;
   assert.notEqual(stale.status, 0);
   assert.match(stale.stdout, /HEAD is not the built commit/);
 
-  const result = run({});
+  const { result, out, info } = recordSource(t, f, env);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(JSON.parse(readFileSync(join(dir, "build-source", "build-info.json"), "utf8")), {
+  assert.deepEqual(info(), {
     commit,
+    source_bundle: true,
     upstream_repo: "getpaseo/paseo",
     tag: "v1",
     fork_tag: "v1-native-headers-test",
@@ -510,7 +534,7 @@ test("the recorded source bundle rebuilds the exact commit from the upstream tag
   });
 
   // The E2E side: a repository holding only the tag, then the bundle.
-  const clone = join(dir, "clone");
+  const clone = join(out, "..", "clone");
   const git = (...args) => {
     const r = spawnSync("git", args, { cwd: clone, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
@@ -524,6 +548,26 @@ test("the recorded source bundle rebuilds the exact commit from the upstream tag
     f.git("rev-parse", "--show-toplevel"),
     "refs/tags/v1:refs/tags/v1",
   );
-  git("fetch", "-q", join(dir, "build-source", "source.bundle"), "HEAD");
+  git("fetch", "-q", join(out, "source.bundle"), "HEAD");
   assert.equal(git("rev-parse", "FETCH_HEAD"), commit);
+});
+
+test("a build of the bare upstream tag records no bundle instead of failing", (t) => {
+  const f = replayFixture(t);
+  f.git("checkout", "-q", "--detach", "v1");
+  const tagCommit = f.head();
+  const { result, out, info } = recordSource(t, f, { COMMIT: tagCommit });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(info().commit, tagCommit);
+  assert.equal(info().source_bundle, false);
+  assert.equal(spawnSync("test", ["-e", join(out, "source.bundle")]).status, 1);
+});
+
+test("Android E2E checks out the tag itself when the build recorded no bundle", () => {
+  const e2e = readFileSync(
+    new URL("../.github/workflows/android-e2e.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(e2e, /\.source_bundle == false/);
+  assert.match(e2e, /git -C src fetch -q "\$RUNNER_TEMP\/build-source\/source\.bundle" HEAD/);
 });

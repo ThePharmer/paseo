@@ -10,7 +10,10 @@ name: Native headers APK release
 # Test builds are universal (arm64-v8a + x86_64) so the Android E2E workflow's
 # x86_64 emulator installs the same APK, and each finished test build starts
 # that workflow. A dispatch with publish off builds and uploads the artifacts
-# but pushes no tag and publishes no release.
+# but pushes no tag and publishes no release. Every build, daily ones included,
+# uploads the native-headers-build-source artifact (a bundle of the built
+# commit for E2E) and checks that the APK has native libraries for each
+# requested ABI.
 
 on:
   schedule:
@@ -250,9 +253,16 @@ jobs:
           fi
           out="$RUNNER_TEMP/build-source"
           mkdir -p "$out"
-          git bundle create "$out/source.bundle" "refs/tags/$TAG..HEAD"
+          # When upstream already ships everything, HEAD is the tag commit and
+          # git refuses an empty bundle; E2E then checks out the tag itself.
+          source_bundle=false
+          if [[ "$COMMIT" != "$(git rev-parse "refs/tags/$TAG^{commit}")" ]]; then
+            git bundle create "$out/source.bundle" "refs/tags/$TAG..HEAD"
+            source_bundle=true
+          fi
           jq -n \
             --arg commit "$COMMIT" \
+            --argjson source_bundle "$source_bundle" \
             --arg upstream_repo "$UPSTREAM_REPO" \
             --arg tag "$TAG" \
             --arg fork_tag "$FORK_TAG" \
@@ -260,7 +270,7 @@ jobs:
             --arg test_commits "$TEST_COMMITS" \
             --arg publish "$PUBLISH" \
             --arg abis "$ABIS" \
-            '{commit: $commit, upstream_repo: $upstream_repo, tag: $tag, fork_tag: $fork_tag, test_branch: $test_branch, test_commits: $test_commits, published: ($publish == "true"), abis: ($abis | split(","))}' \
+            '{commit: $commit, source_bundle: $source_bundle, upstream_repo: $upstream_repo, tag: $tag, fork_tag: $fork_tag, test_branch: $test_branch, test_commits: $test_commits, published: ($publish == "true"), abis: ($abis | split(","))}' \
             > "$out/build-info.json"
           cat "$out/build-info.json"
 
