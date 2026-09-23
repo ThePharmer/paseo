@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   FILE_EDITOR_POLICY,
   resolveFileEditability,
+  trackFileEditability,
   type FileEditability,
   type FileEditorPlatform,
 } from "./policy";
@@ -52,6 +53,54 @@ describe("resolveFileEditability", () => {
   it("only edits text files", () => {
     expect(editability({ platform: "web", kind: "image" })).toBe("readOnly");
     expect(editability({ platform: "web", missing: true })).toBe("readOnly");
+  });
+});
+
+describe("trackFileEditability", () => {
+  function track(
+    file: { path: string; size: number } | null,
+    openEditorPath: string | null,
+    connected = true,
+  ) {
+    return trackFileEditability({
+      platform: "native",
+      supportsEditing: true,
+      connected,
+      file: file ? { ...file, kind: "text" } : null,
+      openEditorPath,
+    });
+  }
+
+  it("keeps a file editable while it grows past the limit with its editor open", () => {
+    const opened = track({ path: "a.ts", size: 505 * 1024 }, null);
+    expect(opened).toEqual({ editability: "editable", openEditorPath: "a.ts" });
+    expect(track({ path: "a.ts", size: 600 * 1024 }, opened.openEditorPath)).toEqual({
+      editability: "editable",
+      openEditorPath: "a.ts",
+    });
+  });
+
+  it("applies the limit to a larger file opened after an editable one", () => {
+    expect(track({ path: "big.ts", size: 600 * 1024 }, "a.ts")).toEqual({
+      editability: "tooLarge",
+      openEditorPath: null,
+    });
+  });
+
+  it("does not carry the latch back to a file that grew after its editor closed", () => {
+    const switched = track({ path: "big.ts", size: 600 * 1024 }, "a.ts");
+    expect(track({ path: "a.ts", size: 600 * 1024 }, switched.openEditorPath)).toEqual({
+      editability: "tooLarge",
+      openEditorPath: null,
+    });
+  });
+
+  it("ends the session while the host is disconnected", () => {
+    expect(track({ path: "a.ts", size: 600 * 1024 }, "a.ts", false)).toEqual({
+      editability: "tooLarge",
+      openEditorPath: null,
+    });
+    expect(track(null, "a.ts")).toEqual({ editability: "readOnly", openEditorPath: null });
   });
 });
 

@@ -52,3 +52,38 @@ export function resolveFileEditability(input: {
 export function fitsEditor(platform: FileEditorPlatform, size: number): boolean {
   return size <= FILE_EDITOR_POLICY[platform].sizeLimit;
 }
+
+export interface EditorFile {
+  /** Identifies the file itself, not the pane's target, so a latch never crosses files. */
+  path: string;
+  kind: string;
+  size: number;
+}
+
+export interface TrackedEditability {
+  editability: FileEditability;
+  /** The file whose editor is open after this decision, or null. */
+  openEditorPath: string | null;
+}
+
+/**
+ * Applies `resolveFileEditability` across renders: the file that already has an
+ * editor open keeps it while it grows, and any other file faces the size limit.
+ * A disconnected host shows no editor, which ends the session.
+ */
+export function trackFileEditability(input: {
+  platform: FileEditorPlatform;
+  supportsEditing: boolean;
+  connected: boolean;
+  file: EditorFile | null;
+  openEditorPath: string | null;
+}): TrackedEditability {
+  const path = input.connected && input.file ? input.file.path : null;
+  const editability = resolveFileEditability({
+    platform: input.platform,
+    supportsEditing: input.supportsEditing,
+    file: input.file,
+    sessionOpen: path !== null && path === input.openEditorPath,
+  });
+  return { editability, openEditorPath: editability === "editable" ? path : null };
+}
