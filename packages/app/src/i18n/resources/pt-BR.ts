@@ -1872,6 +1872,11 @@ export const ptBR: TranslationResources = {
         reload: "Recarregar",
         reloadTitle: "Recarregar do disco?",
         reloadMessage: "Suas alterações locais serão perdidas.",
+        edit: "Editar",
+        done: "Concluir",
+        tooLargeToEdit: "Grande demais para editar",
+        startFailedTitle: "Não foi possível iniciar o editor",
+        startFailedDescription: "O arquivo está sendo exibido somente para leitura.",
       },
     },
     files: {
@@ -1996,7 +2001,7 @@ export const ptBR: TranslationResources = {
     editor: {
       title: "Editor",
       vimKeybindings: "Atalhos do Vim",
-      vimHint: "Aplica-se a arquivos-fonte na web e no desktop.",
+      vimHint: "Aplica-se ao editar arquivos-fonte.",
     },
     notifications: {
       title: "Notificações",

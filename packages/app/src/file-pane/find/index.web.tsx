@@ -16,6 +16,7 @@ import { hasActiveWebOverlay } from "@/lib/overlay-root";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { isImeComposingKeyboardEvent } from "@/utils/keyboard-ime";
 import { FileFindModel } from "./model.web";
+import { fileFindStatus } from "./status";
 
 export { FileFindModel } from "./model.web";
 
@@ -64,13 +65,7 @@ export function FileFind({
     [model, state.readOnly, state.replacement],
   );
   if (!state.open) return null;
-  const total = `${state.total}${state.limited ? "+" : ""}`;
-  let status = "";
-  if (state.query) {
-    if (state.total === 0) status = t("paneFind.noMatches");
-    else if (state.current) status = t("paneFind.position", { current: state.current, total });
-    else status = t("paneFind.total", { total });
-  }
+  const status = fileFindStatus(t, state);
   return (
     <View
       style={[styles.overlay, state.placement === "top" ? styles.overlayTop : styles.overlayBottom]}
