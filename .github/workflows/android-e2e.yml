@@ -15,11 +15,6 @@ name: Android E2E
 run-name: Android E2E for native headers run ${{ inputs.build_run_id }}
 
 on:
-  # TEMPORARY: registers this workflow so it can be dispatched from
-  # ci/android-e2e before it reaches the default branch. Remove before merging.
-  push:
-    branches: [ci/android-e2e]
-    paths: [.github/workflows/android-e2e.yml]
   workflow_dispatch:
     inputs:
       build_run_id:
@@ -51,8 +46,6 @@ env:
 
 jobs:
   android:
-    # TEMPORARY with the push trigger above.
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
@@ -171,6 +164,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
+      # Bump the key suffix whenever the AVD settings below change.
       - name: Cache the AVD
         id: avd-cache
         uses: actions/cache@v4
