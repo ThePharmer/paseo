@@ -7,6 +7,13 @@ name: Native headers APK release
 # A dispatch with test_branch also cherry-picks that branch's commits (linear
 # history based on the upstream tag), always builds, and publishes only to a separate
 # <tag>-native-headers-test prerelease. The <tag>-native-headers release is untouched.
+# Test builds are universal (arm64-v8a + x86_64) so the Android E2E workflow's
+# x86_64 emulator installs the same APK, and each finished test build starts
+# that workflow. A dispatch with publish off builds and uploads the artifacts
+# but pushes no tag and publishes no release. Every build, daily ones included,
+# uploads the native-headers-build-source artifact (a bundle of the built
+# commit for E2E) and checks that the APK has native libraries for each
+# requested ABI.
 
 on:
   schedule:
@@ -28,10 +35,17 @@ on:
         required: false
         default: ""
         type: string
+      publish:
+        description: "Push the fork tag and publish the release. Off = artifact-only: build and upload the APK, push and publish nothing"
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   # Test builds use their own group so a queued schedule run cannot cancel a pending test dispatch.
-  group: ${{ inputs.test_branch && 'native-headers-release-test' || 'native-headers-release' }}
+  # Artifact-only runs publish nothing, so they get a group of their own and never wait.
+  # format() turns a schedule run's null input into '' (null == false is true in expressions).
+  group: ${{ format('{0}', inputs.publish) == 'false' && format('native-headers-artifact-{0}', github.run_id) || inputs.test_branch && 'native-headers-release-test' || 'native-headers-release' }}
   cancel-in-progress: false
 
 permissions:
@@ -61,6 +75,8 @@ jobs:
       upstream_url: ${{ steps.resolve.outputs.upstream_url }}
       needed: ${{ steps.resolve.outputs.needed }}
       test_branch: ${{ steps.resolve.outputs.test_branch }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      abis: ${{ steps.resolve.outputs.abis }}
     steps:
       - name: Resolve the upstream tag and the fork release tag
         id: resolve
@@ -69,8 +85,14 @@ jobs:
           INPUT_TAG: ${{ inputs.upstream_tag }}
           FORCE: ${{ inputs.force }}
           TEST_BRANCH: ${{ inputs.test_branch }}
+          PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
+          # Schedule runs have no inputs; only an explicit false turns publishing off.
+          publish=true
+          if [[ "${PUBLISH:-}" == "false" ]]; then
+            publish=false
+          fi
           if [[ -n "${INPUT_TAG:-}" ]]; then
             tag="$INPUT_TAG"
             upstream_url="https://github.com/$UPSTREAM_REPO/releases/tag/$tag"
@@ -81,6 +103,9 @@ jobs:
           fork_tag="${tag}-native-headers"
 
           needed=true
+          # Phones are arm64. Test builds add x86_64 so the Android E2E
+          # emulator runs the exact APK that gets installed on the phone.
+          abis=arm64-v8a
           if [[ -n "${TEST_BRANCH:-}" ]]; then
             if ! git check-ref-format "refs/heads/$TEST_BRANCH"; then
               echo "::error::test_branch '$TEST_BRANCH' is not a valid branch name."
@@ -88,8 +113,13 @@ jobs:
             fi
             # Test builds always run and never touch the daily-driver release or its tag.
             fork_tag="${tag}-native-headers-test"
+            abis=arm64-v8a,x86_64
             echo "Test build of $TEST_BRANCH; publishing to prerelease $fork_tag."
-          elif gh release view "$fork_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          fi
+          if [[ "$publish" == "false" ]]; then
+            # Artifact-only runs always build; an existing release does not matter.
+            echo "Artifact-only build; no tag is pushed and no release is published."
+          elif [[ -z "${TEST_BRANCH:-}" ]] && gh release view "$fork_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             if [[ "${FORCE:-false}" == "true" ]]; then
               echo "Fork release $fork_tag already exists; force set, rebuilding and replacing it."
             else
@@ -104,8 +134,10 @@ jobs:
             echo "upstream_url=$upstream_url"
             echo "needed=$needed"
             echo "test_branch=${TEST_BRANCH:-}"
+            echo "publish=$publish"
+            echo "abis=$abis"
           } >> "$GITHUB_OUTPUT"
-          echo "upstream=$tag fork=$fork_tag needed=$needed test_branch=${TEST_BRANCH:-none}"
+          echo "upstream=$tag fork=$fork_tag needed=$needed test_branch=${TEST_BRANCH:-none} publish=$publish abis=$abis"
 
   build:
     needs: resolve
@@ -200,8 +232,58 @@ jobs:
             echo "test_commits=$test_commits"
           } >> "$GITHUB_OUTPUT"
 
+      # Artifact-only builds push no tag, so the built commit exists only on
+      # this runner. The Android E2E workflow rebuilds it from this bundle
+      # (the commits on top of the upstream tag) to run the daemon and the
+      # test scripts from the same source as the APK.
+      - name: Record the built source for Android E2E
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
+          TEST_BRANCH: ${{ needs.resolve.outputs.test_branch }}
+          PUBLISH: ${{ needs.resolve.outputs.publish }}
+          ABIS: ${{ needs.resolve.outputs.abis }}
+          COMMIT: ${{ steps.source.outputs.commit }}
+          TEST_COMMITS: ${{ steps.source.outputs.test_commits }}
+        run: |
+          set -euo pipefail
+          if [[ "$(git rev-parse HEAD)" != "$COMMIT" ]]; then
+            echo "::error::HEAD is not the built commit $COMMIT."
+            exit 1
+          fi
+          out="$RUNNER_TEMP/build-source"
+          mkdir -p "$out"
+          # When upstream already ships everything, HEAD is the tag commit and
+          # git refuses an empty bundle; E2E then checks out the tag itself.
+          source_bundle=false
+          if [[ "$COMMIT" != "$(git rev-parse "refs/tags/$TAG^{commit}")" ]]; then
+            git bundle create "$out/source.bundle" "refs/tags/$TAG..HEAD"
+            source_bundle=true
+          fi
+          jq -n \
+            --arg commit "$COMMIT" \
+            --argjson source_bundle "$source_bundle" \
+            --arg upstream_repo "$UPSTREAM_REPO" \
+            --arg tag "$TAG" \
+            --arg fork_tag "$FORK_TAG" \
+            --arg test_branch "$TEST_BRANCH" \
+            --arg test_commits "$TEST_COMMITS" \
+            --arg publish "$PUBLISH" \
+            --arg abis "$ABIS" \
+            '{commit: $commit, source_bundle: $source_bundle, upstream_repo: $upstream_repo, tag: $tag, fork_tag: $fork_tag, test_branch: $test_branch, test_commits: $test_commits, published: ($publish == "true"), abis: ($abis | split(","))}' \
+            > "$out/build-info.json"
+          cat "$out/build-info.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-headers-build-source
+          path: ${{ runner.temp }}/build-source
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Create App token for publishing preflight
         id: preflight_token
+        if: needs.resolve.outputs.publish == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
@@ -211,6 +293,7 @@ jobs:
 
       - name: Check tag publishing before building
         id: publish_check
+        if: needs.resolve.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ steps.preflight_token.outputs.token }}
           FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
@@ -387,6 +470,7 @@ jobs:
       - name: Prebuild and assemble the release APK
         env:
           APP_VARIANT: production
+          ABIS: ${{ needs.resolve.outputs.abis }}
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
           PUSH_MODE: ${{ steps.push.outputs.mode }}
           GRADLE_OPTS: >-
@@ -456,7 +540,9 @@ jobs:
           EOF
           cd android
           # Phones are arm64; dropping armeabi-v7a/x86/x86_64 cuts the APK to
-          # roughly a third. This APK will not run on x86 emulators.
+          # roughly a third. Test builds add x86_64 (see ABIS in resolve) so
+          # the same APK runs on the Android E2E emulator; daily builds do not
+          # run on x86 emulators.
           #
           # Maven Central rate-limits GitHub's shared runner addresses (HTTP
           # 429) and Gradle does not retry that. Completed tasks are up to date
@@ -464,7 +550,7 @@ jobs:
           gradle_build() {
             ./gradlew \
               :app:assembleRelease \
-              -PreactNativeArchitectures=arm64-v8a \
+              -PreactNativeArchitectures="$ABIS" \
               --max-workers=1 \
               -x lint \
               -x lintVitalAnalyzeRelease \
@@ -492,10 +578,19 @@ jobs:
         env:
           FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
+          ABIS: ${{ needs.resolve.outputs.abis }}
         run: |
           set -euo pipefail
           name="paseo-${FORK_TAG}-android.apk"
           cp packages/app/android/app/build/outputs/apk/release/app-release.apk "$RUNNER_TEMP/$name"
+          built="$(unzip -Z1 "$RUNNER_TEMP/$name" 'lib/*' | cut -d/ -f2 | sort -u | paste -sd, -)"
+          echo "Native libraries for: $built (requested $ABIS)"
+          for abi in ${ABIS//,/ }; do
+            if [[ ",$built," != *",$abi,"* ]]; then
+              echo "::error::The APK has no native libraries for $abi, which was requested ($ABIS)."
+              exit 1
+            fi
+          done
           apksigner="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
           certs="$("$apksigner" verify --print-certs "$RUNNER_TEMP/$name")"
           printf '%s\n' "$certs" | head -n 4
@@ -516,6 +611,7 @@ jobs:
       # pushed here (tag ref only, no branch) once the build has succeeded.
       - name: Create App token for release tag publishing
         id: publish_token
+        if: needs.resolve.outputs.publish == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         with:
           client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
@@ -524,6 +620,7 @@ jobs:
           permission-workflows: write
 
       - name: Push the fork release tag
+        if: needs.resolve.outputs.publish == 'true'
         env:
           FORK_TAG: ${{ needs.resolve.outputs.fork_tag }}
           GH_TOKEN: ${{ steps.publish_token.outputs.token }}
@@ -541,6 +638,7 @@ jobs:
 
   release:
     needs: [resolve, build]
+    if: needs.resolve.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -564,6 +662,7 @@ jobs:
           COMMIT: ${{ needs.build.outputs.commit }}
           TEST_BRANCH: ${{ needs.resolve.outputs.test_branch }}
           TEST_COMMITS: ${{ needs.build.outputs.test_commits }}
+          ABIS: ${{ needs.resolve.outputs.abis }}
         run: |
           set -euo pipefail
 
@@ -602,6 +701,12 @@ jobs:
             push_line="Push notifications: NOT available. No Firebase credentials were configured on this repository."
           fi
 
+          if [[ "$ABIS" == "arm64-v8a" ]]; then
+            arch_line="Architecture: arm64-v8a only, to keep the APK small. Not for x86 emulators."
+          else
+            arch_line="Architecture: ${ABIS//,/ and }, so the Android E2E emulator runs this same APK. Larger than the arm64-only daily build."
+          fi
+
           cat > "$RUNNER_TEMP/notes.md" <<EOF
           ${test_notes}Fork build of upstream $TAG with the native direct-connection headers feature.
 
@@ -610,7 +715,7 @@ jobs:
           - $fixes_line
           - Signing: $signing_line
           - $push_line
-          - Architecture: arm64-v8a only, to keep the APK small. Not for x86 emulators.
+          - $arch_line
           - applicationId is sh.paseo, the same id as the Play Store build. This APK REPLACES the store app; the two cannot coexist on one device.
           - $install_line
           - Fork publication tags are excluded from upstream push workflows in the release source to prevent competing builds and release updates.
@@ -639,3 +744,26 @@ jobs:
               "${latest_flag[@]}" \
               "$RUNNER_TEMP/apk/$ARTIFACT"
           fi
+
+  # Runs the Android E2E workflow against every finished test build, published
+  # or not. A workflow_dispatch is one of the two events a GITHUB_TOKEN may
+  # start runs with, and it targets this run's own ref, so the E2E definition
+  # comes from the same branch as this workflow. The release does not wait for
+  # the E2E result.
+  e2e:
+    needs: [resolve, build, release]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.resolve.outputs.test_branch != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Start Android E2E for this test build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run android-e2e.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$GITHUB_REF_NAME" \
+            -f build_run_id="$GITHUB_RUN_ID"
+          echo "Started Android E2E on $GITHUB_REF_NAME for native headers run $GITHUB_RUN_ID."
