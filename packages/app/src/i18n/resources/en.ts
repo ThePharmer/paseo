@@ -2029,6 +2029,7 @@ export const en = {
       title: "Editor",
       vimKeybindings: "Vim keybindings",
       vimHint: "Applies when editing source files.",
+      vimHardwareKeyboardHint: "Needs a hardware keyboard with an Escape key.",
     },
     notifications: {
       title: "Notifications",

@@ -1989,6 +1989,7 @@ export const ja: TranslationResources = {
       title: "エディター",
       vimKeybindings: "Vim キーバインド",
       vimHint: "ソースファイルの編集時に適用されます。",
+      vimHardwareKeyboardHint: "Escape キーのあるハードウェアキーボードが必要です。",
     },
     notifications: {
       title: "通知",
