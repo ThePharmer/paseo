@@ -17,7 +17,7 @@ agent-device press 'id="workspace-header-menu-trigger"' --session terminal-autho
 agent-device close --session terminal-author
 ```
 
-`close` writes the script. Keep selectors based on stable app IDs. Keep assertions as `wait`, `get`, `is`, or `find` commands; screenshots are evidence, not assertions.
+`close` writes the script. Keep selectors based on stable app IDs. Menu items have the `menuitem` role, not `button`, so target them by `id`. Keep assertions as `wait`, `get`, `is`, or `find` commands; screenshots are evidence, not assertions.
 
 Run the Paseo mobile suite:
 
@@ -25,7 +25,7 @@ Run the Paseo mobile suite:
 npm run test:e2e:mobile
 ```
 
-The runner uses an isolated Agent Device state directory, verifies or starts Metro for this checkout, prewarms the iOS runner, discovers each script's platform from its `context` header, and cleans its sessions, runner lease, daemon, and any Metro process it started. Attempt results, timings, logs, and failure artifacts go under `.dev/agent-device-artifacts`.
+The runner uses an isolated Agent Device state directory, verifies or starts Metro for this checkout, prewarms the iOS runner, discovers each script's platform from its `context` header, and cleans its sessions, runner lease, daemon, and any Metro process it started. Attempt results, timings, logs, and failure artifacts go under `.dev/agent-device-artifacts`. Pass script paths to run a subset.
 
 Set `PASEO_MOBILE_E2E_METRO_PORT` when this worktree already has Metro on a non-default port:
 
@@ -33,7 +33,36 @@ Set `PASEO_MOBILE_E2E_METRO_PORT` when this worktree already has Metro on a non-
 PASEO_MOBILE_E2E_METRO_PORT=62093 npm run test:e2e:mobile
 ```
 
-[native-terminal-basic.ios.ad](../packages/app/e2e/mobile/agent-device/native-terminal-basic.ios.ad) and [native-terminal-basic.android.ad](../packages/app/e2e/mobile/agent-device/native-terminal-basic.android.ad) are the smallest examples. Each opens a fresh terminal, types a command at zero delay, submits it, and asserts its distinct output. The app must be connected to a daemon with an active workspace.
+To run only the Android scripts against an installed release APK, which embeds its bundle and uses the `sh.paseo` id instead of `sh.paseo.debug`:
+
+```bash
+PASEO_MOBILE_E2E_PLATFORM=android PASEO_MOBILE_E2E_APP_ID=sh.paseo PASEO_MOBILE_E2E_METRO=0 \
+  npm run test:e2e:mobile
+```
+
+`PASEO_MOBILE_E2E_PLATFORM=android` skips the iOS runner and the `*.ios.ad` scripts.
+
+[native-terminal-basic.ios.ad](../packages/app/e2e/mobile/agent-device/native-terminal-basic.ios.ad) and [native-terminal-basic.android.ad](../packages/app/e2e/mobile/agent-device/native-terminal-basic.android.ad) are the smallest examples. Each opens a fresh terminal, types a command at zero delay, submits it, and asserts its distinct output. The app must be connected to a daemon with an active workspace. [setup/connect-direct.android.ad](../packages/app/e2e/mobile/setup/connect-direct.android.ad) gets a fresh install there: it fills the Direct connection sheet's separate Host and Port fields and opens the workspace row `sidebar-workspace-row-<serverId>:<workspaceId>`. It lives outside `agent-device/` so the suite does not run it.
+
+### Flows that act on the host
+
+Some flows need the host to change between steps: the file editor checks what autosave wrote and changes a file behind the app's back. [file-editor/android.sh](../packages/app/e2e/mobile/file-editor/android.sh) replays several `.ad` scripts in one Agent Device session. A script that ends without `close` leaves the app where it stopped, the harness acts on the workspace directory, and the next script's `open` foregrounds the same app instead of relaunching it. Do not background the app between scripts; the editor saves and re-reads the file when the app leaves the foreground. Start each flow with `open --relaunch`: scripts that run before it can leave state behind, such as a terminal text selection that swallows the next tap.
+
+Autosave fires 800 ms after the last edit, so a script cannot hold an unsaved edit while the host changes the file. To reach the conflict banner, the harness makes the file's directory read-only first. The daemon writes through a temp file and a rename, so the save fails, the edit stays unsaved, and the host's change then lands on a dirty buffer. `chmod` on the file alone does not block the rename. The daemon must run as a non-root user.
+
+The harness needs `PASEO_E2E_WORKSPACE_DIR`, the directory of the workspace the app has open, on the machine running it.
+
+### Android E2E in CI
+
+On the ThePharmer fork, `.github/workflows/android-e2e.yml` runs the Android suites against an APK from the native headers workflow. Each test build of that workflow (a dispatch with `test_branch`) starts it automatically; start it by hand with the build's run ID:
+
+```bash
+gh workflow run android-e2e.yml --ref main -f build_run_id=<native headers run id>
+```
+
+Test builds include `x86_64`, so the emulator runs the same APK the phone installs. The workflow rebuilds the exact commit the APK was built from out of the build's `native-headers-build-source` artifact, starts that commit's daemon with a fresh home and no password, connects the app over `adb reverse`, then runs the Android scripts and the file editor harness from the same commit. The test branch therefore has to contain these scripts. A native headers dispatch with `publish` off builds and uploads the APK without pushing a tag or touching a release, which is how to get an APK for E2E alone.
+
+Rebuilding the APK takes about half an hour. While you only change scripts, pass `e2e_ref=<branch>` to take `packages/app/e2e/mobile` and the runner from that branch instead of the built commit. Every run uploads the daemon log, logcat, screenshots and Agent Device artifacts.
 
 For Android keyboard continuity, run the current checkout in the app, open an idle terminal
 with an empty prompt, hide its keyboard, and run:
