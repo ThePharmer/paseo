@@ -4,14 +4,22 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const workflow = readFileSync(new URL("../.github/workflows/native-headers-release.yml", import.meta.url), "utf8");
+const workflow = readFileSync(
+  new URL("../.github/workflows/native-headers-release.yml", import.meta.url),
+  "utf8",
+);
 function stepScript(name) {
   const block = workflow.split(`      - name: ${name}\n`)[1]?.split(/\n      - /)[0];
   assert.ok(block, `Missing workflow step: ${name}`);
   const run = block.split("        run: |\n")[1];
   assert.ok(run, `Missing shell script: ${name}`);
-  return run.split("\n").filter((line) => line.startsWith("          ")).map((line) => line.slice(10)).join("\n");
+  return run
+    .split("\n")
+    .filter((line) => line.startsWith("          "))
+    .map((line) => line.slice(10))
+    .join("\n");
 }
 const preflight = stepScript("Check tag publishing before building");
 const publish = stepScript("Push the fork release tag");
@@ -39,17 +47,40 @@ function fixture(t) {
   const ref = "refs/tags/v0.8.0-native-headers";
   const output = join(dir, "output");
   writeFileSync(output, "");
-  const env = { ...process.env, GH_TOKEN: "test-token", FORK_TAG: ref.slice(10), GITHUB_RUN_ID: "123", GITHUB_RUN_ATTEMPT: "1", GITHUB_OUTPUT: output, COMMIT: commit, PREVIOUS_TAG: "" };
-  const run = (script, extra = {}) => spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], { cwd, env: { ...env, ...extra }, encoding: "utf8" });
+  const env = {
+    ...process.env,
+    GH_TOKEN: "test-token",
+    FORK_TAG: ref.slice(10),
+    GITHUB_RUN_ID: "123",
+    GITHUB_RUN_ATTEMPT: "1",
+    GITHUB_OUTPUT: output,
+    COMMIT: commit,
+    PREVIOUS_TAG: "",
+  };
+  const run = (script, extra = {}) =>
+    spawnSync("bash", ["-e", "-o", "pipefail", "-c", script], {
+      cwd,
+      env: { ...env, ...extra },
+      encoding: "utf8",
+    });
   const target = () => git("ls-remote", "--refs", remote, ref).split("\t")[0];
   const seed = (sha = old) => git("-C", cwd, "push", "--force", "origin", `${sha}:${ref}`);
-  const rejectPushes = () => writeFileSync(join(remote, "hooks", "pre-receive"), "#!/bin/sh\necho 'simulated permission rejection' >&2\nexit 1\n", { mode: 0o755 });
+  const rejectPushes = () =>
+    writeFileSync(
+      join(remote, "hooks", "pre-receive"),
+      "#!/bin/sh\necho 'simulated permission rejection' >&2\nexit 1\n",
+      { mode: 0o755 },
+    );
   return { git, cwd, remote, ref, old, commit, output, run, target, seed, rejectPushes };
 }
 
 test("preflight runs before signing, dependencies and APK build", () => {
   const at = workflow.indexOf("      - name: Check tag publishing before building");
-  for (const step of ["Configure APK signing", "Install JS dependencies", "Prebuild and assemble the release APK"]) {
+  for (const step of [
+    "Configure APK signing",
+    "Install JS dependencies",
+    "Prebuild and assemble the release APK",
+  ]) {
     assert.ok(at < workflow.indexOf(`      - name: ${step}`));
   }
 });
@@ -76,7 +107,11 @@ test("preflight rejects denied pushes before build and preserves existing tag", 
 
 test("preflight cleanup failure blocks build and names the leftover probe", (t) => {
   const f = fixture(t);
-  writeFileSync(join(f.remote, "hooks", "pre-receive"), '#!/bin/sh\nwhile read old new ref; do\n case "$new" in 0000000000000000000000000000000000000000) exit 1;; esac\ndone\n', { mode: 0o755 });
+  writeFileSync(
+    join(f.remote, "hooks", "pre-receive"),
+    '#!/bin/sh\nwhile read old new ref; do\n case "$new" in 0000000000000000000000000000000000000000) exit 1;; esac\ndone\n',
+    { mode: 0o755 },
+  );
   const result = f.run(preflight);
   assert.notEqual(result.status, 0);
   assert.match(result.stdout, /Could not remove temporary tag/);
@@ -125,4 +160,167 @@ test("publish refuses concurrent creation of a previously missing tag", (t) => {
   f.seed();
   assert.notEqual(f.run(publish).status, 0);
   assert.equal(f.target(), f.old);
+});
+
+const applyTestBranch = fileURLToPath(
+  new URL("./native-headers-apply-test-branch.sh", import.meta.url),
+);
+
+// Work tree detached at tag v1 plus the feature commit, as the source step leaves it.
+// Test branches are built from v1 in the same repo and pushed to a bare origin.
+function replayFixture(t) {
+  const dir = mkdtempSync(join(tmpdir(), "paseo-test-branch-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const remote = join(dir, "remote.git");
+  const cwd = join(dir, "work");
+  function git(...args) {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  }
+  for (const args of [
+    ["init", "-q", "--bare", remote],
+    ["init", "-q", cwd],
+  ]) {
+    assert.equal(spawnSync("git", args, { cwd: dir }).status, 0);
+  }
+  const config = [
+    ["user.name", "Release test"],
+    ["user.email", "release@example.invalid"],
+    ["commit.gpgsign", "false"],
+    ["tag.gpgsign", "false"],
+  ];
+  for (const [key, value] of config) git("config", key, value);
+  git("remote", "add", "origin", remote);
+  function commit(file, content, message) {
+    writeFileSync(join(cwd, file), content);
+    git("add", file);
+    git("commit", "-q", "-m", message);
+    return git("rev-parse", "HEAD");
+  }
+  const root = commit("a.txt", "root\n", "root");
+  commit("a.txt", "base\n", "base");
+  git("tag", "-a", "v1", "-m", "v1");
+  git("checkout", "-q", "-b", "feat", "v1");
+  const feature = commit("feature.txt", "feature\n", "feature");
+  const releaseTree = () => {
+    git("checkout", "-q", "--detach", "v1");
+    git("cherry-pick", "-x", feature);
+  };
+  // Pushes the branch that `build` creates from `from`, then restores the release tree.
+  function branch(name, from, build) {
+    git("checkout", "-q", "-B", name, from);
+    build();
+    git("push", "-q", "origin", `${name}:refs/heads/${name}`);
+    releaseTree();
+  }
+  releaseTree();
+  const run = (name) => spawnSync("bash", [applyTestBranch, "v1", name], { cwd, encoding: "utf8" });
+  const head = () => git("rev-parse", "HEAD");
+  const clean = () =>
+    git("status", "--porcelain") === "" &&
+    spawnSync("git", ["rev-parse", "-q", "--verify", "CHERRY_PICK_HEAD"], { cwd }).status !== 0;
+  return { git, commit, branch, run, head, clean, root, feature };
+}
+
+test("source step replays the test branch through the tested script", () => {
+  assert.match(
+    stepScript("Prepare and test release workflow tools"),
+    /cp scripts\/native-headers-apply-test-branch\.sh "\$RUNNER_TEMP\/release-tools\/apply-test-branch\.sh"/,
+  );
+  assert.match(
+    stepScript("Build the source tree for the release"),
+    /test_commits="\$\(bash "\$RUNNER_TEMP\/release-tools\/apply-test-branch\.sh" "\$TAG" "\$TEST_BRANCH"\)"/,
+  );
+});
+
+test("test branch replay applies each commit in order and prints their short shas", (t) => {
+  const f = replayFixture(t);
+  let one;
+  let two;
+  f.branch("wip", "v1", () => {
+    one = f.commit("one.txt", "one\n", "one");
+    two = f.commit("two.txt", "two\n", "two");
+  });
+  const before = f.head();
+  const result = f.run("wip");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${one.slice(0, 9)}, ${two.slice(0, 9)}\n`);
+  assert.equal(f.git("log", "--format=%s", `${before}..HEAD`), "two\none");
+});
+
+test("test branch replay skips a commit that is already applied", (t) => {
+  const f = replayFixture(t);
+  let one;
+  f.branch("wip", "v1", () => {
+    f.git("cherry-pick", f.feature);
+    one = f.commit("one.txt", "one\n", "one");
+  });
+  const result = f.run("wip");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${one.slice(0, 9)}\n`);
+  assert.match(result.stderr, /is already applied; skipped/);
+});
+
+test("test branch replay rejects merge commits and changes nothing", (t) => {
+  const f = replayFixture(t);
+  let merge;
+  f.branch("side", "v1", () => f.commit("side.txt", "side\n", "side"));
+  f.branch("wip", "v1", () => {
+    f.commit("one.txt", "one\n", "one");
+    f.git("merge", "-q", "--no-ff", "--no-edit", "side");
+    merge = f.head();
+  });
+  const before = f.head();
+  const result = f.run("wip");
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    new RegExp(
+      `::error::Test branch wip has merge commits on top of v1: ${merge.slice(0, 9)}\\. Rebase it onto v1`,
+    ),
+  );
+  assert.equal(result.stdout, "");
+  assert.equal(f.head(), before);
+  assert.ok(f.clean());
+});
+
+test("test branch replay rejects a branch not based on the tag", (t) => {
+  const f = replayFixture(t);
+  f.branch("stale", f.root, () => f.commit("one.txt", "one\n", "one"));
+  const before = f.head();
+  const result = f.run("stale");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /::error::Test branch stale is not based on upstream v1\./);
+  assert.equal(result.stdout, "");
+  assert.equal(f.head(), before);
+});
+
+test("test branch replay aborts a conflict and names the commit and file", (t) => {
+  const f = replayFixture(t);
+  let clash;
+  f.branch("clash", "v1", () => {
+    clash = f.commit("feature.txt", "different\n", "clash");
+  });
+  const before = f.head();
+  const result = f.run("clash");
+  assert.notEqual(result.status, 0);
+  assert.match(
+    result.stderr,
+    new RegExp(
+      `::error::Cherry-picking test commit ${clash} from clash conflicted in: feature\\.txt\\.`,
+    ),
+  );
+  assert.equal(result.stdout, "");
+  assert.equal(f.head(), before);
+  assert.ok(f.clean());
+});
+
+test("test branch replay fails when no commits are left to apply", (t) => {
+  const f = replayFixture(t);
+  f.branch("same", "v1", () => f.git("cherry-pick", f.feature));
+  const result = f.run("same");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /::error::Test branch same has no commits left to apply/);
+  assert.equal(result.stdout, "");
 });

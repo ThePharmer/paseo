@@ -4,8 +4,8 @@ name: Native headers APK release
 # release tag plus the fork's native direct-connection headers commit
 # (getpaseo/paseo#4290). Lives on fork main because schedules only run there.
 # Polls every 15 minutes; a run with no new upstream tag ends in seconds.
-# A dispatch with test_branch also cherry-picks that branch's commits (based on
-# the upstream tag), always builds, and publishes only to a separate
+# A dispatch with test_branch also cherry-picks that branch's commits (linear
+# history based on the upstream tag), always builds, and publishes only to a separate
 # <tag>-native-headers-test prerelease. The <tag>-native-headers release is untouched.
 
 on:
@@ -24,7 +24,7 @@ on:
         default: false
         type: boolean
       test_branch:
-        description: "Test build: fork branch whose commits on top of the upstream tag are cherry-picked; publishes only to the <tag>-native-headers-test prerelease (blank = normal release)"
+        description: "Test build: fork branch, rebased onto the upstream tag with no merges, whose commits are cherry-picked; publishes only to the <tag>-native-headers-test prerelease (blank = normal release)"
         required: false
         default: ""
         type: string
@@ -134,6 +134,7 @@ jobs:
           node --test scripts/native-headers-release.test.mjs
           "$RUNNER_TEMP/release-tools/bin/python" scripts/native-headers-workflow-filters.test.py
           cp scripts/native-headers-workflow-filters.py "$RUNNER_TEMP/release-tools/filters.py"
+          cp scripts/native-headers-apply-test-branch.sh "$RUNNER_TEMP/release-tools/apply-test-branch.sh"
 
       - name: Build the source tree for the release
         id: source
@@ -181,29 +182,7 @@ jobs:
 
           test_commits=""
           if [[ -n "$TEST_BRANCH" ]]; then
-            test_ref="refs/remotes/fork/$TEST_BRANCH"
-            git fetch --no-tags origin "refs/heads/$TEST_BRANCH:$test_ref"
-            if ! git merge-base --is-ancestor "refs/tags/$TAG" "$test_ref"; then
-              echo "::error::Test branch $TEST_BRANCH is not based on upstream $TAG. Rebase it onto $TAG, push it, then re-run. No release was published."
-              exit 1
-            fi
-            for sha in $(git rev-list --reverse --no-merges "refs/tags/$TAG..$test_ref"); do
-              if git cherry-pick -x "$sha"; then
-                test_commits="${test_commits:+$test_commits, }${sha:0:9}"
-              elif [[ -z "$(git diff --name-only --diff-filter=U)" ]]; then
-                git cherry-pick --skip
-                echo "Test commit $sha is already applied; skipped."
-              else
-                conflicts="$(git diff --name-only --diff-filter=U | paste -sd' ' -)"
-                git cherry-pick --abort || true
-                echo "::error::Cherry-picking test commit $sha from $TEST_BRANCH conflicted in: ${conflicts:-unknown}. Rebase $TEST_BRANCH so it applies on top of $TAG plus the feature and EXTRA_FIXES, push it, then re-run. No release was published."
-                exit 1
-              fi
-            done
-            if [[ -z "$test_commits" ]]; then
-              echo "::error::Test branch $TEST_BRANCH has no commits left to apply on top of $TAG, the feature, and EXTRA_FIXES. No release was published."
-              exit 1
-            fi
+            test_commits="$(bash "$RUNNER_TEMP/release-tools/apply-test-branch.sh" "$TAG" "$TEST_BRANCH")"
           fi
 
           # The tag carries upstream's workflows, not those on fork main. Exclude
