@@ -1907,6 +1907,11 @@ export const fr: TranslationResources = {
         reload: "Recharger",
         reloadTitle: "Recharger depuis le disque ?",
         reloadMessage: "Vos modifications locales seront perdues.",
+        edit: "Modifier",
+        done: "Terminé",
+        tooLargeToEdit: "Trop volumineux pour être modifié",
+        startFailedTitle: "Impossible de démarrer l’éditeur",
+        startFailedDescription: "Le fichier est affiché en lecture seule.",
       },
     },
     files: {
@@ -2032,7 +2037,7 @@ export const fr: TranslationResources = {
     editor: {
       title: "Éditeur",
       vimKeybindings: "Raccourcis Vim",
-      vimHint: "S’applique aux fichiers source sur le web et le bureau.",
+      vimHint: "S’applique à la modification des fichiers source.",
     },
     notifications: {
       title: "Notifications",

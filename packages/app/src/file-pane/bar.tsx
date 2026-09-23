@@ -1,15 +1,30 @@
 import { Text, View } from "react-native";
+import { Search } from "lucide-react-native";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
+import { Button } from "@/components/ui/button";
+import { mutedIconColorMapping } from "@/components/ui/icon-color";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
-import { PaneContentToolbar } from "@/components/ui/pane-content-toolbar";
+import {
+  PaneContentToolbar,
+  ToolbarButton,
+  paneContentToolbarIconSize,
+} from "@/components/ui/pane-content-toolbar";
 import { SegmentedControl } from "@/components/ui/segmented-control";
+import { useIsCompactFormFactor } from "@/constants/layout";
 import type { Theme } from "@/styles/theme";
 import { FileConflictAlert, type FileConflictAlertState } from "./conflict-alert";
 import type { FileEditorStatus } from "./editor/model";
 
 const ThemedSpinner = withUnistyles(LoadingSpinner);
 const spinnerMapping = (theme: Theme) => ({ color: theme.colors.foregroundMuted });
+const SearchIcon = withUnistyles(Search, mutedIconColorMapping);
+
+/** The Edit/Done toggle for platforms that open files read-only first. */
+export type FilePanelEditing =
+  | { kind: "viewing"; onEdit(): void }
+  | { kind: "tooLarge" }
+  | { kind: "editing"; finishing: boolean; onFind(): void; onDone(): void };
 
 export function FilePanelBar({
   size,
@@ -20,6 +35,7 @@ export function FilePanelBar({
   cursor,
   vimMode,
   conflict,
+  editing,
 }: {
   size: number;
   lineCount?: number;
@@ -29,6 +45,7 @@ export function FilePanelBar({
   cursor?: { line: number; column: number };
   vimMode?: string | null;
   conflict?: FileConflictAlertState;
+  editing?: FilePanelEditing;
 }) {
   const { t } = useTranslation();
   const previewModes = [
@@ -108,9 +125,41 @@ export function FilePanelBar({
               options={previewModes}
             />
           ) : null}
+          {editing ? <FilePanelEditingControls editing={editing} /> : null}
         </View>
       </PaneContentToolbar>
       {conflict ? <FileConflictAlert state={conflict} /> : null}
+    </View>
+  );
+}
+
+function FilePanelEditingControls({ editing }: { editing: FilePanelEditing }) {
+  const { t } = useTranslation();
+  const isCompact = useIsCompactFormFactor();
+  if (editing.kind === "tooLarge") {
+    return <Text style={styles.whisper}>{t("panels.file.editor.tooLargeToEdit")}</Text>;
+  }
+  if (editing.kind === "viewing") {
+    return (
+      <Button variant="ghost" size="xs" onPress={editing.onEdit} testID="file-edit">
+        {t("panels.file.editor.edit")}
+      </Button>
+    );
+  }
+  return (
+    <View style={styles.status}>
+      <ToolbarButton label={t("paneFind.title")} compact={isCompact} onPress={editing.onFind}>
+        <SearchIcon size={paneContentToolbarIconSize(isCompact)} />
+      </ToolbarButton>
+      <Button
+        variant="ghost"
+        size="xs"
+        onPress={editing.onDone}
+        loading={editing.finishing}
+        testID="file-edit-done"
+      >
+        {t("panels.file.editor.done")}
+      </Button>
     </View>
   );
 }

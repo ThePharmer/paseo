@@ -1,24 +1,12 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, useSyncExternalStore } from "react";
 import { FileFind, FileFindModel } from "../find/index.web";
 import { Annotation, Compartment, EditorState, Transaction } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { getLanguageForFile } from "@getpaseo/highlight";
 import { getCM, vim } from "@replit/codemirror-vim";
 import { isRenderedMarkdownFile } from "@/components/file-pane-render-mode";
-import type { WorkspaceFileLocation } from "@/workspace/file-open";
-import type { FileEditorModel } from "./model";
-import { editorBaseExtensions, editorTheme, type EditorVisualTheme } from "./extensions.web";
-
-interface FileEditorViewProps {
-  model: FileEditorModel;
-  filename: string;
-  location: WorkspaceFileLocation;
-  navigationRevision: number;
-  vimEnabled: boolean;
-  theme: EditorVisualTheme;
-  onCursorChange(position: { line: number; column: number }): void;
-  onVimModeChange(mode: string | null): void;
-}
+import { editorBaseExtensions, editorTheme } from "./extensions.web";
+import type { FileEditorViewProps } from "./view-contract";
 
 const languageCompartment = new Compartment();
 const wrappingCompartment = new Compartment();
@@ -30,6 +18,7 @@ function wrappingForFile(filename: string) {
 }
 
 export function FileEditorView({
+  ref,
   model,
   filename,
   location,
@@ -46,6 +35,12 @@ export function FileEditorView({
   const initial = useRef({ filename, model, theme, vimEnabled, content: snapshot.content });
   const onCursorChangeRef = useRef(onCursorChange);
   onCursorChangeRef.current = onCursorChange;
+  // Edits reach the model synchronously here, so there is nothing to flush.
+  useImperativeHandle(
+    ref,
+    () => ({ flush: () => Promise.resolve(), openFind: () => find.open(viewRef.current) }),
+    [find],
+  );
 
   useEffect(() => {
     if (!hostRef.current) return;

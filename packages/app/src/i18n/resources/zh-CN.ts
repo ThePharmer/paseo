@@ -1833,6 +1833,11 @@ export const zhCN: TranslationResources = {
         reload: "重新加载",
         reloadTitle: "从磁盘重新加载？",
         reloadMessage: "本地更改将丢失。",
+        edit: "编辑",
+        done: "完成",
+        tooLargeToEdit: "文件过大，无法编辑",
+        startFailedTitle: "无法启动编辑器",
+        startFailedDescription: "正在以只读方式显示文件。",
       },
     },
     files: {
@@ -1957,7 +1962,7 @@ export const zhCN: TranslationResources = {
     editor: {
       title: "编辑器",
       vimKeybindings: "Vim 键位",
-      vimHint: "适用于网页和桌面端的源文件。",
+      vimHint: "编辑源文件时生效。",
     },
     notifications: {
       title: "通知",
