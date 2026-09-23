@@ -126,20 +126,40 @@ adb logcat -v threadtime >"${ARTIFACTS_DIR}/logcat.txt" 2>&1 &
 logcat_pid=$!
 settle_system_ui
 
-AGENT_DEVICE_STATE_DIR="${RUNNER_TEMP:-/tmp}/agent-device-connect" agent-device replay \
-  "${SRC_DIR}/packages/app/e2e/mobile/setup/connect-direct.android.ad" \
-  --platform android \
-  --session connect \
-  --env "APP_ID=${APP_ID}" \
-  --env "DAEMON_HOST=127.0.0.1" \
-  --env "DAEMON_PORT=${DAEMON_PORT}" \
-  --env "SERVER_ID=${SERVER_ID}" \
-  --env "WORKSPACE_ID=${WORKSPACE_ID}"
-connect_status=$?
-AGENT_DEVICE_STATE_DIR="${RUNNER_TEMP:-/tmp}/agent-device-connect" agent-device daemon stop --clean >/dev/null 2>&1 || true
-if [[ "${connect_status}" -ne 0 ]]; then
+connect_app() {
+  local status
+  AGENT_DEVICE_STATE_DIR="${RUNNER_TEMP:-/tmp}/agent-device-connect" agent-device replay \
+    "${SRC_DIR}/packages/app/e2e/mobile/setup/connect-direct.android.ad" \
+    --platform android \
+    --session connect \
+    --env "APP_ID=${APP_ID}" \
+    --env "DAEMON_HOST=127.0.0.1" \
+    --env "DAEMON_PORT=${DAEMON_PORT}" \
+    --env "SERVER_ID=${SERVER_ID}" \
+    --env "WORKSPACE_ID=${WORKSPACE_ID}"
+  status=$?
+  AGENT_DEVICE_STATE_DIR="${RUNNER_TEMP:-/tmp}/agent-device-connect" agent-device daemon stop --clean >/dev/null 2>&1 || true
+  return "${status}"
+}
+
+# Connecting is setup, not a test, so it gets one fresh-install retry: on a
+# loaded runner the Direct connection sheet sometimes shows its backdrop and
+# never slides in. The suites below get no such retry.
+connected=false
+for attempt in 1 2; do
+  if connect_app; then
+    connected=true
+    break
+  fi
+  adb exec-out screencap -p >"${ARTIFACTS_DIR}/connect-failure-${attempt}.png" 2>/dev/null || true
+  if [[ "${attempt}" -eq 1 ]]; then
+    echo "::warning::Connecting the app failed; reinstalling and trying once more."
+    install_apk || exit 1
+    settle_system_ui
+  fi
+done
+if [[ "${connected}" != "true" ]]; then
   echo "::error::Could not connect the app to the E2E daemon; no suite ran."
-  adb exec-out screencap -p >"${ARTIFACTS_DIR}/connect-failure.png" 2>/dev/null || true
   exit 1
 fi
 
