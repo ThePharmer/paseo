@@ -1,0 +1,26 @@
+context platform=android timeout=90000
+env APP_ID=sh.paseo
+env FILE=find.txt
+env QUERY=needle
+
+open "${APP_ID}"
+wait "id=\"workspace-header-menu-trigger\"" 30000
+press "id=\"workspace-explorer-toggle\""
+wait "id=\"explorer-tab-files\"" 10000
+press "id=\"explorer-tab-files\""
+press "id=\"files-refresh\""
+wait "text=\"${FILE}\"" 15000
+press "text=\"${FILE}\""
+wait "id=\"file-edit\"" 15000
+press "id=\"file-edit\""
+wait "id=\"file-find\"" 20000
+press "id=\"file-find\""
+wait "label=\"Find in pane\"" 10000
+fill "label=\"Find in pane\"" "${QUERY}"
+press "label=\"Next match\""
+wait "text" "1 of 2" 10000
+press "label=\"Close Find\""
+wait absent "label=\"Find in pane\"" 10000
+press "id=\"file-edit-done\""
+wait "id=\"file-edit\"" 15000
+close

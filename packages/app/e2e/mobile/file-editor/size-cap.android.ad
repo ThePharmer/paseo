@@ -1,0 +1,16 @@
+context platform=android timeout=90000
+env APP_ID=sh.paseo
+env FILE=large.txt
+
+open "${APP_ID}"
+wait "id=\"workspace-header-menu-trigger\"" 30000
+press "id=\"workspace-explorer-toggle\""
+wait "id=\"explorer-tab-files\"" 10000
+press "id=\"explorer-tab-files\""
+press "id=\"files-refresh\""
+wait "text=\"${FILE}\"" 15000
+press "text=\"${FILE}\""
+wait "id=\"file-edit-too-large\"" 30000
+is text "id=\"file-edit-too-large\"" "Too large to edit"
+is visible "id=\"file-source-viewer\""
+close
