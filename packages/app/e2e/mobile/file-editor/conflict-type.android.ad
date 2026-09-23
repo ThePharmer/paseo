@@ -4,7 +4,7 @@ env DIR=reload-dir
 env FILE=reload-me.txt
 env MARKER=E2E_LOCAL_EDIT
 
-open "${APP_ID}"
+open "${APP_ID}" --relaunch
 wait "id=\"workspace-header-menu-trigger\"" 30000
 press "id=\"workspace-explorer-toggle\""
 wait "id=\"explorer-tab-files\"" 10000

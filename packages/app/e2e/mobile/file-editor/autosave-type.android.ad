@@ -3,7 +3,7 @@ env APP_ID=sh.paseo
 env FILE=notes.txt
 env MARKER=E2E_AUTOSAVED_LINE
 
-open "${APP_ID}"
+open "${APP_ID}" --relaunch
 wait "id=\"workspace-header-menu-trigger\"" 30000
 press "id=\"workspace-explorer-toggle\""
 wait "id=\"explorer-tab-files\"" 10000
