@@ -602,6 +602,55 @@ describe("FileEditorModel", () => {
     expect(session.writes).toEqual([]);
   });
 
+  test("close saves unsaved edits before disposing", () => {
+    const { model, session, clock } = makeModel();
+    model.edit("local");
+
+    model.close();
+    clock.fire();
+
+    expect(session.writes).toEqual([
+      { content: "local", expectedModifiedAt: "2026-07-18T00:00:00.000Z" },
+    ]);
+  });
+
+  test("close discards edits held by a close-without-saving confirmation", () => {
+    const { model, session } = makeModel();
+    model.edit("local");
+
+    model.suspendAutosave();
+    model.close();
+
+    expect(session.writes).toEqual([]);
+  });
+
+  test("close saves again once a cancelled confirmation resumes autosave", () => {
+    const { model, session } = makeModel();
+    model.edit("local");
+
+    const resume = model.suspendAutosave();
+    resume();
+    model.close();
+
+    expect(session.writes).toHaveLength(1);
+  });
+
+  test("close does not write a clean or conflicted buffer", () => {
+    const clean = makeModel();
+    clean.model.close();
+    expect(clean.session.writes).toEqual([]);
+
+    const conflicted = makeModel();
+    conflicted.model.edit("local");
+    observeFile(conflicted.model, {
+      content: "theirs",
+      hasBom: false,
+      version: ready("2026-07-18T00:00:05.000Z"),
+    });
+    conflicted.model.close();
+    expect(conflicted.session.writes).toEqual([]);
+  });
+
   test("suspends a pending autosave while close confirmation is active", async () => {
     const { model, session, clock } = makeModel();
     model.edit("local");

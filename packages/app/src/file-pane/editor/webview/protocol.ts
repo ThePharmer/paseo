@@ -16,7 +16,7 @@ export type EditorHostMessage =
   | { type: "configure"; filename: string; theme: EditorVisualTheme; vimEnabled: boolean }
   | { type: "load"; revision: number; content: string; lineSeparator: FileLineSeparator }
   | { type: "reveal"; lineStart: number; lineEnd: number }
-  | { type: "flush"; requestId: number }
+  | { type: "flush"; requestId: number; final: boolean }
   | { type: "find"; action: EditorFindAction }
   | { type: "findQuery"; query: string }
   | { type: "findReplacement"; replacement: string }

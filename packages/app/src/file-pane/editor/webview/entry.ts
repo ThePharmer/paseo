@@ -38,6 +38,7 @@ const remoteUpdate = Annotation.define<boolean>();
 const languageCompartment = new Compartment();
 const themeCompartment = new Compartment();
 const vimCompartment = new Compartment();
+const editableCompartment = new Compartment();
 
 let nextFrameId = 1;
 function post(event: EditorEvent): void {
@@ -154,6 +155,7 @@ function createEditor(content: string, config: Configuration): EditorView {
       doc: content,
       extensions: [
         vimCompartment.of(config.vimEnabled ? vim() : []),
+        editableCompartment.of(EditorView.editable.of(true)),
         find.extension,
         ...editorBaseExtensions(save),
         languageCompartment.of(languageFor(config.filename)),
@@ -213,6 +215,13 @@ function load(message: Extract<EditorHostMessage, { type: "load" }>): void {
   });
 }
 
+/** The app is about to unmount this page; keystrokes after the last flush would be lost. */
+function stopEditing(): void {
+  if (!view) return;
+  view.contentDOM.blur();
+  view.dispatch({ effects: editableCompartment.reconfigure(EditorView.editable.of(false)) });
+}
+
 function reveal(editor: EditorView, range: { lineStart: number; lineEnd: number }): void {
   const lineStart = Math.min(range.lineStart, editor.state.doc.lines);
   const lineEnd = Math.min(range.lineEnd, editor.state.doc.lines);
@@ -257,6 +266,7 @@ function handle(message: EditorHostMessage): void {
   if (message.type === "configure") return configure(message);
   if (message.type === "load") return load(message);
   if (message.type === "flush") {
+    if (message.final) stopEditing();
     outbox.flush();
     post({ type: "flushed", requestId: message.requestId });
     return;

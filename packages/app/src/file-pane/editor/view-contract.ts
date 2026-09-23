@@ -6,6 +6,8 @@ import type { FileEditorModel } from "./model";
 export interface FileEditorViewHandle {
   /** Resolves once every edit the view holds has reached the model. */
   flush(): Promise<void>;
+  /** Like `flush`, and the view accepts no further edits; call before unmounting it. */
+  finish(): Promise<void>;
   openFind(): void;
 }
 
@@ -20,4 +22,6 @@ export interface FileEditorViewProps {
   theme: EditorVisualTheme;
   onCursorChange(position: { line: number; column: number }): void;
   onVimModeChange(mode: string | null): void;
+  /** Whether the editor is running and takes commands; false while it loads or after it fails. */
+  onReadyChange(ready: boolean): void;
 }

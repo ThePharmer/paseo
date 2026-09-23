@@ -95,11 +95,21 @@ test("edits within the send interval wait for a flush, which posts them before a
   page.send({ type: "find", action: "replace" });
   page.send({ type: "find", action: "replace" });
   expect(page.eventsOf("edit")).toEqual([{ type: "edit", revision: 1, content: "1 one one\n" }]);
-  page.send({ type: "flush", requestId: 7 });
+  page.send({ type: "flush", requestId: 7, final: false });
   expect(page.events.slice(-2)).toEqual([
     { type: "edit", revision: 1, content: "1 1 one\n" },
     { type: "flushed", requestId: 7 },
   ]);
+});
+
+test("a final flush stops the page taking edits before it acknowledges", async () => {
+  const page = await startEditor();
+  page.send({ type: "flush", requestId: 3, final: true });
+  expect(page.events.at(-1)).toEqual({ type: "flushed", requestId: 3 });
+  expect(page.content().getAttribute("contenteditable")).toBe("false");
+  await page.typeAtEnd("z");
+  expect(page.eventsOf("edit")).toEqual([]);
+  expect(page.content().textContent).toBe("alphabeta");
 });
 
 test("a replaced document is not echoed back and later edits carry the new revision", async () => {
