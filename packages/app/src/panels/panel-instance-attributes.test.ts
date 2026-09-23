@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   getPanelInstanceAttributes,
+  holdModifiedPanelSaves,
   setPanelInstanceAttributes,
   subscribePanelInstanceAttributes,
 } from "./panel-instance-attributes";
@@ -16,6 +17,33 @@ describe("panel instance attributes", () => {
     expect(getPanelInstanceAttributes(second)).toEqual({ modified: false });
 
     setPanelInstanceAttributes(first, { modified: false });
+  });
+
+  test("holds pending saves of every modified panel until released", () => {
+    const events: string[] = [];
+    function panel(tabId: string, modified: boolean) {
+      const identity = { serverId: "server", workspaceId: "bulk", tabId };
+      setPanelInstanceAttributes(identity, {
+        modified,
+        suspendPendingSave: () => {
+          events.push(`suspend ${tabId}`);
+          return () => events.push(`resume ${tabId}`);
+        },
+      });
+      return identity;
+    }
+    const identities = [panel("a", true), panel("b", false), panel("c", true)];
+    const held = holdModifiedPanelSaves([
+      ...identities,
+      { serverId: "server", workspaceId: "bulk", tabId: "agent" },
+    ]);
+
+    expect(held.modifiedCount).toBe(2);
+    expect(events).toEqual(["suspend a", "suspend c"]);
+    held.release();
+    expect(events).toEqual(["suspend a", "suspend c", "resume a", "resume c"]);
+
+    for (const identity of identities) setPanelInstanceAttributes(identity, { modified: false });
   });
 
   test("notifies subscribers only when attributes change", () => {
