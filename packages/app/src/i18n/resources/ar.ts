@@ -1984,6 +1984,7 @@ export const ar: TranslationResources = {
       title: "المحرر",
       vimKeybindings: "اختصارات Vim",
       vimHint: "تنطبق عند تعديل ملفات المصدر.",
+      vimHardwareKeyboardHint: "يتطلب لوحة مفاتيح فعلية تحتوي على مفتاح Escape.",
     },
     notifications: {
       title: "الإشعارات",

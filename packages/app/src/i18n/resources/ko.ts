@@ -1994,6 +1994,7 @@ export const ko: TranslationResources = {
       title: "편집기",
       vimKeybindings: "Vim 키 바인딩",
       vimHint: "소스 파일을 편집할 때 적용됩니다.",
+      vimHardwareKeyboardHint: "Escape 키가 있는 하드웨어 키보드가 필요합니다.",
     },
     notifications: {
       title: "알림",
