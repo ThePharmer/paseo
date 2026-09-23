@@ -60,7 +60,8 @@ press_system_button() {
 # right after boot, and their "isn't responding" dialog covers the app for the
 # rest of the run. hide_error_dialogs keeps later ANR and crash dialogs off
 # screen; the system reads it on the next configuration change, which the
-# font scale nudge forces. A dialog that is already up gets "Wait". Returns
+# font scale nudge forces. It also hides the app's own crash dialog, so a
+# crash shows up as a failed wait; logcat.txt in the artifact has the trace. A dialog that is already up gets "Wait". Returns
 # once the launcher has held focus for three checks in a row.
 settle_system_ui() {
   adb shell settings put global hide_error_dialogs 1 >/dev/null 2>&1 || true
@@ -120,7 +121,10 @@ wait_for_device || exit 1
 settle_system_ui
 install_apk || exit 1
 # The app dials 127.0.0.1:<port> on the device; adb forwards it to the daemon.
-adb reverse "tcp:${DAEMON_PORT}" "tcp:${DAEMON_PORT}"
+if ! adb reverse "tcp:${DAEMON_PORT}" "tcp:${DAEMON_PORT}"; then
+  echo "::error::adb reverse tcp:${DAEMON_PORT} failed, so the app cannot reach the daemon; no suite ran."
+  exit 1
+fi
 adb logcat -c || true
 adb logcat -v threadtime >"${ARTIFACTS_DIR}/logcat.txt" 2>&1 &
 logcat_pid=$!
