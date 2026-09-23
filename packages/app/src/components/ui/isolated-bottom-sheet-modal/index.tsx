@@ -5,6 +5,7 @@ import {
 import React from "react";
 import { forwardRef, useCallback, useEffect, useMemo, useRef } from "react";
 import type { ElementRef, ReactNode } from "react";
+import { ReduceMotion } from "react-native-reanimated";
 import {
   type BottomSheetController,
   createBottomSheetVisibilityTracker,
@@ -35,7 +36,7 @@ export type ContextBridge = (children: ReactNode) => ReactNode;
 
 type IsolatedBottomSheetModalProps = Omit<
   BottomSheetModalProps,
-  "enableDismissOnClose" | "stackBehavior" | "children"
+  "enableDismissOnClose" | "stackBehavior" | "children" | "overrideReduceMotion"
 > & {
   /**
    * Nodes only. Gorhom also accepts a render function, but nothing here uses it and a bridge
@@ -64,6 +65,8 @@ export const IsolatedBottomSheetModal = forwardRef<
       ref={ref}
       enableDismissOnClose
       stackBehavior={presentation}
+      // Under system Reduce Motion the sheet can stick at its backdrop; see @gorhom/bottom-sheet utilities/animate.ts.
+      overrideReduceMotion={ReduceMotion.Never}
     >
       <BottomSheetScope>{contextBridge ? contextBridge(children) : children}</BottomSheetScope>
     </GorhomBottomSheetModal>
