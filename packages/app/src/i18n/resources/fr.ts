@@ -2038,6 +2038,7 @@ export const fr: TranslationResources = {
       title: "Éditeur",
       vimKeybindings: "Raccourcis Vim",
       vimHint: "S’applique à la modification des fichiers source.",
+      vimHardwareKeyboardHint: "Nécessite un clavier physique doté d’une touche Échap.",
     },
     notifications: {
       title: "Notifications",

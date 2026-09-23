@@ -1963,6 +1963,7 @@ export const zhCN: TranslationResources = {
       title: "编辑器",
       vimKeybindings: "Vim 键位",
       vimHint: "编辑源文件时生效。",
+      vimHardwareKeyboardHint: "需要带 Escape 键的实体键盘。",
     },
     notifications: {
       title: "通知",
