@@ -97,7 +97,9 @@ export function FilePanelBar({
               </>
             ) : null}
             {editorStatus === "error" ? (
-              <Text style={styles.error}>{t("panels.file.editor.saveFailed")}</Text>
+              <Text style={styles.error} testID="file-save-failed">
+                {t("panels.file.editor.saveFailed")}
+              </Text>
             ) : null}
             {vimMode ? (
               <Text
@@ -137,7 +139,11 @@ function FilePanelEditingControls({ editing }: { editing: FilePanelEditing }) {
   const { t } = useTranslation();
   const isCompact = useIsCompactFormFactor();
   if (editing.kind === "tooLarge") {
-    return <Text style={styles.whisper}>{t("panels.file.editor.tooLargeToEdit")}</Text>;
+    return (
+      <Text style={styles.whisper} testID="file-edit-too-large">
+        {t("panels.file.editor.tooLargeToEdit")}
+      </Text>
+    );
   }
   if (editing.kind === "viewing") {
     return (
@@ -149,7 +155,12 @@ function FilePanelEditingControls({ editing }: { editing: FilePanelEditing }) {
   return (
     <View style={styles.status}>
       {editing.onFind ? (
-        <ToolbarButton label={t("paneFind.title")} compact={isCompact} onPress={editing.onFind}>
+        <ToolbarButton
+          label={t("paneFind.title")}
+          compact={isCompact}
+          onPress={editing.onFind}
+          testID="file-find"
+        >
           <SearchIcon size={paneContentToolbarIconSize(isCompact)} />
         </ToolbarButton>
       ) : null}

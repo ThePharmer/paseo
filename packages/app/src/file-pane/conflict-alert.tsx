@@ -32,12 +32,22 @@ export function FileConflictAlert({ state }: { state: FileConflictAlertState }) 
       {state.kind !== "deleted" ? (
         <View style={styles.actions}>
           {state.kind === "changed" && state.canOverwrite ? (
-            <Button variant="outline" size="sm" onPress={state.onOverwrite}>
+            <Button
+              variant="outline"
+              size="sm"
+              onPress={state.onOverwrite}
+              testID="file-conflict-overwrite"
+            >
               {t("panels.file.editor.overwrite")}
             </Button>
           ) : null}
           {state.kind === "changed" ? (
-            <Button variant="outline" size="sm" onPress={state.onReload}>
+            <Button
+              variant="outline"
+              size="sm"
+              onPress={state.onReload}
+              testID="file-conflict-reload"
+            >
               {t("panels.file.editor.reload")}
             </Button>
           ) : null}
