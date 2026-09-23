@@ -47,16 +47,31 @@ vi.mock("@gorhom/bottom-sheet", async () => {
     BottomSheetModalProvider: ({ children }: { children?: React.ReactNode }) =>
       React.createElement("div", { "data-bottom-sheet-provider": true }, children),
     BottomSheetModal: React.forwardRef(
-      ({ children, stackBehavior }: { children?: React.ReactNode; stackBehavior?: string }, _ref) =>
+      (
+        {
+          children,
+          stackBehavior,
+          overrideReduceMotion,
+        }: { children?: React.ReactNode; stackBehavior?: string; overrideReduceMotion?: string },
+        _ref,
+      ) =>
         React.createElement(
           Portal,
           null,
-          React.createElement("div", { "data-stack-behavior": stackBehavior }, children),
+          React.createElement(
+            "div",
+            {
+              "data-stack-behavior": stackBehavior,
+              "data-override-reduce-motion": overrideReduceMotion,
+            },
+            children,
+          ),
         ),
     ),
   };
 });
 
+import { ReduceMotion } from "react-native-reanimated";
 import { IsolatedBottomSheetModal, type ContextBridge } from ".";
 import { useIsInsideBottomSheet } from "@/components/ui/bottom-sheet-scope";
 
@@ -133,6 +148,26 @@ describe("IsolatedBottomSheetModal presentation", () => {
     });
 
     expect(stackBehaviors()).toEqual(["replace"]);
+  });
+
+  // Under system Reduce Motion, Gorhom can mount the backdrop but never bring the sheet on screen.
+  it("animates the sheet in even when the system asks to reduce motion", () => {
+    act(() => {
+      root.render(
+        <>
+          <IsolatedBottomSheetModal contextBridge={null}>
+            Direct connection
+          </IsolatedBottomSheetModal>
+          <PortalHostProbe />
+        </>,
+      );
+    });
+
+    expect(
+      container
+        .querySelector("[data-override-reduce-motion]")
+        ?.getAttribute("data-override-reduce-motion"),
+    ).toBe(ReduceMotion.Never);
   });
 });
 
