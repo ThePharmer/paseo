@@ -80,6 +80,7 @@ function VirtualizedSource({
   return (
     <FlatList
       ref={listRef}
+      testID="file-source-viewer"
       data={lines}
       keyExtractor={sourceLineKey}
       initialNumToRender={24}
