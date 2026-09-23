@@ -1,0 +1,10 @@
+context platform=android timeout=60000
+env APP_ID=sh.paseo
+env MARKER=E2E_AUTOSAVED_LINE
+
+open "${APP_ID}"
+press "id=\"file-edit-done\""
+wait "id=\"file-edit\"" 15000
+wait "id=\"file-source-viewer\"" 10000
+wait "text" "${MARKER}" 10000
+close
