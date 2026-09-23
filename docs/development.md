@@ -513,6 +513,7 @@ For tighter loops, you can rebuild a single workspace:
 - Changed `packages/protocol/src/*` or `packages/client/src/*`: `npm run build:client`.
 - Changed `packages/server/src/*`, `packages/cli/src/*`, `packages/relay/src/*`, or `packages/highlight/src/*`: `npm run build:server`.
 - Changed app build dependencies: `npm run build:app-deps`.
+- Changed code bundled into a native WebView (terminal, Mermaid, file editor): rebuild and commit its generated file. See [native-webviews.md](native-webviews.md).
 
 ## Dependency patches
 
