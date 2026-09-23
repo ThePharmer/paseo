@@ -42,19 +42,37 @@ wait_for_device() {
   return 1
 }
 
-# A cold boot on a shared runner often raises "Pixel Launcher isn't responding",
-# and that dialog covers the app for the rest of the run. hide_error_dialogs
-# stops the system from showing crash and ANR dialogs; the loop dismisses one
-# that is already up and waits until the launcher has focus.
+# Presses a button in whatever window has focus, found by its text in a
+# uiautomator dump. Only for use before Agent Device holds the UI Automation
+# connection, which Android grants to one client at a time.
+press_system_button() {
+  local text="$1" bounds
+  adb shell uiautomator dump /sdcard/e2e-window.xml >/dev/null 2>&1 || return 1
+  bounds="$(adb exec-out cat /sdcard/e2e-window.xml 2>/dev/null |
+    grep -o "text=\"${text}\"[^>]*bounds=\"\[[0-9]*,[0-9]*\]\[[0-9]*,[0-9]*\]\"" |
+    grep -o '\[[0-9]*,[0-9]*\]\[[0-9]*,[0-9]*\]' | head -n 1 | tr -d '[' | tr ']' ',')"
+  [[ -n "${bounds}" ]] || return 1
+  IFS=, read -r left top right bottom _ <<<"${bounds}"
+  adb shell input tap "$(((left + right) / 2))" "$(((top + bottom) / 2))"
+}
+
+# System UI and the launcher on a shared runner often miss the input deadline
+# right after boot, and their "isn't responding" dialog covers the app for the
+# rest of the run. hide_error_dialogs keeps later ANR and crash dialogs off
+# screen; the system reads it on the next configuration change, which the
+# font scale nudge forces. A dialog that is already up gets "Wait". Returns
+# once the launcher has held focus for three checks in a row.
 settle_system_ui() {
   adb shell settings put global hide_error_dialogs 1 >/dev/null 2>&1 || true
+  adb shell settings put system font_scale 1.01 >/dev/null 2>&1 || true
+  adb shell settings put system font_scale 1.0 >/dev/null 2>&1 || true
   local focus steady=0
   for _ in $(seq 1 60); do
     focus="$(adb shell dumpsys window 2>/dev/null | grep -m1 'mCurrentFocus=' || true)"
     if [[ "${focus}" == *"Not Responding"* || "${focus}" == *"Application Error"* ]]; then
       echo "Dismissing a system dialog: ${focus}"
       steady=0
-      adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+      press_system_button "Wait" || adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
     elif [[ "${focus}" == *"launcher"* || "${focus}" == *"Launcher"* ]]; then
       steady=$((steady + 1))
       [[ "${steady}" -ge 3 ]] && return 0
