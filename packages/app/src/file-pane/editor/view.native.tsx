@@ -7,22 +7,15 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import {
-  AppState,
-  Keyboard,
-  StyleSheet as RNStyleSheet,
-  View,
-  type LayoutChangeEvent,
-} from "react-native";
-import Animated from "react-native-reanimated";
+import { Keyboard, StyleSheet as RNStyleSheet, View, type LayoutChangeEvent } from "react-native";
+import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 import { useTranslation } from "react-i18next";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
-import { useIsCompactFormFactor } from "@/constants/layout";
-import { useKeyboardShiftStyle } from "@/keyboard/shift";
+import { useKeyboardShift } from "@/keyboard/shift";
 import { PaneFind } from "@/pane-find";
 import type { Theme } from "@/styles/theme";
 import { fileFindStatus } from "../find/status";
@@ -55,8 +48,13 @@ function injectFrame(frame: string): string {
 export function FileEditorView(props: FileEditorViewProps) {
   const [attempt, setAttempt] = useState(0);
   const restart = useCallback(() => setAttempt((value) => value + 1), []);
-  const isCompact = useIsCompactFormFactor();
-  const { style: keyboardInset } = useKeyboardShiftStyle({ mode: "padding", enabled: isCompact });
+  // The docked keyboard covers the pane on every native form factor, tablets included.
+  // Pad by the full keyboard height while it is up and by nothing when it is down, so
+  // the editor never keeps a safe-area gap it does not need.
+  const { shift, bottomInset } = useKeyboardShift();
+  const keyboardInset = useAnimatedStyle(() => ({
+    paddingBottom: shift.value > 0 ? shift.value + bottomInset.value : 0,
+  }));
   const rootStyle = useMemo(() => [layout.root, keyboardInset], [keyboardInset]);
   // Unmounting a focused WebView is not guaranteed to close the keyboard it opened.
   useEffect(() => () => Keyboard.dismiss(), []);
@@ -77,6 +75,7 @@ function EditorAttempt({
   theme,
   onCursorChange,
   onVimModeChange,
+  onReadyChange,
   onRestart,
 }: FileEditorViewProps & { onRestart(): void }) {
   const webViewRef = useRef<WebView>(null);
@@ -99,6 +98,10 @@ function EditorAttempt({
   useEffect(() => host.attach(), [host]);
 
   useEffect(() => {
+    onReadyChange(state.status === "ready");
+  }, [onReadyChange, state.status]);
+
+  useEffect(() => {
     host.configure({ filename, theme, vimEnabled });
   }, [filename, host, theme, vimEnabled]);
 
@@ -107,18 +110,13 @@ function EditorAttempt({
     host.reveal({ lineStart: location.lineStart, lineEnd: location.lineEnd ?? location.lineStart });
   }, [host, location.lineEnd, location.lineStart, navigationRevision]);
 
-  // The OS may suspend or kill a backgrounded app before autosave fires.
-  useEffect(() => {
-    const subscription = AppState.addEventListener("change", (status) => {
-      if (status === "active") return;
-      void host.flush().then(() => model.save());
-    });
-    return () => subscription.remove();
-  }, [host, model]);
-
   useImperativeHandle(
     ref,
-    () => ({ flush: () => host.flush(), openFind: () => host.find("open") }),
+    () => ({
+      flush: () => host.flush({ final: false }),
+      finish: () => host.flush({ final: true }),
+      openFind: () => host.find("open"),
+    }),
     [host],
   );
 

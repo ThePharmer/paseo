@@ -27,6 +27,7 @@ export function FileEditorView({
   theme,
   onCursorChange,
   onVimModeChange,
+  onReadyChange,
 }: FileEditorViewProps) {
   const [find] = useState(() => new FileFindModel());
   const hostRef = useRef<HTMLDivElement>(null);
@@ -35,10 +36,16 @@ export function FileEditorView({
   const initial = useRef({ filename, model, theme, vimEnabled, content: snapshot.content });
   const onCursorChangeRef = useRef(onCursorChange);
   onCursorChangeRef.current = onCursorChange;
+  const onReadyChangeRef = useRef(onReadyChange);
+  onReadyChangeRef.current = onReadyChange;
   // Edits reach the model synchronously here, so there is nothing to flush.
   useImperativeHandle(
     ref,
-    () => ({ flush: () => Promise.resolve(), openFind: () => find.open(viewRef.current) }),
+    () => ({
+      flush: () => Promise.resolve(),
+      finish: () => Promise.resolve(),
+      openFind: () => find.open(viewRef.current),
+    }),
     [find],
   );
 
@@ -75,7 +82,9 @@ export function FileEditorView({
     });
     viewRef.current = view;
     onCursorChangeRef.current({ line: 1, column: 1 });
+    onReadyChangeRef.current(true);
     return () => {
+      onReadyChangeRef.current(false);
       view.destroy();
       viewRef.current = null;
     };

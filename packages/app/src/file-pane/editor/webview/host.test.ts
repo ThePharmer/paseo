@@ -210,8 +210,8 @@ describe("FileEditorWebViewHost", () => {
   it("resolves a flush after the page posts its pending edits", async () => {
     const { page, host, model } = setup();
     startEditor(page);
-    const flush = host.flush();
-    expect(page.take()).toEqual([{ type: "flush", requestId: 1 }]);
+    const flush = host.flush({ final: true });
+    expect(page.take()).toEqual([{ type: "flush", requestId: 1, final: true }]);
     expect(await isSettled(flush)).toBe(false);
     page.post({ type: "edit", revision: 1, content: "last keystroke\n" });
     page.post({ type: "flushed", requestId: 1 });
@@ -222,7 +222,7 @@ describe("FileEditorWebViewHost", () => {
   it("resolves a flush after the timeout when the page never answers", async () => {
     const { clock, page, host } = setup();
     startEditor(page);
-    const flush = host.flush();
+    const flush = host.flush({ final: false });
     clock.advance(999);
     expect(await isSettled(flush)).toBe(false);
     clock.advance(1);
@@ -231,10 +231,10 @@ describe("FileEditorWebViewHost", () => {
 
   it("resolves flushes immediately before the editor is ready and on detach", async () => {
     const { page, host, detach } = setup();
-    await host.flush();
+    await host.flush({ final: false });
     expect(page.take()).toEqual([]);
     startEditor(page);
-    const pending = host.flush();
+    const pending = host.flush({ final: false });
     detach();
     expect(await isSettled(pending)).toBe(true);
   });

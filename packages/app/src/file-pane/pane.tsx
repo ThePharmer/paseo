@@ -9,7 +9,7 @@ import React, {
   useSyncExternalStore,
 } from "react";
 import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { ScrollView as RNScrollView, Text, View } from "react-native";
+import { AppState, ScrollView as RNScrollView, Text, View } from "react-native";
 import { StyleSheet, UnistylesRuntime, withUnistyles } from "react-native-unistyles";
 import { useTranslation } from "react-i18next";
 import { useIsCompactFormFactor } from "@/constants/layout";
@@ -35,10 +35,11 @@ import { createFileObservationSource } from "./editor/observation-source";
 import {
   FILE_EDITOR_POLICY,
   resolveFileEditability,
+  type FileEditability,
   type FileEditorPlatform,
 } from "./editor/policy";
+import { FileEditingSession, type EditorPresence } from "./editor/session";
 import { FileEditorView } from "./editor/view";
-import type { FileEditorViewHandle } from "./editor/view-contract";
 import { FileSourceView } from "./source/view";
 import type { FileConflictAlertState } from "./conflict-alert";
 import type { LiveFileModel } from "./live-file/model";
@@ -290,8 +291,9 @@ export function FilePane({
   const { file: preview, imageAttachment } = resolveFilePreviewLifecycle(previewLifecycle);
   const imagePreviewUri = useAttachmentPreviewUrl(imageAttachment);
   const isRenderable = isRenderablePreview(preview, location.path);
-  const editability = resolveFileEditability({
-    platform: EDITOR_PLATFORM,
+  // A disconnected host shows no editor, which ends its session.
+  const editability = useFileEditability({
+    target: client ? targetKey : null,
     supportsEditing,
     file: preview,
   });
@@ -330,6 +332,27 @@ export function FilePane({
       imagePreviewUri={imagePreviewUri}
     />
   );
+}
+
+/**
+ * Remembers which file has an editor open so the size limit only applies when one
+ * opens; see `resolveFileEditability`.
+ */
+function useFileEditability(input: {
+  target: string | null;
+  supportsEditing: boolean;
+  file: ExplorerFile | null;
+}): FileEditability {
+  const [sessionTarget, setSessionTarget] = useState<string | null>(null);
+  const editability = resolveFileEditability({
+    platform: EDITOR_PLATFORM,
+    supportsEditing: input.supportsEditing,
+    file: input.file,
+    sessionOpen: input.target !== null && input.target === sessionTarget,
+  });
+  const nextSessionTarget = editability === "editable" ? input.target : null;
+  if (nextSessionTarget !== sessionTarget) setSessionTarget(nextSessionTarget);
+  return editability;
 }
 
 function isRenderablePreview(preview: ExplorerFile | null, path: string): boolean {
@@ -492,11 +515,7 @@ function EditableFilePane({
   const { t } = useTranslation();
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [vimMode, setVimMode] = useState<string | null>(settings.vimKeybindings ? "NORMAL" : null);
-  const [presence, setPresence] = useState<EditorPresence>(
-    EDITOR_POLICY.opensInEditor ? "editing" : "viewing",
-  );
-  const editorRef = useRef<FileEditorViewHandle>(null);
-  const session = useMemo(
+  const writer = useMemo(
     () => ({
       write(input: { content: string; expectedModifiedAt: string; expectedRevision?: string }) {
         return client.writeFile({ cwd, path, ...input });
@@ -518,9 +537,15 @@ function EditableFilePane({
           revision: preview.revision,
         },
       },
-      session,
+      session: writer,
     });
   });
+  const [editing] = useState(() => new FileEditingSession({ model, platform: EDITOR_PLATFORM }));
+  const { presence, editorReady } = useSyncExternalStore(
+    editing.subscribe,
+    editing.getSnapshot,
+    editing.getSnapshot,
+  );
   useEffect(() => {
     const source = createFileObservationSource(liveFile);
     model.connectFileObservations(source);
@@ -557,7 +582,15 @@ function EditableFilePane({
     ],
   );
 
-  useEffect(() => () => model.dispose(), [model]);
+  useEffect(() => () => editing.close(), [editing]);
+
+  useEffect(() => {
+    if (!EDITOR_POLICY.savesOnBackground) return;
+    const subscription = AppState.addEventListener("change", (status) => {
+      if (status !== "active") void editing.background();
+    });
+    return () => subscription.remove();
+  }, [editing]);
 
   const handleReload = useCallback(() => {
     if (!snapshot.modified) {
@@ -595,32 +628,28 @@ function EditableFilePane({
   );
   const showSource = mode !== "preview";
   const showEditor = showSource && presence !== "viewing";
+  const liveSize =
+    snapshot.observedVersion.status === "ready" ? snapshot.observedVersion.size : preview.size;
   const startEditing = useCallback(() => {
-    setPresence("editing");
+    editing.start(liveSize);
     if (mode === "preview") onModeChange?.("source");
-  }, [mode, onModeChange]);
-  const finishEditing = useCallback(() => {
-    setPresence("finishing");
-    // The WebView editor posts edits on an interval; take the last ones before it unmounts.
-    void (editorRef.current?.flush() ?? Promise.resolve()).then(() => setPresence("viewing"));
-  }, []);
-  const openFind = useCallback(() => editorRef.current?.openFind(), []);
-  let editing: FilePanelEditing | undefined;
-  if (EDITOR_POLICY.hasEditToggle && presence === "viewing") {
-    editing = { kind: "viewing", onEdit: startEditing };
-  } else if (EDITOR_POLICY.hasEditToggle) {
-    const finishing = presence === "finishing";
-    editing = { kind: "editing", finishing, onFind: openFind, onDone: finishEditing };
-  }
+  }, [editing, liveSize, mode, onModeChange]);
+  const finishEditing = useCallback(() => void editing.finish(), [editing]);
+  const editingControls = fileEditingControls({
+    presence,
+    editorReady,
+    canStart: editing.canStart(liveSize),
+    onEdit: startEditing,
+    onFind: editing.openFind,
+    onDone: finishEditing,
+  });
   // Leaving the editor goes through Done so its last edits are flushed first.
   const canChangeMode = !EDITOR_POLICY.hasEditToggle || presence === "viewing";
 
   return (
     <View style={styles.container} testID="workspace-file-pane">
       <FilePanelBar
-        size={
-          snapshot.observedVersion.status === "ready" ? snapshot.observedVersion.size : preview.size
-        }
+        size={liveSize}
         lineCount={snapshot.content.split("\n").length}
         editorStatus={snapshot.status}
         cursor={showEditor ? cursor : undefined}
@@ -628,11 +657,11 @@ function EditableFilePane({
         conflict={conflict}
         mode={mode}
         onModeChange={canChangeMode ? onModeChange : undefined}
-        editing={editing}
+        editing={editingControls}
       />
       {showEditor ? (
         <FileEditorView
-          ref={editorRef}
+          ref={editing.attachSurface}
           model={model}
           filename={filename}
           location={location}
@@ -641,6 +670,7 @@ function EditableFilePane({
           theme={visualTheme}
           onCursorChange={setCursor}
           onVimModeChange={handleVimModeChange}
+          onReadyChange={editing.setEditorReady}
         />
       ) : (
         <FilePreviewBody
@@ -657,7 +687,25 @@ function EditableFilePane({
   );
 }
 
-type EditorPresence = "viewing" | "editing" | "finishing";
+function fileEditingControls(input: {
+  presence: EditorPresence;
+  editorReady: boolean;
+  canStart: boolean;
+  onEdit(): void;
+  onFind(): void;
+  onDone(): void;
+}): FilePanelEditing | undefined {
+  if (!EDITOR_POLICY.hasEditToggle) return undefined;
+  if (input.presence === "viewing") {
+    return input.canStart ? { kind: "viewing", onEdit: input.onEdit } : TOO_LARGE_TO_EDIT;
+  }
+  return {
+    kind: "editing",
+    finishing: input.presence === "finishing",
+    onFind: input.editorReady ? input.onFind : undefined,
+    onDone: input.onDone,
+  };
+}
 
 function fileConflictAlertState(input: {
   callout: FileConflictCallout | null;
