@@ -34,8 +34,9 @@ replay() {
 on_failure() {
   local name="${CURRENT_STEP//\//-}"
   echo "File editor E2E failed during ${CURRENT_STEP}" >&2
-  ad screenshot "${ARTIFACTS_DIR}/${name}-failure.png" >/dev/null 2>&1 || true
-  ad snapshot -i --json >"${ARTIFACTS_DIR}/${name}-failure.json" 2>/dev/null || true
+  # adb, not the session: a failed replay may have closed it.
+  adb exec-out screencap -p >"${ARTIFACTS_DIR}/${name}-failure.png" || true
+  ad snapshot -i --json >"${ARTIFACTS_DIR}/${name}-failure.json" || true
 }
 
 cleanup() {
