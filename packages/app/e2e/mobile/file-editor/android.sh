@@ -44,21 +44,22 @@ cleanup() {
   AGENT_DEVICE_STATE_DIR="${STATE_DIR}" agent-device daemon stop --clean >/dev/null 2>&1 || true
 }
 
-# Polls a host file until it contains (or, with "exact", equals) the text.
+# Polls a host file until its bytes equal the text exactly, trailing newline
+# included (command substitution would strip it, so compare with cmp).
 expect_file() {
-  local mode="$1" file="$2" text="$3" timeout_s="${4:-15}"
+  local file="$1" text="$2" timeout_s="${3:-15}"
   CURRENT_STEP="host check ${file}"
   for _ in $(seq 1 "$((timeout_s * 4))"); do
-    if [[ "${mode}" == "exact" && "$(<"${file}")" == "${text}" ]]; then
-      return
-    fi
-    if [[ "${mode}" == "contains" ]] && grep -qF -- "${text}" "${file}"; then
+    if cmp -s -- "${file}" <(printf '%s' "${text}"); then
       return
     fi
     sleep 0.25
   done
-  echo "Expected ${file} to ${mode} '${text}' within ${timeout_s}s; it holds:" >&2
-  head -c 2000 "${file}" >&2
+  # od -c prints every \n, so a missing or extra final newline shows.
+  echo "Expected ${file} to hold exactly:" >&2
+  printf '%s' "${text}" | od -c >&2
+  echo "within ${timeout_s}s; it holds:" >&2
+  head -c 2000 "${file}" | od -c >&2
   return 1
 }
 
@@ -95,12 +96,16 @@ AUTOSAVED="E2E_AUTOSAVED_LINE"
 LOCAL_EDIT="E2E_LOCAL_EDIT"
 HOST_EDIT="E2E_HOST_EDIT"
 
+# Each write is checked before Done: closing the editor saves a dirty buffer,
+# so a check after Done alone cannot tell which step wrote the file.
+
 # Autosave writes the edit while the editor is still open, and Done returns to
-# the read-only viewer showing it.
+# the read-only viewer showing it without changing the file.
+notes=$'First line\nSecond line\n'"${AUTOSAVED}"
 replay autosave-type --env "FILE=notes.txt" --env "MARKER=${AUTOSAVED}"
-expect_file contains "${WORKSPACE_DIR}/notes.txt" "${AUTOSAVED}"
-replay autosave-done --env "MARKER=${AUTOSAVED}"
-expect_file exact "${WORKSPACE_DIR}/notes.txt" $'First line\nSecond line\n'"${AUTOSAVED}"
+expect_file "${WORKSPACE_DIR}/notes.txt" "${notes}"
+replay done --env "MARKER=${AUTOSAVED}"
+expect_file "${WORKSPACE_DIR}/notes.txt" "${notes}"
 
 replay size-cap --env "FILE=large.txt"
 replay find --env "FILE=find.txt"
@@ -108,11 +113,15 @@ replay find --env "FILE=find.txt"
 # Reload discards the local edit and keeps the host's version on disk.
 conflict_with_host_edit reload-dir reload-me.txt "${HOST_EDIT}"
 replay conflict-reload --env "DISK_TEXT=${HOST_EDIT}"
-expect_file exact "${WORKSPACE_DIR}/reload-dir/reload-me.txt" "${HOST_EDIT}"
+expect_file "${WORKSPACE_DIR}/reload-dir/reload-me.txt" "${HOST_EDIT}"$'\n'
 
-# Overwrite replaces the host's version with the editor's buffer.
+# Overwrite replaces the host's version with the editor's buffer, and Done
+# then leaves it alone.
+overwritten=$'Original overwrite line\n'"${LOCAL_EDIT}"
 conflict_with_host_edit overwrite-dir overwrite-me.txt "${HOST_EDIT}"
-replay conflict-overwrite --env "MARKER=${LOCAL_EDIT}"
-expect_file exact "${WORKSPACE_DIR}/overwrite-dir/overwrite-me.txt" $'Original overwrite line\n'"${LOCAL_EDIT}"
+replay conflict-overwrite
+expect_file "${WORKSPACE_DIR}/overwrite-dir/overwrite-me.txt" "${overwritten}"
+replay done --env "MARKER=${LOCAL_EDIT}"
+expect_file "${WORKSPACE_DIR}/overwrite-dir/overwrite-me.txt" "${overwritten}"
 
 echo "File editor E2E passed"
