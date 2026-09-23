@@ -49,7 +49,7 @@ export interface FileEditorClock {
   clearTimeout(handle: ReturnType<typeof setTimeout>): void;
 }
 
-const systemClock: FileEditorClock = {
+export const systemClock: FileEditorClock = {
   setTimeout(callback, delay) {
     return globalThis.setTimeout(callback, delay);
   },
