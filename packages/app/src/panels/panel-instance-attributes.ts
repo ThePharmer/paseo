@@ -75,6 +75,31 @@ export function useModifiedPanelTabIds(input: {
   }, [input.serverId, input.tabIds, input.workspaceId, revision]);
 }
 
+export interface HeldPanelSaves {
+  /** How many of the panels have unsaved changes. */
+  modifiedCount: number;
+  /** Resumes the held saves; call when the close is cancelled. */
+  release(): void;
+}
+
+/**
+ * Suspends pending saves for every modified panel while a close confirmation that
+ * promises to discard their drafts is up. A panel whose saves stay suspended
+ * discards its draft when it unmounts instead of writing it.
+ */
+export function holdModifiedPanelSaves(identities: PanelInstanceIdentity[]): HeldPanelSaves {
+  const modified = identities
+    .map((identity) => getPanelInstanceAttributes(identity))
+    .filter((attributes) => attributes.modified);
+  const resumes = modified.map((attributes) => attributes.suspendPendingSave?.());
+  return {
+    modifiedCount: modified.length,
+    release: () => {
+      for (const resume of resumes) resume?.();
+    },
+  };
+}
+
 export function subscribePanelInstanceAttributes(
   identity: PanelInstanceIdentity,
   listener: () => void,
