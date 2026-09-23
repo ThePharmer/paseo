@@ -1,0 +1,11 @@
+context platform=android timeout=120000
+env APP_ID=sh.paseo
+
+# One cold-start trial of the Direct connection sheet: the same first four
+# steps as packages/app/e2e/mobile/setup/connect-direct.android.ad, with the
+# same timeouts, stopping once the sheet is on screen.
+open "${APP_ID}"
+wait "id=\"welcome-screen\"" 60000
+press "id=\"welcome-direct-connection\""
+wait "id=\"add-host-modal\"" 10000
+close

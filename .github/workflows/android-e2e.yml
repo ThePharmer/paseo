@@ -14,7 +14,8 @@ name: Android E2E
 
 run-name: >-
   Android E2E for native headers run ${{ inputs.build_run_id }}${{ inputs.e2e_ref
-  && format(' (scripts from {0})', inputs.e2e_ref) || '' }}
+  && format(' (scripts from {0})', inputs.e2e_ref) || '' }}${{ inputs.connect_trials > 0
+  && format(' [experiment: {0} connect trials, animations {1}]', inputs.connect_trials, inputs.animations) || '' }}
 
 on:
   workflow_dispatch:
@@ -28,13 +29,27 @@ on:
         required: false
         default: ""
         type: string
+      connect_trials:
+        description: "EXPERIMENT: instead of the suites, run this many cold-start trials of opening the Direct connection sheet (reinstall, launch, tap, expect add-host-modal) and report the success rate (0 = normal suites)"
+        required: false
+        default: 0
+        type: number
+      animations:
+        description: "System animation scales on the emulator. disabled = scale 0, which Reanimated reads as Reduce Motion (the normal setting)"
+        required: false
+        default: disabled
+        type: choice
+        options:
+          - disabled
+          - enabled
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: android-e2e-${{ inputs.build_run_id }}
+  # Experiment runs never share a group, so arms against the same build run side by side.
+  group: android-e2e-${{ inputs.build_run_id }}${{ inputs.connect_trials > 0 && format('-trials-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 env:
@@ -49,7 +64,7 @@ env:
 jobs:
   android:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: ${{ inputs.connect_trials > 0 && 100 || 75 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -204,10 +219,13 @@ jobs:
           script: echo "Generated the AVD boot snapshot."
 
       - name: Run the Android suites
-        timeout-minutes: 35
+        timeout-minutes: ${{ inputs.connect_trials > 0 && 90 || 35 }}
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         env:
           ARTIFACTS_DIR: ${{ runner.temp }}/e2e/artifacts
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
+          CONNECT_TRIALS: ${{ inputs.connect_trials }}
+          E2E_ANIMATIONS: ${{ inputs.animations }}
         with:
           api-level: ${{ env.EMULATOR_API_LEVEL }}
           target: ${{ env.EMULATOR_TARGET }}
@@ -218,7 +236,7 @@ jobs:
           ram-size: 4096M
           force-avd-creation: false
           emulator-options: -no-snapshot-save ${{ env.EMULATOR_OPTIONS }}
-          disable-animations: true
+          disable-animations: ${{ inputs.animations != 'enabled' }}
           disable-spellchecker: true
           emulator-boot-timeout: 600
           # The action runs each script line in its own shell; keep it one line.

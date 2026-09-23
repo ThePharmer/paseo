@@ -6,7 +6,15 @@
 #
 # Needs: SRC_DIR, APK_PATH, APP_ID, DAEMON_PORT, SERVER_ID, WORKSPACE_ID,
 # WORKSPACE_DIR, ARTIFACTS_DIR.
+#
+# Experiment mode: CONNECT_TRIALS > 0 skips connecting and the suites and runs
+# that many cold-start trials of opening the Direct connection sheet instead
+# (see run_connect_trials). E2E_ANIMATIONS=enabled|disabled sets the system
+# animation scales for the whole run.
 set -uo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONNECT_TRIALS="${CONNECT_TRIALS:-0}"
+E2E_ANIMATIONS="${E2E_ANIMATIONS:-disabled}"
 
 : "${SRC_DIR:?}" "${APK_PATH:?}" "${APP_ID:?}" "${DAEMON_PORT:?}" "${SERVER_ID:?}"
 : "${WORKSPACE_ID:?}" "${WORKSPACE_DIR:?}" "${ARTIFACTS_DIR:?}"
@@ -103,6 +111,97 @@ install_apk() {
   return 1
 }
 
+# Copies Agent Device's per-request diagnostics (.ndjson) out of a state dir
+# before `daemon stop --clean` removes them.
+save_agent_device_diagnostics() {
+  local state_dir="$1" dest="$2"
+  [[ -d "${state_dir}" ]] || return 0
+  mkdir -p "${dest}"
+  (cd "${state_dir}" && find . -name '*.ndjson' -print0 | xargs -0 -r cp --parents -t "${dest}") 2>/dev/null || true
+}
+
+# Sets the three system animation scales (1 = on, 0 = off). Reanimated reads
+# transition_animation_scale == 0 as the system Reduce Motion setting.
+apply_animation_setting() {
+  local scale=0
+  [[ "${E2E_ANIMATIONS}" == "enabled" ]] && scale=1
+  for key in window_animation_scale transition_animation_scale animator_duration_scale; do
+    adb shell settings put global "${key}" "${scale}" >/dev/null 2>&1 || true
+  done
+  echo "Animations ${E2E_ANIMATIONS}: window=$(adb shell settings get global window_animation_scale | tr -d '\r')" \
+    "transition=$(adb shell settings get global transition_animation_scale | tr -d '\r')" \
+    "animator=$(adb shell settings get global animator_duration_scale | tr -d '\r')"
+}
+
+# EXPERIMENT: each trial reinstalls the APK (a fresh first launch, like the
+# first connect of a normal run), opens the app, waits for the welcome screen,
+# taps Direct connection at once and waits the normal 10 s for the sheet. No
+# retry inside a trial. A trial that fails before the tap is counted apart,
+# since it says nothing about the sheet.
+run_connect_trials() {
+  local trials="$1" opened=0 stuck=0 other=0 trial status log state failed_step outcome
+  local summary="${ARTIFACTS_DIR}/connect-trials.md"
+  mkdir -p "${ARTIFACTS_DIR}/trials"
+  {
+    echo "## Direct connection sheet: ${trials} cold-start trials"
+    echo
+    echo "APK: \`${APK_PATH##*/}\` (native headers run ${BUILD_RUN_ID:-unknown}); animations: **${E2E_ANIMATIONS}**" \
+      "(transition_animation_scale=$(adb shell settings get global transition_animation_scale | tr -d '\r'))"
+    echo
+    echo "| Trial | Result | Started (UTC) | Failed step |"
+    echo "| --- | --- | --- | --- |"
+  } >"${summary}"
+  for trial in $(seq 1 "${trials}"); do
+    log="${ARTIFACTS_DIR}/trials/trial-${trial}.log"
+    state="${RUNNER_TEMP:-/tmp}/agent-device-trial-${trial}"
+    if ! install_apk; then
+      other=$((other + 1))
+      echo "| ${trial} | install failed | $(date -u +%T) | |" >>"${summary}"
+      continue
+    fi
+    settle_system_ui
+    local started
+    started="$(date -u +%T)"
+    adb shell log -t PaseoE2ETrial "trial ${trial} start" >/dev/null 2>&1 || true
+    AGENT_DEVICE_STATE_DIR="${state}" agent-device replay \
+      "${SCRIPT_DIR}/connect-trial.android.ad" \
+      --platform android \
+      --session "trial-${trial}" \
+      --env "APP_ID=${APP_ID}" 2>&1 | tee "${log}"
+    status="${PIPESTATUS[0]}"
+    adb shell log -t PaseoE2ETrial "trial ${trial} end status=${status}" >/dev/null 2>&1 || true
+    failed_step="$(grep -o -m 1 'Replay failed at step [0-9]* ([^)]*)' "${log}" || true)"
+    if [[ "${status}" -eq 0 ]]; then
+      opened=$((opened + 1))
+      outcome="sheet opened"
+    else
+      adb exec-out screencap -p >"${ARTIFACTS_DIR}/trials/trial-${trial}-failure.png" 2>/dev/null || true
+      if grep -q 'id=\\"add-host-modal\\"' <<<"${failed_step}"; then
+        stuck=$((stuck + 1))
+        outcome="**sheet did not open**"
+        grep -q 'Bottom sheet backdrop' "${log}" && outcome="${outcome} (backdrop only)"
+      else
+        other=$((other + 1))
+        outcome="failed before the sheet"
+      fi
+    fi
+    echo "| ${trial} | ${outcome} | ${started} | ${failed_step//|/\\|} |" >>"${summary}"
+    save_agent_device_diagnostics "${state}" "${ARTIFACTS_DIR}/trials/trial-${trial}-diagnostics"
+    AGENT_DEVICE_STATE_DIR="${state}" agent-device daemon stop --clean >/dev/null 2>&1 || true
+  done
+  local counted=$((opened + stuck))
+  {
+    echo
+    echo "**Sheet opened in ${opened} of ${counted} trials** that reached the tap; did not open in ${stuck}." \
+      "${other} trial(s) failed before the tap and are not counted."
+  } >>"${summary}"
+  cat "${summary}"
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    cat "${summary}" >>"${GITHUB_STEP_SUMMARY}"
+  fi
+  [[ "${stuck}" -eq 0 && "${counted}" -gt 0 ]]
+}
+
 run_suite() {
   local name="$1"
   shift
@@ -128,7 +227,13 @@ fi
 adb logcat -c || true
 adb logcat -v threadtime >"${ARTIFACTS_DIR}/logcat.txt" 2>&1 &
 logcat_pid=$!
+apply_animation_setting
 settle_system_ui
+
+if [[ "${CONNECT_TRIALS}" -gt 0 ]]; then
+  run_connect_trials "${CONNECT_TRIALS}"
+  exit $?
+fi
 
 # Replays the connect script; its output goes to connect-attempt-<n>.log in the
 # artifact as well as the job log.
@@ -144,6 +249,8 @@ connect_app() {
     --env "SERVER_ID=${SERVER_ID}" \
     --env "WORKSPACE_ID=${WORKSPACE_ID}" 2>&1 | tee "${ARTIFACTS_DIR}/connect-attempt-${attempt}.log"
   status="${PIPESTATUS[0]}"
+  save_agent_device_diagnostics "${RUNNER_TEMP:-/tmp}/agent-device-connect" \
+    "${ARTIFACTS_DIR}/connect-attempt-${attempt}-diagnostics"
   AGENT_DEVICE_STATE_DIR="${RUNNER_TEMP:-/tmp}/agent-device-connect" agent-device daemon stop --clean >/dev/null 2>&1 || true
   return "${status}"
 }
