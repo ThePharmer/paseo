@@ -178,7 +178,7 @@ jobs:
           path: |
             ~/.android/avd/*
             ~/.android/adb*
-          key: avd-${{ env.EMULATOR_API_LEVEL }}-${{ env.EMULATOR_TARGET }}-x86_64-${{ env.EMULATOR_PROFILE }}-v1
+          key: avd-${{ env.EMULATOR_API_LEVEL }}-${{ env.EMULATOR_TARGET }}-x86_64-${{ env.EMULATOR_PROFILE }}-v2
 
       - name: Create the AVD and its boot snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
@@ -190,6 +190,8 @@ jobs:
           arch: x86_64
           profile: ${{ env.EMULATOR_PROFILE }}
           disk-size: 4G
+          cores: 3
+          ram-size: 4096M
           force-avd-creation: false
           emulator-options: ${{ env.EMULATOR_OPTIONS }}
           disable-animations: false
@@ -206,6 +208,8 @@ jobs:
           arch: x86_64
           profile: ${{ env.EMULATOR_PROFILE }}
           disk-size: 4G
+          cores: 3
+          ram-size: 4096M
           force-avd-creation: false
           emulator-options: -no-snapshot-save ${{ env.EMULATOR_OPTIONS }}
           disable-animations: true

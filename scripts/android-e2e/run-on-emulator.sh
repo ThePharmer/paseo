@@ -42,6 +42,26 @@ wait_for_device() {
   return 1
 }
 
+# A cold boot on a shared runner often leaves "Pixel Launcher isn't responding"
+# on screen, and that dialog covers the app for the rest of the run. Wait until
+# the launcher has focus, dismissing ANR dialogs on the way.
+settle_system_ui() {
+  local focus
+  for _ in $(seq 1 60); do
+    focus="$(adb shell dumpsys window 2>/dev/null | grep -m1 'mCurrentFocus=' || true)"
+    if [[ "${focus}" == *"Not Responding"* || "${focus}" == *"Application Error"* ]]; then
+      echo "Dismissing a system dialog: ${focus}"
+      adb shell input keyevent KEYCODE_BACK >/dev/null 2>&1 || true
+    elif [[ "${focus}" == *"launcher"* || "${focus}" == *"Launcher"* ]]; then
+      return 0
+    else
+      adb shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
+    fi
+    sleep 2
+  done
+  echo "::warning::The launcher never took focus; last focus: ${focus}"
+}
+
 install_apk() {
   for attempt in 1 2 3; do
     # -g grants runtime permissions up front, so no notification prompt
@@ -71,7 +91,7 @@ run_suite() {
 }
 
 wait_for_device || exit 1
-adb shell settings put secure show_ime_with_hard_keyboard 0 >/dev/null 2>&1 || true
+settle_system_ui
 install_apk || exit 1
 # The app dials 127.0.0.1:<port> on the device; adb forwards it to the daemon.
 adb reverse "tcp:${DAEMON_PORT}" "tcp:${DAEMON_PORT}"
