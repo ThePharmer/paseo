@@ -57,14 +57,15 @@ env:
   # branch, rebased onto the upstream tag it targets. Only this one commit is
   # cherry-picked, so when the feature branch gains commits or the upstream tag
   # moves, re-squash the branch onto the new tag and re-point both values here.
-  FEATURE_COMMIT: 4384d05accf6c03120ef0fc54a2f24b97d9b13a4
-  FEATURE_BRANCH: release/native-headers-v0.9.0
+  FEATURE_COMMIT: ca285a42aec671882c68eff6f320dd077042000b
+  FEATURE_BRANCH: release/native-headers-v0.9.2
   # Fork-only fixes cherry-picked after the feature, in order, until upstream
   # ships them. One "<sha> <branch> <upstream PR>" per line; the branch is
   # fetched so the sha is reachable. A sha already in the tag is skipped.
   EXTRA_FIXES: |
-    1f33b1a024fd0efb87f90f5838d0e1904fed5081 fix/question-card-multiselect-other getpaseo/paseo#4372
     c340c5c0d6e88466667b83a2fd13368ecb3eeb19 fix/native-download-headers getpaseo/paseo#4290
+    58a4f14717a2716b0d003622ac4a1cba1210b405 fix/bottom-sheet-reduce-motion getpaseo/paseo#pending
+    1660c24e43fd21b272524d5bee2df928490c8d77 fix/bottom-sheet-reduce-motion getpaseo/paseo#pending
 
 jobs:
   resolve:
@@ -433,8 +434,8 @@ jobs:
           npm run build:app-deps
           npm --prefix packages/app run build:terminal-webview
 
-      # The feature is cherry-picked onto a tag it was never written against;
-      # these suites are the ones the change touches.
+      # The feature and EXTRA_FIXES are cherry-picked onto a tag they were never
+      # written against; these suites are the ones they touch.
       - name: Test the feature on this tag
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
@@ -446,7 +447,7 @@ jobs:
               echo "::error::Test build: $1 fails with test branch $TEST_BRANCH applied on upstream $TAG; the test commits may be the cause. No APK was built and no release was published."
               exit 1
             fi
-            echo "::error::The native headers feature no longer passes $1 on upstream $TAG. Fix it on feat/native-direct-connection-headers, re-squash onto $TAG on a new release/native-headers-<tag> branch, push it, and update both FEATURE_COMMIT and FEATURE_BRANCH in this workflow. No APK was built and no release was published."
+            echo "::error::${2:-The native headers feature no longer passes $1 on upstream $TAG. Fix it on feat/native-direct-connection-headers, re-squash onto $TAG on a new release/native-headers-<tag> branch, push it, and update both FEATURE_COMMIT and FEATURE_BRANCH in this workflow.} No APK was built and no release was published."
             exit 1
           }
 
@@ -466,6 +467,24 @@ jobs:
             src/i18n/resources.test.ts \
             src/i18n/locales.test.ts \
             src/components/question-form-card-core.test.ts) || fail "the targeted packages/app tests"
+
+          # The EXTRA_FIXES' own tests. A file absent from this tree belongs to a
+          # fix that is no longer applied (upstream shipped it and its
+          # EXTRA_FIXES line was removed), so it is skipped rather than failed.
+          fix_tests=()
+          for file in \
+            src/utils/download-headers.test.ts \
+            src/components/ui/isolated-bottom-sheet-modal/index.test.tsx; do
+            if [[ -f "packages/app/$file" ]]; then
+              fix_tests+=("$file")
+            else
+              echo "::notice::Skipping packages/app/$file: it is not in the built tree."
+            fi
+          done
+          if ((${#fix_tests[@]})); then
+            (cd packages/app && npx vitest run --testTimeout=60000 "${fix_tests[@]}") \
+              || fail "the EXTRA_FIXES tests" "An EXTRA_FIXES fix no longer passes its tests (${fix_tests[*]}) on upstream $TAG. Rebase its branch onto $TAG, update EXTRA_FIXES in this workflow, then re-run."
+          fi
 
       - name: Prebuild and assemble the release APK
         env:
