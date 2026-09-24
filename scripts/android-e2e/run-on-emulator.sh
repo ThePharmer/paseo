@@ -175,7 +175,7 @@ if [[ -f "${sheet_check}" ]]; then
     bash "${sheet_check}"
 else
   # Say so, or a green run reads as if the sheet was checked.
-  skipped="Direct connection sheet check skipped: the built commit predates packages/app/e2e/mobile/direct-connection-sheet/android.sh."
+  skipped="Direct connection sheet check skipped: the selected E2E scripts lack packages/app/e2e/mobile/direct-connection-sheet/android.sh."
   echo "::notice::${skipped}"
   echo "- ${skipped}" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
 fi
