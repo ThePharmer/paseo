@@ -24,6 +24,7 @@ import {
   type AgentRunOptions,
   type AgentRunResult,
   type AgentRuntimeInfo,
+  type AgentSelectOption,
   type AgentSession,
   type AgentSessionConfig,
   type AgentSlashCommand,
@@ -171,12 +172,11 @@ const PI_THINKING_OPTIONS: ReadonlyArray<{
   id: PiThinkingLevel;
   label: string;
   description: string;
-  isDefault?: boolean;
 }> = [
   { id: "off", label: "Off", description: "No extra reasoning" },
   { id: "minimal", label: "Minimal", description: "Light reasoning" },
   { id: "low", label: "Low", description: "Faster reasoning" },
-  { id: "medium", label: "Medium", description: "Balanced reasoning", isDefault: true },
+  { id: "medium", label: "Medium", description: "Balanced reasoning" },
   { id: "high", label: "High", description: "Deeper reasoning" },
   { id: "xhigh", label: "XHigh", description: "Very deep reasoning" },
   { id: "max", label: "Max", description: "Extreme reasoning" },
@@ -371,21 +371,6 @@ function parseAutoCompactMode(value: string | undefined): AutoCompactMode {
     return "toggle";
   }
   return "unknown";
-}
-
-function mapThinkingOption(option: (typeof PI_THINKING_OPTIONS)[number]) {
-  const mappedOption = {
-    id: option.id,
-    label: option.label,
-    description: option.description,
-  };
-  if (option.isDefault) {
-    return {
-      ...mappedOption,
-      isDefault: true,
-    };
-  }
-  return mappedOption;
 }
 
 function piModelSupportsImageInput(model: PiModel | null | undefined): boolean {
@@ -791,14 +776,6 @@ function isPiRequestAbortError(error: unknown): boolean {
   return /\brequest was aborted\b|\babort(ed)?\b/i.test(toDiagnosticErrorMessage(error));
 }
 
-function resolveThinkingOptionId(
-  cachedThinkingOptionId: string | null,
-  sessionThinkingLevel: PiThinkingLevel,
-): PiThinkingLevel | null {
-  const currentThinking = cachedThinkingOptionId ?? sessionThinkingLevel;
-  return normalizePiThinkingOption(currentThinking);
-}
-
 function modelToId(model: PiModel | null | undefined): string | null {
   return model?.provider && model.id ? `${model.provider}/${model.id}` : null;
 }
@@ -1195,7 +1172,50 @@ function buildExtensionUiResponse(
   return { value: answer };
 }
 
+function resolvePiThinkingConfig(
+  model: PiModel,
+): Pick<AgentModelDefinition, "thinkingOptions" | "defaultThinkingOptionId"> {
+  if (!model.reasoning) {
+    return { thinkingOptions: undefined, defaultThinkingOptionId: undefined };
+  }
+
+  const supportedOptions = PI_THINKING_OPTIONS.filter((option) => {
+    const mapped = model.thinkingLevelMap?.[option.id];
+    if (mapped === null) {
+      return false;
+    }
+    if (option.id === "xhigh" || option.id === "max") {
+      return mapped !== undefined;
+    }
+    return true;
+  });
+  const defaultIndex = PI_THINKING_OPTIONS.findIndex(
+    (option) => option.id === DEFAULT_PI_THINKING_LEVEL,
+  );
+  // Pi clamps upward first, then falls back to the highest remaining lower level.
+  const higherDefault = supportedOptions.find(
+    (option) => PI_THINKING_OPTIONS.indexOf(option) >= defaultIndex,
+  );
+  const defaultOption = higherDefault ?? supportedOptions.at(-1);
+  const defaultThinkingOptionId = defaultOption?.id ?? "off";
+  return {
+    thinkingOptions: supportedOptions.map((option) => {
+      const mappedOption: AgentSelectOption = {
+        id: option.id,
+        label: option.label,
+        description: option.description,
+      };
+      if (option.id === defaultThinkingOptionId) {
+        mappedOption.isDefault = true;
+      }
+      return mappedOption;
+    }),
+    defaultThinkingOptionId,
+  };
+}
+
 function mapPiModel(model: PiModel, provider: AgentProvider): AgentModelDefinition {
+  const { thinkingOptions, defaultThinkingOptionId } = resolvePiThinkingConfig(model);
   return {
     provider,
     id: `${model.provider}/${model.id}`,
@@ -1205,8 +1225,8 @@ function mapPiModel(model: PiModel, provider: AgentProvider): AgentModelDefiniti
       provider: model.provider,
       modelId: model.id,
     },
-    thinkingOptions: model.reasoning ? PI_THINKING_OPTIONS.map(mapThinkingOption) : undefined,
-    defaultThinkingOptionId: model.reasoning ? DEFAULT_PI_THINKING_LEVEL : undefined,
+    thinkingOptions,
+    defaultThinkingOptionId,
   };
 }
 
@@ -1244,7 +1264,6 @@ export class PiRpcAgentSession implements AgentSession {
   private activePromptRequestId: string | null = null;
   private readonly pendingPromptResults = new Map<string, boolean>();
   private readonly pendingSteerSubmissions: PiPendingSteerSubmission[] = [];
-  private lastKnownThinkingOptionId: string | null;
   currentLeafOverrideId: string | null | undefined;
   private readonly capturedUserEntries: PiCapturedEntry[] = [];
   private readonly capturedUserEntriesById = new Map<string, PiCapturedEntry>();
@@ -1258,24 +1277,19 @@ export class PiRpcAgentSession implements AgentSession {
   private readonly logger: Logger;
   private readonly usagePoller: PiUsagePoller;
   private closed = false;
-  // Pi reports an aborted OpenAI Responses stream before the abort RPC resolves.
-  // Keep the turn active until that RPC acknowledges the user-requested cancellation.
-  private interruptingTurnId: string | null = null;
-  private lastInterruptedTurnId: string | null = null;
-  private interruptedTerminalError: { turnId: string; error: string } | null = null;
+  // Pi publishes the terminal before acknowledging abort. Autonomous runs have no
+  // turn ID; retain their errors too until the cancellation request settles.
+  private interruptingTurn: { turnId: string | undefined; error: string | null } | null = null;
 
   constructor(options: PiRpcAgentSessionOptions) {
     this.runtimeSession = options.runtimeSession;
     this.config = options.config;
     this.state = options.initialState;
+    this.config.thinkingOptionId = this.state.thinkingLevel;
     this.capabilities = options.capabilities;
     this.provider = PI_PROVIDER;
     this.currentModeId = options.currentModeId ?? null;
     this.cleanup = options.cleanup;
-    this.lastKnownThinkingOptionId =
-      normalizePiThinkingOption(options.config.thinkingOptionId) ??
-      this.state.thinkingLevel ??
-      null;
     this.extensionTimeoutMs = options.extensionTimeoutMs ?? DEFAULT_PI_EXTENSION_RESULT_TIMEOUT_MS;
     this.logger = options.logger;
     this.usagePoller = new PiUsagePoller({
@@ -1329,7 +1343,6 @@ export class PiRpcAgentSession implements AgentSession {
     const turnId = randomUUID();
     this.activeTurnId = turnId;
     this.usagePoller.startTurn();
-    this.lastInterruptedTurnId = null;
     this.activeClientMessageId = options?.clientMessageId ?? null;
     this.activeAssistantMessageId = null;
     this.activeTurnStarted = false;
@@ -1472,10 +1485,7 @@ export class PiRpcAgentSession implements AgentSession {
       provider: this.provider,
       sessionId: this.state.sessionId,
       model: modelToId(this.state.model),
-      thinkingOptionId: resolveThinkingOptionId(
-        this.lastKnownThinkingOptionId,
-        this.state.thinkingLevel,
-      ),
+      thinkingOptionId: this.state.thinkingLevel,
       modeId: this.currentModeId,
     };
   }
@@ -1537,11 +1547,10 @@ export class PiRpcAgentSession implements AgentSession {
   }
 
   async interrupt(): Promise<void> {
-    const turnId = this.activeTurnId;
-    if (turnId) {
-      this.interruptingTurnId = turnId;
-      this.lastInterruptedTurnId = turnId;
-    }
+    const turnId = this.activeTurnId ?? undefined;
+    const interruption: typeof this.interruptingTurn =
+      this.activeTurnId || this.activeTurnStarted ? { turnId, error: null } : null;
+    this.interruptingTurn = interruption;
     try {
       try {
         await this.runtimeSession.clearQueue();
@@ -1554,12 +1563,11 @@ export class PiRpcAgentSession implements AgentSession {
       }
       await this.runtimeSession.abort();
     } catch (error) {
-      if (this.interruptingTurnId === turnId) {
-        this.interruptingTurnId = null;
+      const terminalError = this.interruptingTurn === interruption ? interruption?.error : null;
+      if (this.interruptingTurn === interruption) {
+        this.interruptingTurn = null;
       }
-      if (this.interruptedTerminalError?.turnId === turnId) {
-        const terminalError = this.interruptedTerminalError;
-        this.interruptedTerminalError = null;
+      if (terminalError) {
         this.usagePoller.stopTurn();
         this.activeTurnId = null;
         this.activeClientMessageId = null;
@@ -1573,12 +1581,17 @@ export class PiRpcAgentSession implements AgentSession {
           type: "turn_failed",
           provider: this.provider,
           turnId,
-          error: terminalError.error,
+          error: terminalError,
         });
       }
       throw error;
     }
-    if (turnId && this.activeTurnId === turnId) {
+    if (
+      interruption &&
+      this.interruptingTurn === interruption &&
+      (this.activeTurnId || this.activeTurnStarted) &&
+      (this.activeTurnId ?? undefined) === turnId
+    ) {
       this.usagePoller.stopTurn();
       this.activeTurnId = null;
       this.activeClientMessageId = null;
@@ -1595,11 +1608,8 @@ export class PiRpcAgentSession implements AgentSession {
         turnId,
       });
     }
-    if (this.interruptingTurnId === turnId) {
-      this.interruptingTurnId = null;
-    }
-    if (this.interruptedTerminalError?.turnId === turnId) {
-      this.interruptedTerminalError = null;
+    if (this.interruptingTurn === interruption) {
+      this.interruptingTurn = null;
     }
   }
 
@@ -1692,22 +1702,14 @@ export class PiRpcAgentSession implements AgentSession {
     }
 
     const model = await this.runtimeSession.setModel(parsedReference.provider, parsedReference.id);
-    this.state = {
-      ...this.state,
-      model,
-    };
+    await this.refreshState();
     this.config.model = `${model.provider}/${model.id}`;
   }
 
   async setThinkingOption(thinkingOptionId: string | null): Promise<void> {
     const thinkingLevel = normalizePiThinkingOption(thinkingOptionId) ?? DEFAULT_PI_THINKING_LEVEL;
     await this.runtimeSession.setThinkingLevel(thinkingLevel);
-    this.lastKnownThinkingOptionId = thinkingLevel;
-    this.config.thinkingOptionId = thinkingLevel;
-    this.state = {
-      ...this.state,
-      thinkingLevel,
-    };
+    await this.refreshState();
   }
 
   private emit(event: AgentStreamEvent): void {
@@ -2167,10 +2169,11 @@ export class PiRpcAgentSession implements AgentSession {
 
   private handleProcessExit(error: string): void {
     this.rejectAllExtensionResults(new Error(error));
-    if (!this.activeTurnId) {
+    this.interruptingTurn = null;
+    if (!this.activeTurnId && !this.activeTurnStarted) {
       return;
     }
-    const turnId = this.activeTurnId;
+    const turnId = this.activeTurnId ?? undefined;
     this.usagePoller.stopTurn();
     this.activeTurnId = null;
     this.activeClientMessageId = null;
@@ -2290,6 +2293,9 @@ export class PiRpcAgentSession implements AgentSession {
     event: Extract<PiAgentSessionEvent, { type: "agent_end" | "agent_settled" }>;
     turnId: string | undefined;
   }): void {
+    if (!this.activeTurnId && !this.activeTurnStarted) {
+      return;
+    }
     if (event.type === "agent_end") {
       // COMPAT(piAgentSettled): added in v0.5.0, remove after 2027-02-21 once the Pi
       // floor emits agent_settled and willRetry.
@@ -2297,14 +2303,10 @@ export class PiRpcAgentSession implements AgentSession {
         this.completeTurn(turnId, event.messages ?? []);
         return;
       }
-      if (this.activeTurnId) {
-        this.pendingSettledMessages = event.messages ?? [];
-      }
+      this.pendingSettledMessages = event.messages ?? [];
       return;
     }
-    if (this.activeTurnId) {
-      this.completeTurn(turnId, this.pendingSettledMessages ?? []);
-    }
+    this.completeTurn(turnId, this.pendingSettledMessages ?? []);
   }
 
   private handleToolExecutionEnd(
@@ -2415,7 +2417,9 @@ export class PiRpcAgentSession implements AgentSession {
           item: { type: "assistant_message", text },
         });
       }
-      this.completeTurn(turnId, []);
+      if (!this.activeTurnStarted) {
+        this.completeTurn(turnId, []);
+      }
       return;
     }
   }
@@ -2458,20 +2462,16 @@ export class PiRpcAgentSession implements AgentSession {
   }
 
   private completeTurn(turnId: string | undefined, messages: PiAgentMessage[]): void {
-    if (turnId && this.interruptingTurnId === turnId && isPiAbortedTerminalResponse(messages)) {
-      this.interruptedTerminalError = {
-        turnId,
-        error: latestPiErrorMessage(messages) ?? "Pi turn failed",
-      };
-      return;
-    }
+    const errorMessage = latestPiErrorMessage(messages);
     if (
-      isPiAbortedTerminalResponse(messages) &&
-      (turnId === this.lastInterruptedTurnId || (!turnId && this.lastInterruptedTurnId !== null))
+      this.interruptingTurn &&
+      this.interruptingTurn.turnId === turnId &&
+      (errorMessage || isPiAbortedTerminalResponse(messages))
     ) {
-      this.lastInterruptedTurnId = null;
+      this.interruptingTurn.error = errorMessage ?? "Pi turn failed";
       return;
     }
+    this.interruptingTurn = null;
     this.activeTurnId = null;
     this.activeClientMessageId = null;
     this.activeAssistantMessageId = null;
@@ -2480,7 +2480,6 @@ export class PiRpcAgentSession implements AgentSession {
     this.pendingSettledMessages = null;
     this.pendingSteerSubmissions.length = 0;
     this.clearNoTurnBuffers();
-    const errorMessage = latestPiErrorMessage(messages);
     if (typeof errorMessage === "string" && errorMessage.length > 0) {
       this.usagePoller.stopTurn();
       this.emit({
@@ -2502,6 +2501,7 @@ export class PiRpcAgentSession implements AgentSession {
 
   private async refreshState(): Promise<void> {
     this.state = await this.runtimeSession.getState();
+    this.config.thinkingOptionId = this.state.thinkingLevel;
   }
 
   private async refreshAfterTurn(finalUsage: Promise<void>): Promise<void> {
@@ -2548,8 +2548,7 @@ export class PiRpcAgentClient implements AgentClient {
       runtimeSession = await this.runtime.startSession({
         cwd: config.cwd,
         model: config.model,
-        thinkingOptionId:
-          normalizePiThinkingOption(config.thinkingOptionId) ?? DEFAULT_PI_THINKING_LEVEL,
+        thinkingOptionId: normalizePiThinkingOption(config.thinkingOptionId) ?? undefined,
         noSession: config.internal === true,
         env: launchContext?.env,
         mcpConfigPath: mcpConfig?.path,

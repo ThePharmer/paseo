@@ -21,7 +21,7 @@ import {
   type ProviderSessionConfig,
   type ProviderContent,
   type ProviderTimelineItem,
-} from "@getpaseo/plugin/provider";
+} from "@getpaseo/plugin/server/provider";
 import type {
   AgentCapabilityFlags,
   AgentClient,
@@ -58,6 +58,7 @@ import {
 } from "./create-agent-mode.js";
 import type { ProviderDefinition } from "./provider-registry.js";
 import { runProviderTurn } from "./providers/provider-runner.js";
+import { StaleProviderSessionError } from "./stale-provider-session-error.js";
 
 interface Deferred<Value> {
   promise: Promise<Value>;
@@ -91,6 +92,9 @@ function deferred<Value>(): Deferred<Value> {
     resolve = onResolve;
     reject = onReject;
   });
+  // Provider events can reject before send() settles and the caller awaits this promise.
+  // Observe that interval without replacing the rejecting promise returned to the caller.
+  void promise.catch(() => undefined);
   return { promise, resolve, reject };
 }
 
@@ -128,6 +132,10 @@ class ProviderRuntime {
 
   get negotiatedCapabilities(): readonly string[] {
     return this.connection?.capabilities ?? [];
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   async isAvailable(): Promise<boolean> {
@@ -559,6 +567,7 @@ class ProviderRuntimeSession {
       sessionId: this.providerSessionId,
       prompt,
     });
+    if (this.terminal) throw new StaleProviderSessionError(this.id);
     const pending = deferred<Extract<ProviderEvent, { type: "session.prompt_result" }>>();
     this.prompts.set(prompt.clientMessageId, pending);
     try {
@@ -568,6 +577,9 @@ class ProviderRuntimeSession {
         prompt,
       });
       return (await pending.promise).result;
+    } catch (error) {
+      if (this.terminal || this.runtime.isClosed) throw new StaleProviderSessionError(this.id);
+      throw error;
     } finally {
       this.prompts.delete(prompt.clientMessageId);
     }
@@ -623,6 +635,8 @@ class ProviderRuntimeSession {
         requestId: randomUUID(),
         sessionId: this.providerSessionId,
       });
+    } catch (error) {
+      if (!this.runtime.isClosed) throw error;
     } finally {
       this.runtime.removeSession(this.id, this.providerSessionId);
     }
@@ -837,7 +851,10 @@ class PluginAgentClient implements AgentClient {
   private readonly rootsBySession = new Map<string, PluginAgentSession>();
   private readonly pendingChildren: PendingChild[] = [];
 
+  readonly getCatalogCacheKey?: AgentClient["getCatalogCacheKey"];
+
   constructor(registration: ProviderRegistration) {
+    this.getCatalogCacheKey = registration.getCatalogCacheKey?.bind(registration);
     this.provider = registration.id;
     this.runtime = new ProviderRuntime(registration);
     this.runtime.onSessionOpened((session, opened) => this.acceptChild(session, opened));
@@ -1021,6 +1038,7 @@ class PluginAgentSession implements AgentSession {
   private readonly permissionResponses = new Map<string, AgentPermissionResponse>();
   private readonly revertTokens = new Map<string, ProviderTimelineItem["revertToken"]>();
   private readonly timelineSnapshots = new Map<string, ProviderTimelineItem>();
+  private readonly subagentIdsBySession = new Map<string, string | null>();
   private readonly childUnsubscribes = new Map<string, () => void>();
   private readonly childSnapshots = new Map<string, Map<string, ProviderTimelineItem>>();
   private unsubscribe: (() => void) | null = null;
@@ -1032,6 +1050,7 @@ class PluginAgentSession implements AgentSession {
     private readonly bridge: ProviderRuntimeSession,
     private readonly onClose: () => void,
   ) {
+    this.subagentIdsBySession.set(bridge.id, null);
     for (const event of bridge.history) this.accept(event, false);
     this.unsubscribe = bridge.onEvent((event) => this.accept(event, true));
   }
@@ -1173,6 +1192,7 @@ class PluginAgentSession implements AgentSession {
     this.unsubscribe = null;
     for (const unsubscribe of this.childUnsubscribes.values()) unsubscribe();
     this.childUnsubscribes.clear();
+    this.subagentIdsBySession.clear();
     this.listeners.clear();
     this.onClose();
     await this.bridge.close();
@@ -1229,13 +1249,22 @@ class PluginAgentSession implements AgentSession {
     child: ProviderRuntimeSession,
     opened: Extract<ProviderEvent, { type: "session.opened" }>,
   ): void {
+    const parentSubagentId = opened.parentSessionId
+      ? this.subagentIdsBySession.get(opened.parentSessionId)
+      : undefined;
+    if (parentSubagentId === undefined) {
+      throw new Error(`Missing plugin child parent ${opened.parentSessionId}`);
+    }
     const childId = child.providerId;
+    this.subagentIdsBySession.set(child.id, childId);
     this.publish({
       type: "provider_subagent",
       provider: this.provider,
       event: {
         type: "upsert",
         id: childId,
+        parentSubagentId,
+        toolCallId: opened.toolCallId ?? null,
         title: opened.title ?? null,
         description: opened.description ?? null,
         status: "running",
