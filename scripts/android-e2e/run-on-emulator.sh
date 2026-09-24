@@ -173,6 +173,11 @@ if [[ -f "${sheet_check}" ]]; then
     PASEO_E2E_APK_PATH="${APK_PATH}" \
     PASEO_MOBILE_E2E_ARTIFACTS_DIR="${ARTIFACTS_DIR}/agent-device" \
     bash "${sheet_check}"
+else
+  # Say so, or a green run reads as if the sheet was checked.
+  skipped="Direct connection sheet check skipped: the built commit predates packages/app/e2e/mobile/direct-connection-sheet/android.sh."
+  echo "::notice::${skipped}"
+  echo "- ${skipped}" >>"${GITHUB_STEP_SUMMARY:-/dev/null}"
 fi
 
 if [[ "${#failed[@]}" -gt 0 ]]; then
