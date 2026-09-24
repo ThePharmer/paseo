@@ -133,7 +133,7 @@ quietly relying on:
   `PortalProvider` in `app/_layout.tsx` and your sheet is invisible inside it.
   This is why app-wide providers wrap `PortalProvider` rather than the reverse.
 
-The fix for transforms is Gotcha 3. The fix for context is Gotcha 7.
+The fix for transforms is Gotcha 3. The fix for context is Gotcha 8.
 
 ## Gotcha 3 — Keyboard layout and portal anchors
 
@@ -302,7 +302,27 @@ Do not treat `onChange(-1)` as a close by itself. In a stacked
 another pushed sheet. Close React state from `onDismiss`; use `onChange` only to
 track phase.
 
-## Gotcha 7 — A sheet cannot read context from its call site
+## Gotcha 7 — Reduce Motion can leave a sheet at its backdrop
+
+With the system Reduce Motion setting on (Android "Remove animations", which sets
+`transition_animation_scale` to 0), Gorhom can mount a modal's backdrop and never
+bring the sheet on screen. The backdrop dims the screen at full opacity and
+blocks every touch, and the sheet is missing from the view and accessibility
+trees. It depends on timing, so it shows up most on a slow first launch. Gorhom's
+note in `@gorhom/bottom-sheet/src/utilities/animate.ts` describes it.
+
+`IsolatedBottomSheetModal` passes `overrideReduceMotion={ReduceMotion.Never}` and
+leaves the prop out of its type, so every sheet slides in. The cost: Reduce Motion
+users see the slide. Mount Gorhom modals only through `IsolatedBottomSheetModal`;
+a direct mount loses the override.
+
+A sheet that shows only its backdrop on its first open is this, not Gotcha 6.
+Gotcha 6 breaks reopening after a dismiss.
+
+Measured on the Android E2E emulator with 20 fresh-install opens per run: 7 of 80
+stuck with animations off, 0 of 60 with animations on, 0 of 80 with the override.
+
+## Gotcha 8 — A sheet cannot read context from its call site
 
 React cannot copy contexts reflectively, so the only way across the teleport in
 Gotcha 2 is to render the providers a second time, with values captured on the

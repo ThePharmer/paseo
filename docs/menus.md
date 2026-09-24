@@ -187,7 +187,7 @@ its own.
   rarely the height of the page before it.
 - **The sheet's content is teleported out of the menu's subtree**, so `MenuSheetSurface` rebuilds
   both menu contexts through the sheet's `contextBridge`. Providing them around the modal puts
-  them on the wrong side of the portal and every item inside throws. Gotcha 7 in
+  them on the wrong side of the portal and every item inside throws. Gotcha 8 in
   [floating-panels.md](floating-panels.md).
 - **One overlay per menu.** Submenus render inside their parent's layer and paint no second
   backdrop, so there is exactly one `Modal` on native no matter how deep the menu goes.
