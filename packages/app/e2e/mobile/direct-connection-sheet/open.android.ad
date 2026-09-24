@@ -1,0 +1,10 @@
+context platform=android timeout=120000
+env APP_ID=sh.paseo
+
+# First launch of a fresh install: tap Direct connection as soon as the
+# welcome screen is up and expect the sheet itself, not only its backdrop.
+open "${APP_ID}"
+wait "id=\"welcome-screen\"" 60000
+press "id=\"welcome-direct-connection\""
+wait "id=\"add-host-modal\"" 10000
+close
