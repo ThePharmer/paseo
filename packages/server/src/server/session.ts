@@ -738,6 +738,10 @@ export class Session {
     string,
     { owner: OwnedSubscription; agentIds: Set<string> }
   >();
+  private readonly providerSubagentTimelineSubscriptions = new Map<
+    string,
+    { owner: OwnedSubscription; parentAgentId: string; subagentId: string }
+  >();
   private readonly clientSources = new Map<
     object,
     {
@@ -1615,6 +1619,7 @@ export class Session {
       workspaces ||
       this.delivery.hasDemand("agents") ||
       this.delivery.hasDemand("timelines") ||
+      this.delivery.hasDemand("provider-subagent-timelines") ||
       this.voiceSessions.hasDemand ||
       this.wantsEvent("agent_attention_required") ||
       this.wantsEvent("agent_permission_request") ||
@@ -1850,16 +1855,21 @@ export class Session {
       };
     }
 
+    if (update.type === "timeline") {
+      this.forwardSubscribedProviderSubagentTimeline(update, message);
+    }
     const delivered = new Set<object>();
     for (const subscription of this.eventSubscriptions.values()) {
       if (!subscription.events.has("agent.provider_subagents.update")) continue;
+      const source = subscription.owner.source;
       if (
         update.type === "timeline" &&
-        !this.supportsSubagentTimelineItem(update.row.item, subscription.owner.source)
+        (this.scopesProviderSubagentTimelines(source) ||
+          !this.supportsSubagentTimelineItem(update.row.item, source))
       )
         continue;
       subscription.owner.emit(message);
-      delivered.add(subscription.owner.source);
+      delivered.add(source);
     }
     if (this.clientSources.size === 0 || !this.onMessageToSource) {
       if (
@@ -1881,6 +1891,78 @@ export class Session {
         continue;
       this.onMessageToSource(source, message);
     }
+  }
+
+  /**
+   * Whether this source receives child timeline items only through its child timeline
+   * subscriptions. Scoping needs owned subscriptions: a legacy socket cannot route or release them.
+   */
+  private scopesProviderSubagentTimelines(source: object): boolean {
+    // COMPAT(providerSubagentTimelineSubscriptions): added after v0.9.2, remove the broadcast of
+    // child timeline items after 2027-03-27 once the client floor advertises the capability.
+    return (
+      this.delivery.isModern(source) &&
+      this.supportsForSource(CLIENT_CAPS.providerSubagentTimelineSubscriptions, source)
+    );
+  }
+
+  private forwardSubscribedProviderSubagentTimeline(
+    update: Extract<ProviderSubagentManagerEvent, { type: "timeline" }>,
+    message: SessionOutboundMessage,
+  ): void {
+    // A socket holding several subscriptions to one child receives each item once.
+    const delivered = new Set<object>();
+    for (const subscription of this.providerSubagentTimelineSubscriptions.values()) {
+      const source = subscription.owner.source;
+      if (
+        delivered.has(source) ||
+        subscription.parentAgentId !== update.parentAgentId ||
+        subscription.subagentId !== update.subagentId ||
+        !this.scopesProviderSubagentTimelines(source) ||
+        !this.supportsSubagentTimelineItem(update.row.item, source)
+      )
+        continue;
+      subscription.owner.emit(message);
+      delivered.add(source);
+    }
+  }
+
+  private subscribeProviderSubagentTimeline(
+    msg: Extract<
+      SessionInboundMessage,
+      { type: "agent.provider_subagents.timeline.subscribe.request" }
+    >,
+    source?: object,
+  ): void {
+    const { parentAgentId, subagentId } = msg;
+    const owner = this.delivery.begin(
+      "provider-subagent-timelines",
+      undefined,
+      (id) => {
+        this.providerSubagentTimelineSubscriptions.delete(id);
+        this.refreshObservationProducers();
+      },
+      // Legacy sockets keep one subscription per slot; a slot per child leaves siblings alone.
+      `provider-subagent-timeline:${parentAgentId}\0${subagentId}`,
+    );
+    this.providerSubagentTimelineSubscriptions.set(owner.id, {
+      owner,
+      parentAgentId,
+      subagentId,
+    });
+    this.emitForSource(
+      {
+        type: "agent.provider_subagents.timeline.subscribe.response",
+        payload: {
+          requestId: msg.requestId,
+          subscriptionId: owner.responseId,
+          parentAgentId,
+          subagentId,
+        },
+      },
+      source,
+    );
+    this.refreshObservationProducers();
   }
 
   private subscribeToAgentEvents(): void {
@@ -2622,6 +2704,9 @@ export class Session {
         return this.handleProviderSubagentListRequest(msg);
       case "agent.provider_subagents.timeline.get.request":
         return this.handleProviderSubagentTimelineRequest(msg, source);
+      case "agent.provider_subagents.timeline.subscribe.request":
+        this.subscribeProviderSubagentTimeline(msg, source);
+        return undefined;
       case "session.events.set_subscription.request": {
         const owner = this.delivery.begin("events", undefined, async (id) => {
           this.eventSubscriptions.delete(id);

@@ -1870,6 +1870,15 @@ export const ProviderSubagentTimelineRequestMessageSchema = z.object({
   limit: z.number().int().nonnegative().optional(),
 });
 
+// Owns live `kind: "timeline"` delivery for one provider child on the requesting socket.
+// Release it with `subscription.release.request`; there is no dedicated unsubscribe RPC.
+export const ProviderSubagentTimelineSubscribeRequestMessageSchema = z.object({
+  type: z.literal("agent.provider_subagents.timeline.subscribe.request"),
+  parentAgentId: z.string(),
+  subagentId: z.string(),
+  requestId: z.string(),
+});
+
 export const SetAgentTimelineSubscriptionRequestMessageSchema = z.object({
   type: z.literal("agent.timeline.set_subscription.request"),
   agentIds: z.array(z.string()),
@@ -3244,6 +3253,7 @@ export const SessionInboundMessageSchema = z.discriminatedUnion("type", [
   AgentTimelineListPromptsRequestMessageSchema,
   ProviderSubagentListRequestMessageSchema,
   ProviderSubagentTimelineRequestMessageSchema,
+  ProviderSubagentTimelineSubscribeRequestMessageSchema,
   SetAgentTimelineSubscriptionRequestMessageSchema,
   AgentForkContextRequestMessageSchema,
   SetAgentModeRequestMessageSchema,
@@ -3638,6 +3648,8 @@ export const ServerInfoStatusPayloadSchema = z
         projectedSubagentTimeline: z.boolean().optional(),
         // COMPAT(providerSubagentNesting): added in v0.7, remove gate after 2027-03-04.
         providerSubagentNesting: z.boolean().optional(),
+        // COMPAT(providerSubagentTimelineSubscriptions): added after v0.9.2, remove gate after 2027-03-27.
+        providerSubagentTimelineSubscriptions: z.boolean().optional(),
         // COMPAT(workspacePinning): added in v0.1.107, remove gate after 2027-01-12.
         workspacePinning: z.boolean().optional(),
         // COMPAT(workspaceMarkUnread): added in v0.5.0, remove after 2027-08-20.
@@ -4740,6 +4752,16 @@ export const ProviderSubagentUpdateMessageSchema = z.object({
       subagentId: z.string(),
     }),
   ]),
+});
+
+export const ProviderSubagentTimelineSubscribeResponseMessageSchema = z.object({
+  type: z.literal("agent.provider_subagents.timeline.subscribe.response"),
+  payload: z.object({
+    requestId: z.string(),
+    subscriptionId: z.string().optional(),
+    parentAgentId: z.string(),
+    subagentId: z.string(),
+  }),
 });
 
 export const SetAgentTimelineSubscriptionResponseMessageSchema = z.object({
@@ -6809,6 +6831,7 @@ export const SessionOutboundMessageSchema = z.discriminatedUnion("type", [
   ProviderSubagentListResponseMessageSchema,
   ProviderSubagentTimelineResponseMessageSchema,
   ProviderSubagentUpdateMessageSchema,
+  ProviderSubagentTimelineSubscribeResponseMessageSchema,
   SetAgentTimelineSubscriptionResponseMessageSchema,
   AgentAttentionRequiredMessageSchema,
   AgentForkContextResponseMessageSchema,
@@ -7431,6 +7454,7 @@ export const WSHelloMessageSchema = z.object({
       [CLIENT_CAPS.customModeIcons]: z.boolean().optional(),
       [CLIENT_CAPS.terminalReflowableSnapshot]: z.boolean().optional(),
       [CLIENT_CAPS.providerSubagents]: z.boolean().optional(),
+      [CLIENT_CAPS.providerSubagentTimelineSubscriptions]: z.boolean().optional(),
       [CLIENT_CAPS.projectUpdates]: z.boolean().optional(),
       [CLIENT_CAPS.compactProviderSnapshots]: z.boolean().optional(),
       [CLIENT_CAPS.providerSnapshotReferences]: z.boolean().optional(),

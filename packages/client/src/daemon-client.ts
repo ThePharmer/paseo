@@ -3360,6 +3360,24 @@ export class DaemonClient {
     return payload;
   }
 
+  /**
+   * Owns live timeline items for one provider child. Descriptor upserts and removes stay on the
+   * `agent.provider_subagents.update` event feed; timeline items arrive on this handle instead.
+   */
+  observeProviderSubagentTimeline(
+    parentAgentId: string,
+    subagentId: string,
+    options?: { signal?: AbortSignal },
+  ): OwnedSubscription<
+    CorrelatedResponsePayload<"agent.provider_subagents.timeline.subscribe.response">
+  > {
+    return this.observe(
+      "agent.provider_subagents.timeline.subscribe.response",
+      { type: "agent.provider_subagents.timeline.subscribe.request", parentAgentId, subagentId },
+      options,
+    );
+  }
+
   observeTimeline(
     agentIds: string[],
     options?: { signal?: AbortSignal },
