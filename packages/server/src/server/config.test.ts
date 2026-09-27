@@ -40,6 +40,55 @@ describe("server config", () => {
     expect(config.providerCatalogRefreshTimeoutMs).toBe(180_000);
   });
 
+  test("delivers assistant text by token unless configured otherwise", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-text-delivery-"));
+    roots.push(paseoHome);
+
+    expect(loadConfig(paseoHome, { env: {} }).assistantTextDelivery).toBe("token");
+
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ daemon: { assistantTextDelivery: "paragraph" } }),
+    );
+    const config = loadConfig(paseoHome, { env: {} });
+    expect(config.assistantTextDelivery).toBe("paragraph");
+    expect(config.configReload?.overrideControlledPaths).toEqual([]);
+  });
+
+  test("PASEO_ASSISTANT_TEXT_DELIVERY overrides config.json and ignores unknown values", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-text-delivery-env-"));
+    roots.push(paseoHome);
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ daemon: { assistantTextDelivery: "paragraph" } }),
+    );
+
+    const overridden = loadConfig(paseoHome, {
+      env: { PASEO_ASSISTANT_TEXT_DELIVERY: " Token " },
+    });
+    expect(overridden.assistantTextDelivery).toBe("token");
+    expect(overridden.configReload?.overrideControlledPaths).toEqual([
+      "daemon.assistantTextDelivery",
+    ]);
+
+    const ignored = loadConfig(paseoHome, {
+      env: { PASEO_ASSISTANT_TEXT_DELIVERY: "sentence" },
+    });
+    expect(ignored.assistantTextDelivery).toBe("paragraph");
+    expect(ignored.configReload?.overrideControlledPaths).toEqual([]);
+  });
+
+  test("rejects an unknown assistant text delivery in config.json", async () => {
+    const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-text-delivery-bad-"));
+    roots.push(paseoHome);
+    await writeFile(
+      path.join(paseoHome, "config.json"),
+      JSON.stringify({ daemon: { assistantTextDelivery: "sentence" } }),
+    );
+
+    expect(() => loadConfig(paseoHome, { env: {} })).toThrow();
+  });
+
   test("resolves reload state from the supplied validated snapshot", async () => {
     const paseoHome = await mkdtemp(path.join(os.tmpdir(), "paseo-config-snapshot-"));
     roots.push(paseoHome);

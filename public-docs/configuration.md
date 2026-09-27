@@ -74,7 +74,7 @@ Runtime-safe settings include relay enablement, MCP settings, browser tools, hos
 
 New homes keep relay disabled when you remove `daemon.relay.enabled`. A daemon whose config already omitted this field when it started keeps the legacy relay-enabled behavior for compatibility. Set `daemon.relay.enabled` explicitly when editing an older config.
 
-Listen addresses, authentication, relay endpoints and TLS, worktree allocation, service-proxy addresses, the bundled web UI, logging, speech, voice, credentials, and local model settings require a restart. Reload applies other valid edits in the same file before reporting those paths.
+Listen addresses, authentication, relay endpoints and TLS, worktree allocation, service-proxy addresses, the bundled web UI, assistant text delivery, logging, speech, voice, credentials, and local model settings require a restart. Reload applies other valid edits in the same file before reporting those paths.
 
 Deployment environment variables and legacy supervisor flags remain authoritative. Reload reports a changed file setting under `overrideControlledPaths` when a launch override prevents it from taking effect. This includes startup settings such as listen addresses, passwords, relay endpoints and TLS, service-proxy and web UI settings, logging, speech, and voice configuration. List settings such as hostnames and CORS origins still append across sources, so values from `config.json` continue to apply. Stop and relaunch the deployment without the override to make the file value authoritative.
 
@@ -97,6 +97,22 @@ New worktrees are created under `$PASEO_HOME/worktrees` by default. To place new
 ```
 
 Relative paths are resolved against `PASEO_HOME`. Existing worktrees remain where they are; changing this setting only changes where Paseo creates and discovers Paseo-managed worktrees going forward.
+
+## Assistant text delivery
+
+`daemon.assistantTextDelivery` controls how agent replies stream to your devices:
+
+- `"token"` (default): text appears as the agent writes it.
+- `"paragraph"`: each finished paragraph or code block appears at once, at most every 400ms. A partial paragraph shows up when the agent moves on to a tool call, finishes, or is interrupted.
+
+Paragraph delivery sends far fewer updates, which helps phones that slow down or run out of memory while a long reply streams.
+
+```bash
+paseo daemon config set daemon.assistantTextDelivery paragraph
+paseo daemon restart
+```
+
+The setting applies to every client of the daemon and takes effect after a restart. `PASEO_ASSISTANT_TEXT_DELIVERY=token|paragraph` overrides it for a foreground deployment.
 
 ## Voice
 
@@ -247,6 +263,7 @@ Set the persisted value in `config.json`:
 - `PASEO_WEB_UI_ENABLED`, enable or disable the daemon-served web UI
 - `PASEO_WEB_UI_DIST_DIR`, override the daemon web UI build directory
 - `PASEO_TRUSTED_PROXIES`, configure trusted reverse proxy ranges for `X-Forwarded-*` headers
+- `PASEO_ASSISTANT_TEXT_DELIVERY`, override `daemon.assistantTextDelivery` (`token` or `paragraph`)
 - `PASEO_LOG_CONSOLE_LEVEL`, override `log.console.level`
 - `PASEO_LOG_FILE_LEVEL`, override `log.file.level`
 - `PASEO_LOG_FILE_PATH`, override `log.file.path`
