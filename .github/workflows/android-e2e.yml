@@ -71,7 +71,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: android-e2e-${{ inputs.build_run_id }}
+  # Measurement runs of one APK differ by scenario, daemon and delivery; each must run, not replace a pending sibling.
+  group: android-e2e-${{ inputs.build_run_id }}-${{ inputs.scenario }}-${{ inputs.daemon_ref }}-${{ inputs.text_delivery }}
   cancel-in-progress: false
 
 env:
