@@ -30,11 +30,11 @@ iOS and Android run Hermes, which has no JIT. Each reveal step re-renders the gr
 
 | live block                           | Node (V8) p50 | Hermes p50 | Hermes p95 |
 | ------------------------------------ | ------------- | ---------- | ---------- |
-| tight list, 4,000 chars              | 1.4ms         | 14ms       | 18ms       |
-| code fence, 10,000 chars, full parse | 5.3ms         | 75ms       | 194ms      |
+| tight list, 4,000 chars              | 1.6ms         | 15ms       | 21ms       |
+| code fence, 10,000 chars, full parse | 5.5ms         | 77ms       | 109ms      |
 | code fence, 10,000 chars, background | 0.6ms         | 6ms        | 8ms        |
 
-Lezer's full parse is almost all of the code fence cost: about 10ms per 1,000 characters on Hermes. That is why highlighting a growing or long code block never happens during render (see the invariants below). Node's numbers understate Hermes cost by roughly ten times, so measure hot paths under Hermes.
+Lezer's full parse is almost all of the code fence cost: about 10ms per 1,000 characters on Hermes. That is why highlighting a growing or long code block never happens during render (see the invariants below). The background path then spends about 10ms per frame catching up, in slices; its longest measured slice is 8ms against a 4ms target, since single parser and tokenizer steps can overrun it. Node's numbers understate Hermes cost by roughly ten times, so measure hot paths under Hermes.
 
 ## Invariants
 
