@@ -27,6 +27,11 @@ export interface ProviderSubagentTimelineState {
 interface ProviderSubagentState {
   descriptors: Map<string, ProviderSubagentDescriptorPayload>;
   timelines: Map<string, ProviderSubagentTimelineState>;
+  /**
+   * Open panes per child. The daemon broadcasts every child's timeline to every client, so
+   * the app keeps a transcript only while a pane observes it; opening a pane fetches the tail.
+   */
+  observedTimelines: Map<string, number>;
   hiddenFromTrack: Set<string>;
   hideFromTrack(serverId: string, parentAgentId: string, subagentIds: readonly string[]): void;
   replaceList(
@@ -48,6 +53,8 @@ interface ProviderSubagentState {
       { type: "agent.provider_subagents.timeline.get.response" }
     >["payload"],
   ): void;
+  retainTimeline(serverId: string, parentAgentId: string, subagentId: string): void;
+  releaseTimeline(serverId: string, parentAgentId: string, subagentId: string): void;
 }
 
 export function providerSubagentKey(
@@ -146,6 +153,7 @@ function settleTimeline(
 export const useProviderSubagentStore = create<ProviderSubagentState>((set) => ({
   descriptors: new Map(),
   timelines: new Map(),
+  observedTimelines: new Map(),
   hiddenFromTrack: new Set(),
   hideFromTrack(serverId, parentAgentId, subagentIds) {
     set((state) => {
@@ -218,6 +226,9 @@ export const useProviderSubagentStore = create<ProviderSubagentState>((set) => (
         return { descriptors, timelines };
       }
       const key = providerSubagentKey(serverId, payload.parentAgentId, payload.subagentId);
+      if (!state.observedTimelines.has(key)) {
+        return state;
+      }
       const existing = state.timelines.get(key);
       if (existing?.epoch && existing.epoch !== payload.epoch) {
         return state;
@@ -263,6 +274,9 @@ export const useProviderSubagentStore = create<ProviderSubagentState>((set) => (
     }
     set((state) => {
       const key = providerSubagentKey(serverId, payload.parentAgentId, payload.subagentId);
+      if (!state.observedTimelines.has(key)) {
+        return state;
+      }
       const existing = state.timelines.get(key);
       const current = existing ?? EMPTY_TIMELINE;
       // Normalize optional wire metadata at the child timeline boundary. Legacy
@@ -319,6 +333,32 @@ export const useProviderSubagentStore = create<ProviderSubagentState>((set) => (
       return { timelines };
     });
   },
+  retainTimeline(serverId, parentAgentId, subagentId) {
+    set((state) => {
+      const key = providerSubagentKey(serverId, parentAgentId, subagentId);
+      const observedTimelines = new Map(state.observedTimelines);
+      observedTimelines.set(key, (observedTimelines.get(key) ?? 0) + 1);
+      return { observedTimelines };
+    });
+  },
+  releaseTimeline(serverId, parentAgentId, subagentId) {
+    set((state) => {
+      const key = providerSubagentKey(serverId, parentAgentId, subagentId);
+      const observers = state.observedTimelines.get(key);
+      if (observers === undefined) {
+        return state;
+      }
+      const observedTimelines = new Map(state.observedTimelines);
+      if (observers > 1) {
+        observedTimelines.set(key, observers - 1);
+        return { observedTimelines };
+      }
+      observedTimelines.delete(key);
+      const timelines = new Map(state.timelines);
+      timelines.delete(key);
+      return { observedTimelines, timelines };
+    });
+  },
 }));
 
 /** Owns child history bootstrap and recovery while a pane observes the child. */
@@ -338,6 +378,7 @@ export function observeProviderSubagentTimeline({
   reportError: (error: unknown) => void;
 }): () => void {
   const key = providerSubagentKey(serverId, parentAgentId, subagentId);
+  useProviderSubagentStore.getState().retainTimeline(serverId, parentAgentId, subagentId);
   let active = true;
   let fetching = false;
   const refresh = async () => {
@@ -374,5 +415,6 @@ export function observeProviderSubagentTimeline({
   return () => {
     active = false;
     unsubscribe();
+    useProviderSubagentStore.getState().releaseTimeline(serverId, parentAgentId, subagentId);
   };
 }
