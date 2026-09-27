@@ -7,8 +7,10 @@ import { createTestLogger } from "../../../test-utils/test-logger.js";
 import { AgentManager } from "../agent-manager.js";
 import type { AgentStreamEvent, AgentTimelineItem } from "../agent-sdk-types.js";
 import {
+  buildCodeBlockStreamText,
   MOCK_LOAD_TEST_DEFAULT_MODEL_ID,
   MockLoadTestAgentClient,
+  parseCodeBlockStreamPrompt,
 } from "./mock-load-test-agent.js";
 
 type PermissionRequestedEvent = Extract<AgentStreamEvent, { type: "permission_requested" }>;
@@ -107,6 +109,65 @@ describe("MockLoadTestAgentClient", () => {
         .length,
     ).toBeGreaterThan(5);
     expect(events.at(-1)).toMatchObject({ type: "turn_completed", provider: "mock" });
+  });
+
+  test("streams prose and TypeScript code blocks as sub-word tokens selected by prompt", async () => {
+    vi.useFakeTimers();
+    const client = new MockLoadTestAgentClient();
+    const session = await client.createSession({
+      provider: "mock",
+      cwd: process.cwd(),
+      model: "ten-second-stream",
+    });
+    const events: AgentStreamEvent[] = [];
+    session.subscribe((event) => events.push(event));
+    const assistantChunks = () =>
+      events.flatMap((event) =>
+        event.type === "timeline" && event.item.type === "assistant_message"
+          ? [event.item.text]
+          : [],
+      );
+
+    const resultPromise = session.run("Stream 3 code blocks of 22 lines every 5 ms.");
+    await vi.advanceTimersByTimeAsync(0);
+    const afterFirstToken = assistantChunks().length;
+    await vi.advanceTimersByTimeAsync(4);
+    expect(assistantChunks()).toHaveLength(afterFirstToken);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(assistantChunks()).toHaveLength(afterFirstToken + 1);
+    await vi.runAllTimersAsync();
+
+    const text = assistantChunks().join("");
+    await expect(resultPromise).resolves.toMatchObject({ finalText: text, canceled: false });
+    expect(text).toBe(buildCodeBlockStreamText({ blocks: 3, linesPerBlock: 22, intervalMs: 5 }));
+    const blocks = Array.from(text.matchAll(/```ts\n([\s\S]*?)\n```/g), (match) => match[1] ?? "");
+    expect(blocks).toHaveLength(3);
+    expect(blocks.map((block) => block.split("\n").length)).toEqual([22, 22, 22]);
+    expect(blocks[0]).toContain("\n\nexport async function loadSection1Batch2(");
+    expect(text.startsWith("Section 1 of 3 wires the batch loader")).toBe(true);
+    expect(Math.max(...assistantChunks().map((chunk) => chunk.trim().length))).toBeLessThanOrEqual(
+      5,
+    );
+    expect(events.at(-1)).toMatchObject({ type: "turn_completed", provider: "mock" });
+  });
+
+  test("code block stream prompt falls back to defaults and caps its sizes", () => {
+    expect(parseCodeBlockStreamPrompt("Stream code blocks.")).toEqual({
+      blocks: 20,
+      linesPerBlock: 40,
+      intervalMs: 20,
+    });
+    expect(parseCodeBlockStreamPrompt("Stream 7 code blocks every 3 ms.")).toEqual({
+      blocks: 7,
+      linesPerBlock: 40,
+      intervalMs: 3,
+    });
+    expect(parseCodeBlockStreamPrompt("Stream 500 code blocks of 9000 lines every 1 ms.")).toEqual({
+      blocks: 200,
+      linesPerBlock: 400,
+      intervalMs: 1,
+    });
+    expect(parseCodeBlockStreamPrompt("Write some code blocks.")).toBeNull();
   });
 
   test("can withhold the provider user-message echo until an immediate interrupt", async () => {
@@ -543,6 +604,62 @@ describe("MockLoadTestAgentClient", () => {
         .filter((item) => item.type === "tool_call" && item.status === "completed")
         .map((item) => (item.type === "tool_call" ? item.name : ""));
       expect(runningTools).toEqual(expect.arrayContaining(["read", "grep", "edit", "bash"]));
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  });
+
+  test("agent manager delivers the code block stream by paragraph when configured", async () => {
+    vi.useFakeTimers();
+    const workdir = mkdtempSync(join(tmpdir(), "paseo-mock-load-test-"));
+    try {
+      const agentId = "00000000-0000-4000-8000-000000000001";
+      const manager = new AgentManager({
+        clients: { mock: new MockLoadTestAgentClient() },
+        idFactory: () => agentId,
+        logger: createTestLogger(),
+        assistantTextDelivery: "paragraph",
+      });
+      const deliveries: string[] = [];
+      manager.subscribe(
+        (event) => {
+          if (
+            event.type === "agent_stream" &&
+            event.event.type === "timeline" &&
+            event.event.item.type === "assistant_message"
+          ) {
+            deliveries.push(event.event.item.text);
+          }
+        },
+        { replayState: false },
+      );
+      await manager.createAgent(
+        { provider: "mock", cwd: workdir, model: "ten-second-stream" },
+        agentId,
+        { workspaceId: undefined },
+      );
+
+      const resultPromise = manager.runAgent(
+        agentId,
+        "Stream 4 code blocks of 30 lines every 5 ms.",
+      );
+      await vi.advanceTimersByTimeAsync(20_000);
+      await resultPromise;
+
+      expect(deliveries.join("")).toBe(
+        buildCodeBlockStreamText({ blocks: 4, linesPerBlock: 30, intervalMs: 5 }),
+      );
+      // Every delivery ends a paragraph or a code block, and none ends inside a
+      // fence: clients only ever receive finished Markdown blocks.
+      let delivered = "";
+      for (const text of deliveries) {
+        delivered += text;
+        expect(text.endsWith("\n\n") || text.endsWith("```\n")).toBe(true);
+        expect((delivered.match(/^```/gm) ?? []).length % 2).toBe(0);
+      }
+      // At 5ms per token each block takes far longer than the pacing interval,
+      // so every prose paragraph and every code block lands as one delivery.
+      expect(deliveries).toHaveLength(2 * 4);
     } finally {
       rmSync(workdir, { recursive: true, force: true });
     }

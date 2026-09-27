@@ -227,6 +227,12 @@ interface AgentStreamStressRequest {
   coalesced: boolean;
 }
 
+export interface CodeBlockStreamRequest {
+  blocks: number;
+  linesPerBlock: number;
+  intervalMs: number;
+}
+
 type SteeringReplayShape = "claude" | "codex";
 
 interface MockQuestionOption {
@@ -423,6 +429,102 @@ function parseAgentStreamStressPrompt(prompt: AgentPromptInput): AgentStreamStre
     count: Math.min(count, 5_000),
     coalesced: Boolean(match[2]),
   };
+}
+
+const CODE_BLOCK_STREAM_DEFAULTS: CodeBlockStreamRequest = {
+  blocks: 20,
+  linesPerBlock: 40,
+  intervalMs: 20,
+};
+const CODE_BLOCK_STREAM_MAX_BLOCKS = 200;
+const CODE_BLOCK_STREAM_MAX_LINES = 400;
+
+function parseCountOrDefault(value: string | undefined, fallback: number, max: number): number {
+  const count = Number(value);
+  if (value === undefined || !Number.isSafeInteger(count) || count <= 0) {
+    return fallback;
+  }
+  return Math.min(count, max);
+}
+
+/**
+ * `Stream N code blocks of M lines every S ms.` Any of N, `of M lines`, and
+ * `every S ms` may be left out and falls back to 20 blocks, 40 lines, 20ms.
+ */
+export function parseCodeBlockStreamPrompt(
+  prompt: AgentPromptInput,
+): CodeBlockStreamRequest | null {
+  const match =
+    /stream\s+(?:(\d+)\s+)?code\s+blocks(?:\s+of\s+(\d+)\s+lines?)?(?:\s+every\s+(\d+)\s*ms)?/i.exec(
+      promptToText(prompt),
+    );
+  if (!match) {
+    return null;
+  }
+  const intervalMs = Number(match[3]);
+  return {
+    blocks: parseCountOrDefault(
+      match[1],
+      CODE_BLOCK_STREAM_DEFAULTS.blocks,
+      CODE_BLOCK_STREAM_MAX_BLOCKS,
+    ),
+    linesPerBlock: parseCountOrDefault(
+      match[2],
+      CODE_BLOCK_STREAM_DEFAULTS.linesPerBlock,
+      CODE_BLOCK_STREAM_MAX_LINES,
+    ),
+    intervalMs:
+      match[3] !== undefined && Number.isSafeInteger(intervalMs)
+        ? intervalMs
+        : CODE_BLOCK_STREAM_DEFAULTS.intervalMs,
+  };
+}
+
+// One loader function per template pass, with a blank line between functions so
+// a code block carries blank lines that must not end it.
+function buildCodeBlockLines(section: number, lineCount: number): string[] {
+  const lines: string[] = [];
+  for (let batch = 1; lines.length < lineCount; batch += 1) {
+    lines.push(
+      `export async function loadSection${section}Batch${batch}(`,
+      "  client: ApiClient,",
+      "  cursor: string | null,",
+      "): Promise<BatchResult> {",
+      `  const response = await client.request<BatchPage>("/sections/${section}/items", {`,
+      "    cursor,",
+      `    limit: ${batch * 8 + 16},`,
+      "  });",
+      "  if (!response.ok) {",
+      `    throw new Error(\`Failed to load section ${section} batch ${batch}: \${response.status}\`);`,
+      "  }",
+      `  const items = response.body.items.filter((item) => item.visible && item.score > ${batch % 7}.5);`,
+      "  for (const item of items) {",
+      `    cache.set(item.id, { ...item, fetchedAt: Date.now(), section: ${section} });`,
+      "  }",
+      "  return { items, nextCursor: response.body.nextCursor ?? null };",
+      "}",
+      "",
+    );
+  }
+  return lines.slice(0, lineCount);
+}
+
+export function buildCodeBlockStreamText(request: CodeBlockStreamRequest): string {
+  const sections: string[] = [];
+  for (let section = 1; section <= request.blocks; section += 1) {
+    sections.push(
+      [
+        `Section ${section} of ${request.blocks} wires the batch loader for this part of the ` +
+          "feed into the shared cache, so later steps can reuse fetched items without asking " +
+          "the API again.",
+        "",
+        "```ts",
+        ...buildCodeBlockLines(section, request.linesPerBlock),
+        "```",
+      ].join("\n"),
+    );
+  }
+  return `${sections.join("\n\n")}\n`;
 }
 
 function parseStructuredBranchNamePrompt(
@@ -834,13 +936,18 @@ export class MockLoadTestAgentSession implements AgentSession {
     const structuredBranchName = parseStructuredBranchNamePrompt(prompt);
     const settledAssistantImageMarkdown = parseSettledAssistantImageMarkdown(prompt);
     const steeringReplayShape = parseSteeringReplayShape(prompt);
+    const codeBlockStream = parseCodeBlockStreamPrompt(prompt);
     const scheduleTurn = () => {
       if (shouldEmitTurnFailure(prompt)) {
         this.scheduleFailedTurn(turn);
       } else if (steeringReplayShape) {
         this.scheduleSteeringReplayTurn(turn, steeringReplayShape);
       } else if (this.streamingAssistantResponse !== null) {
-        this.scheduleStreamingAssistantTurn(turn, this.streamingAssistantResponse);
+        this.scheduleStreamingAssistantTurn(
+          turn,
+          this.streamingAssistantResponse,
+          this.streamingAssistantIntervalMs,
+        );
       } else if (this.assistantResponse !== null) {
         this.scheduleSettledAssistantTurn(turn, this.assistantResponse);
       } else if (structuredBranchName) {
@@ -851,6 +958,12 @@ export class MockLoadTestAgentSession implements AgentSession {
         this.schedulePlanApprovalTurn(turn);
       } else if (questionPrompt) {
         this.scheduleQuestionPromptTurn(turn, questionPrompt);
+      } else if (codeBlockStream) {
+        this.scheduleStreamingAssistantTurn(
+          turn,
+          buildCodeBlockStreamText(codeBlockStream),
+          codeBlockStream.intervalMs,
+        );
       } else if (largePayload) {
         this.scheduleLargePayloadTurn(turn, largePayload);
       } else if (stress) {
@@ -1220,7 +1333,11 @@ export class MockLoadTestAgentSession implements AgentSession {
     turn.timer.unref?.();
   }
 
-  private scheduleStreamingAssistantTurn(turn: ActiveTurn, finalText: string): void {
+  private scheduleStreamingAssistantTurn(
+    turn: ActiveTurn,
+    finalText: string,
+    intervalMs: number,
+  ): void {
     const tokens = tokenize(finalText);
     const emitNext = () => {
       if (this.activeTurn !== turn) {
@@ -1239,7 +1356,7 @@ export class MockLoadTestAgentSession implements AgentSession {
         text: token,
         messageId: turn.assistantMessageId,
       });
-      turn.timer = setTimeout(emitNext, this.streamingAssistantIntervalMs);
+      turn.timer = setTimeout(emitNext, intervalMs);
       turn.timer.unref?.();
     };
     turn.timer = setTimeout(emitNext, 0);
