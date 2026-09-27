@@ -819,6 +819,16 @@ function childTimelineTexts(client: ConnectedClient): string[] {
   );
 }
 
+function childTimelineRoutes(client: ConnectedClient): string[] {
+  return client.messages.flatMap((message) =>
+    message.type === "agent.provider_subagents.update" &&
+    message.payload.kind === "timeline" &&
+    message.payload.item.type === "assistant_message"
+      ? [`${message.payload.subscriptionId}:${message.payload.item.text}`]
+      : [],
+  );
+}
+
 function childDescriptorChanges(client: ConnectedClient): string[] {
   return client.messages.flatMap((message) => {
     if (message.type !== "agent.provider_subagents.update") return [];
@@ -941,7 +951,7 @@ test("capable sockets receive provider child timelines only for subscribed child
   expect(childTimelineTexts(capable)).toEqual([]);
 }, 30_000);
 
-test("a socket with two subscriptions to one child receives each item once, on the newest", async () => {
+test("every subscription a socket holds to one child receives each item, through a release in flight", async () => {
   const provider = await startProviderChildDaemon();
   const capable = await connectChildObserver({ clientId: "child-handles", scoped: true });
   const agent = await capable.client.createAgent({
@@ -965,24 +975,26 @@ test("a socket with two subscriptions to one child receives each item once, on t
     return texts;
   }
   const older = capable.client.observeProviderSubagentTimeline(agent.id, "child-a");
-  await older.ready;
+  const olderId = (await older.ready).subscriptionId;
   const newer = capable.client.observeProviderSubagentTimeline(agent.id, "child-a");
-  await newer.ready;
+  const newerId = (await newer.ready).subscriptionId;
   const received = { older: track(older), newer: track(newer) };
 
   pushChildText(provider, "child-a", "both open");
-  await capable.next(isChildTimeline("child-a", "both open"), "one delivery per socket");
+  await capable.next(isChildTimeline("child-a", "both open"), "delivery to both handles");
   await capable.barrier("child-handles-both");
-  expect(childTimelineTexts(capable)).toEqual(["child-a:both open"]);
-  expect(received).toEqual({ older: [], newer: ["both open"] });
+  expect(childTimelineRoutes(capable)).toEqual([`${olderId}:both open`, `${newerId}:both open`]);
+  expect(received).toEqual({ older: ["both open"], newer: ["both open"] });
 
-  await newer.release();
+  // release() drops the newer route on the client at once. The final item is pushed before the
+  // host reads the release, so it still goes out tagged for both subscriptions.
   capable.clear();
-  pushChildText(provider, "child-a", "older remains");
-  await capable.next(isChildTimeline("child-a", "older remains"), "remaining handle delivery");
-  await capable.barrier("child-handles-older");
-  expect(childTimelineTexts(capable)).toEqual(["child-a:older remains"]);
-  expect(received).toEqual({ older: ["older remains"], newer: ["both open"] });
+  const releasing = newer.release();
+  pushChildText(provider, "child-a", "final");
+  await releasing;
+  await capable.barrier("child-handles-final");
+  expect(childTimelineRoutes(capable)).toEqual([`${olderId}:final`, `${newerId}:final`]);
+  expect(received).toEqual({ older: ["both open", "final"], newer: ["both open"] });
 }, 30_000);
 
 test("provider child subscriptions belong to one socket and survive only through reconnect", async () => {
