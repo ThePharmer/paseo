@@ -4,11 +4,14 @@ import type { AgentProvider, AgentStreamEvent } from "./agent-sdk-types.js";
 import {
   AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
   AgentStreamCoalescer,
+  PARAGRAPH_DELIVERY_MAX_HELD_CHARS,
+  PARAGRAPH_DELIVERY_MIN_INTERVAL_MS,
   type AgentStreamCoalescerFlush,
   type AgentStreamCoalescerTimers,
 } from "./agent-stream-coalescer.js";
+import type { AssistantTextDelivery } from "../persisted-config.js";
 
-function createHarness(windowMs?: number) {
+function createHarness(windowMs?: number, assistantTextDelivery?: AssistantTextDelivery) {
   const flushes: AgentStreamCoalescerFlush[] = [];
   const timers: AgentStreamCoalescerTimers = {
     setTimeout,
@@ -16,6 +19,7 @@ function createHarness(windowMs?: number) {
   };
   const coalescer = new AgentStreamCoalescer({
     ...(windowMs !== undefined ? { windowMs } : {}),
+    ...(assistantTextDelivery !== undefined ? { assistantTextDelivery } : {}),
     timers,
     onFlush: (payload) => {
       flushes.push(payload);
@@ -753,5 +757,210 @@ describe("AgentStreamCoalescer", () => {
       { type: "reasoning", text: "r" },
       { type: "assistant_message", text: "b" },
     ]);
+  });
+});
+
+describe("AgentStreamCoalescer paragraph delivery", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function createParagraphHarness() {
+    return createHarness(undefined, "paragraph");
+  }
+
+  function assistantTexts(flushes: AgentStreamCoalescerFlush[]): string[] {
+    return flushes.flatMap((flush) =>
+      flush.item.type === "assistant_message" ? [flush.item.text] : [],
+    );
+  }
+
+  test("token delivery flushes a partial paragraph every window", async () => {
+    const { coalescer, flushes } = createHarness(undefined, "token");
+
+    coalescer.handle("agent-1", assistant("First "));
+    coalescer.handle("agent-1", assistant("half"));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+
+    expect(assistantTexts(flushes)).toEqual(["First ", "half"]);
+  });
+
+  test("holds assistant text until a blank line ends the paragraph", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("First para"));
+    coalescer.handle("agent-1", assistant("graph.\n"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(flushes).toEqual([]);
+
+    coalescer.handle("agent-1", assistant("\nSecond"));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+
+    expect(flushes).toEqual([
+      {
+        agentId: "agent-1",
+        item: { type: "assistant_message", text: "First paragraph.\n\n" },
+        provider: "codex",
+      },
+    ]);
+
+    coalescer.flushFor("agent-1");
+    expect(assistantTexts(flushes)).toEqual(["First paragraph.\n\n", "Second"]);
+  });
+
+  test("holds a fenced code block across blank lines until the fence closes", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("```ts\nconst a = 1;\n\n\nconst b = 2;\n"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(flushes).toEqual([]);
+
+    coalescer.handle("agent-1", assistant("```\nAfter"));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+
+    expect(assistantTexts(flushes)).toEqual(["```ts\nconst a = 1;\n\n\nconst b = 2;\n```\n"]);
+  });
+
+  test("does not treat a fence line with an info string as a closing fence", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("```ts\nconst a = 1;\n```js\n\nconst b = 2;\n"));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(flushes).toEqual([]);
+  });
+
+  test(`spaces releases of one message at least ${PARAGRAPH_DELIVERY_MIN_INTERVAL_MS}ms apart`, async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("One.\n\n"));
+    expect(assistantTexts(flushes)).toEqual(["One.\n\n"]);
+
+    await vi.advanceTimersByTimeAsync(100);
+    coalescer.handle("agent-1", assistant("Two.\n\n"));
+    await vi.advanceTimersByTimeAsync(100);
+    coalescer.handle("agent-1", assistant("Three.\n\nFour"));
+    await vi.advanceTimersByTimeAsync(PARAGRAPH_DELIVERY_MIN_INTERVAL_MS - 201);
+    expect(assistantTexts(flushes)).toEqual(["One.\n\n"]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(assistantTexts(flushes)).toEqual(["One.\n\n", "Two.\n\nThree.\n\n"]);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(assistantTexts(flushes)).toEqual(["One.\n\n", "Two.\n\nThree.\n\n"]);
+  });
+
+  test("releases the first paragraph of a new message without waiting for pacing", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("One.\n\n", { messageId: "m1" }));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+    coalescer.handle("agent-1", assistant("Other.\n\n", { messageId: "m2" }));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+
+    expect(assistantTexts(flushes)).toEqual(["One.\n\n", "Other.\n\n"]);
+  });
+
+  test(`releases held text past ${PARAGRAPH_DELIVERY_MAX_HELD_CHARS} characters at the last complete line`, async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+    const line = `${"x".repeat(99)}\n`;
+    const lines = line.repeat(Math.ceil(PARAGRAPH_DELIVERY_MAX_HELD_CHARS / line.length));
+
+    coalescer.handle("agent-1", assistant(lines.slice(0, PARAGRAPH_DELIVERY_MAX_HELD_CHARS)));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(flushes).toEqual([]);
+
+    coalescer.handle("agent-1", assistant(`${lines.slice(PARAGRAPH_DELIVERY_MAX_HELD_CHARS)}tail`));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+
+    expect(assistantTexts(flushes)).toEqual([lines]);
+    coalescer.flushFor("agent-1");
+    expect(assistantTexts(flushes)).toEqual([lines, "tail"]);
+  });
+
+  test("keeps the rest of a code block held after a safety release inside it", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+    const code = `\`\`\`ts\n${"const value = 1;\n".repeat(
+      Math.ceil(PARAGRAPH_DELIVERY_MAX_HELD_CHARS / 17) + 1,
+    )}`;
+
+    coalescer.handle("agent-1", assistant(code));
+    expect(assistantTexts(flushes)).toEqual([code]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    coalescer.handle("agent-1", assistant("\nconst after = 2;\n\n"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(assistantTexts(flushes)).toEqual([code]);
+
+    coalescer.handle("agent-1", assistant("```\n"));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+    expect(assistantTexts(flushes)).toEqual([code, "\nconst after = 2;\n\n```\n"]);
+  });
+
+  test("releases held text before a tool call so order is preserved", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("Let me check"));
+    coalescer.handle("agent-1", toolCall({ output: "running" }));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+
+    expect(flushes.map((flush) => flush.item.type)).toEqual(["assistant_message", "tool_call"]);
+    expect(assistantTexts(flushes)).toEqual(["Let me check"]);
+  });
+
+  test("releases held text before reasoning and keeps reasoning on token delivery", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("Partial"));
+    coalescer.handle("agent-1", reasoning("thinking"));
+    coalescer.handle("agent-1", reasoning(" more"));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+
+    expect(flushes.map((flush) => flush.item)).toEqual([
+      { type: "assistant_message", text: "Partial" },
+      { type: "reasoning", text: "thinking more" },
+    ]);
+  });
+
+  test("keeps a partial paragraph held across usage updates but not across turn events", () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("Partial"));
+    coalescer.flushBefore("agent-1", {
+      type: "usage_updated",
+      provider: "codex",
+      usage: { contextWindowUsedTokens: 10 },
+    });
+    expect(flushes).toEqual([]);
+
+    coalescer.flushBefore("agent-1", { type: "turn_completed", provider: "codex" });
+    expect(assistantTexts(flushes)).toEqual(["Partial"]);
+  });
+
+  test("flushBefore releases a partial paragraph in token delivery for any event", () => {
+    const { coalescer, flushes } = createHarness(undefined, "token");
+    primeLeadingEdge(coalescer, flushes);
+
+    coalescer.handle("agent-1", assistant("Partial"));
+    coalescer.flushBefore("agent-1", {
+      type: "usage_updated",
+      provider: "codex",
+      usage: { contextWindowUsedTokens: 10 },
+    });
+
+    expect(assistantTexts(flushes)).toEqual(["Partial"]);
+  });
+
+  test("flushAndDiscard releases held text", () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("Interrupted mid"));
+    coalescer.flushAndDiscard("agent-1");
+
+    expect(assistantTexts(flushes)).toEqual(["Interrupted mid"]);
   });
 });

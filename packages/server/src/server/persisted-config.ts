@@ -16,6 +16,9 @@ import { PaseoServicePortAllocationSchema } from "@getpaseo/protocol/paseo-confi
 
 export const LogLevelSchema = z.enum(["trace", "debug", "info", "warn", "error", "fatal"]);
 export const LogFormatSchema = z.enum(["pretty", "json"]);
+// How the daemon hands assistant text to clients; see docs/agent-stream-performance.md.
+export const AssistantTextDeliverySchema = z.enum(["token", "paragraph"]);
+export type AssistantTextDelivery = z.infer<typeof AssistantTextDeliverySchema>;
 
 const LogConfigSchema = z
   .object({
@@ -259,6 +262,7 @@ export const PersistedConfigSchema = z
           .optional(),
         autoArchiveAfterMerge: z.boolean().optional(),
         enableTerminalAgentHooks: z.boolean().optional(),
+        assistantTextDelivery: AssistantTextDeliverySchema.optional(),
         appendSystemPrompt: z.string().optional(),
         terminalProfiles: z.array(TerminalProfileSchema).optional(),
         agentProfiles: z.array(AgentProfileSchema).optional(),

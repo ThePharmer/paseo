@@ -71,6 +71,7 @@ import {
   AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
   AgentStreamCoalescer,
 } from "./agent-stream-coalescer.js";
+import type { AssistantTextDelivery } from "../persisted-config.js";
 import { limitAgentTimelineItemContent } from "./agent-timeline-content.js";
 import {
   AgentRunState,
@@ -340,6 +341,7 @@ export interface AgentManagerOptions {
   resolvePaseoToolPolicy?: (provider: AgentProvider) => ProviderPaseoToolsPolicy | undefined;
   appendSystemPrompt?: string;
   agentStreamCoalesceWindowMs?: number;
+  assistantTextDelivery?: AssistantTextDelivery;
   rescueTimeouts?: AgentManagerRescueTimeouts;
   beforeSteerUnavailableFallback?: (input: {
     agentId: string;
@@ -786,6 +788,7 @@ export class AgentManager {
     this.beforeSteerUnavailableFallback = options.beforeSteerUnavailableFallback;
     this.agentStreamCoalescer = new AgentStreamCoalescer({
       windowMs: options.agentStreamCoalesceWindowMs ?? AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
+      assistantTextDelivery: options.assistantTextDelivery,
       timers: { setTimeout, clearTimeout },
       onFlush: ({ agentId, item, provider, turnId }) => {
         const event = this.recordAndDispatchTimelineItem(agentId, item, provider, turnId);
@@ -2403,6 +2406,7 @@ export class AgentManager {
   ): Promise<{ seq: number; epoch: string }> {
     const agent = this.requireAgent(agentId);
     item = limitAgentTimelineItemContent(item);
+    this.agentStreamCoalescer.flushFor(agentId);
     this.touchUpdatedAt(agent);
     const row = this.recordTimeline(agentId, item);
     this.dispatchStream(
@@ -3026,6 +3030,9 @@ export class AgentManager {
     if (!run) {
       return { status: "not_running" };
     }
+
+    // Text held for a paragraph boundary lands before the interrupt settles.
+    this.agentStreamCoalescer.flushFor(agentId);
 
     const interruptAcknowledged = await this.interruptSession(agent.session, agentId);
     const settlement = await this.waitWithTimeout({
@@ -4182,7 +4189,7 @@ export class AgentManager {
         this.traceCoalescerBuffered(agent, event, eventTurnId);
         return false;
       }
-      this.agentStreamCoalescer.flushFor(agent.id);
+      this.agentStreamCoalescer.flushBefore(agent.id, event);
     }
 
     let terminalDisposition: ActiveTurnTerminalDisposition = "untracked";
@@ -4687,6 +4694,7 @@ export class AgentManager {
     if (this.timelineStore.getSubmittedUserMessage(agent.id, clientMessageId)) {
       return;
     }
+    this.agentStreamCoalescer.flushFor(agent.id);
     this.touchUpdatedAt(agent);
     agent.lastUserMessageAt = new Date();
     const item: AgentTimelineItem = {

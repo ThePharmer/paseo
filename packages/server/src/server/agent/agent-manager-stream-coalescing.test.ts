@@ -5,7 +5,11 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../test-utils/test-logger.js";
 import { AgentManager, type AgentManagerEvent } from "./agent-manager.js";
-import { AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS } from "./agent-stream-coalescer.js";
+import {
+  AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS,
+  PARAGRAPH_DELIVERY_MIN_INTERVAL_MS,
+} from "./agent-stream-coalescer.js";
+import type { AssistantTextDelivery } from "../persisted-config.js";
 import type { AgentTimelineRow } from "./agent-timeline-store-types.js";
 import { projectTimelineRows } from "./timeline-projection.js";
 import type {
@@ -243,13 +247,19 @@ interface Harness {
   cleanup: () => void;
 }
 
-function createHarness(options?: { provider?: AgentProvider }): Harness {
+function createHarness(options?: {
+  provider?: AgentProvider;
+  assistantTextDelivery?: AssistantTextDelivery;
+}): Harness {
   const workdir = mkdtempSync(join(tmpdir(), "agent-manager-stream-coalescing-"));
   const client = new TestAgentClient(options?.provider ?? "codex");
   const manager = new AgentManager({
     clients: { [client.provider]: client },
     idFactory: createIdFactory(),
     logger: createTestLogger(),
+    ...(options?.assistantTextDelivery
+      ? { assistantTextDelivery: options.assistantTextDelivery }
+      : {}),
   });
   const events: AgentManagerEvent[] = [];
   manager.subscribe((event) => events.push(event), { replayState: false });
@@ -1414,6 +1424,153 @@ describe("target coalesced behavior", () => {
         { type: "assistant_message", text: "b1b2" },
       ]);
       expect(getTimelineStreamEvents(harness.events, agentId)).toHaveLength(4);
+    } finally {
+      harness.cleanup();
+    }
+  });
+});
+
+describe("paragraph assistant text delivery", () => {
+  function usageUpdated(): AgentStreamEvent {
+    return {
+      type: "usage_updated",
+      provider: "codex",
+      usage: { contextWindowUsedTokens: 10 },
+      turnId: "turn-1",
+    };
+  }
+
+  function liveTimelineItems(harness: Harness, agentId: string): AgentTimelineItem[] {
+    return getTimelineStreamEvents(harness.events, agentId).flatMap((event) =>
+      event.type === "agent_stream" && event.event.type === "timeline" ? [event.event.item] : [],
+    );
+  }
+
+  test("token delivery is the default and streams a partial paragraph", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness();
+    try {
+      const { agentId, session } = await createManagedSession(harness);
+
+      session.pushEvent(assistant("Partial ", "codex", "turn-1"));
+      session.pushEvent(assistant("text", "codex", "turn-1"));
+      await waitForSessionEventQueue();
+      await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS);
+
+      expect(liveTimelineItems(harness, agentId)).toEqual([
+        { type: "assistant_message", text: "Partial " },
+        { type: "assistant_message", text: "text" },
+      ]);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  test("holds a partial paragraph across usage updates and releases finished paragraphs", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({ assistantTextDelivery: "paragraph" });
+    try {
+      const { agentId, session } = await createManagedSession(harness);
+
+      session.pushEvent(assistant("Intro para", "codex", "turn-1"));
+      session.pushEvent(usageUpdated());
+      session.pushEvent(assistant("graph.\n", "codex", "turn-1"));
+      await waitForSessionEventQueue();
+      await vi.advanceTimersByTimeAsync(PARAGRAPH_DELIVERY_MIN_INTERVAL_MS);
+      expect(liveTimelineItems(harness, agentId)).toEqual([]);
+      expect(await harness.manager.getTimelineRows(agentId)).toEqual([]);
+
+      session.pushEvent(assistant("\nNext", "codex", "turn-1"));
+      await waitForSessionEventQueue();
+      await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS);
+
+      expect(liveTimelineItems(harness, agentId)).toEqual([
+        { type: "assistant_message", text: "Intro paragraph.\n\n" },
+      ]);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  test("releases held text before a tool call so rows keep arrival order", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({ assistantTextDelivery: "paragraph" });
+    try {
+      const { agentId, session } = await createManagedSession(harness);
+
+      session.pushEvent(assistant("Let me check", "codex", "turn-1"));
+      session.pushEvent(timelineEvent(toolCall({ output: "running" }), "codex", "turn-1"));
+      await waitForSessionEventQueue();
+      await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS);
+
+      const rows = await harness.manager.getTimelineRows(agentId);
+      expect(getTimelineItems(rows)).toEqual([
+        { type: "assistant_message", text: "Let me check" },
+        toolCall({ output: "running" }),
+      ]);
+      expect(liveTimelineItems(harness, agentId)).toEqual(getTimelineItems(rows));
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  test("releases held text before turn completion", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({ assistantTextDelivery: "paragraph" });
+    try {
+      const { agentId, session } = await createManagedSession(harness);
+
+      session.pushEvent(assistant("Done.\n\nTrailing thought", "codex", "turn-1"));
+      await waitForSessionEventQueue();
+      session.pushEvent(assistant(" without a blank line", "codex", "turn-1"));
+      session.pushEvent(terminalEvent("turn_completed", "turn-1"));
+      await waitForSessionEventQueue();
+
+      const streamEvents = getStreamEvents(harness.events, agentId).flatMap((event) =>
+        event.type === "agent_stream" ? [event.event] : [],
+      );
+      expect(streamEvents).toEqual([
+        {
+          type: "timeline",
+          provider: "codex",
+          turnId: "turn-1",
+          item: { type: "assistant_message", text: "Done.\n\n" },
+        },
+        {
+          type: "timeline",
+          provider: "codex",
+          turnId: "turn-1",
+          item: { type: "assistant_message", text: "Trailing thought without a blank line" },
+        },
+        { type: "turn_completed", provider: "codex", turnId: "turn-1" },
+      ]);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  test("an interrupt releases held text before the turn settles", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({ assistantTextDelivery: "paragraph" });
+    try {
+      const { agentId, session } = await createManagedSession(harness);
+      const stream = harness.manager.streamAgent(agentId, "prompt");
+      void stream.next();
+      await harness.manager.waitForAgentRunStart(agentId);
+
+      session.pushEvent(assistant("Halfway through", "codex", "turn-1"));
+      await waitForSessionEventQueue();
+      expect(liveTimelineItems(harness, agentId)).toEqual([]);
+
+      const cancel = harness.manager.cancelAgentRun(agentId);
+      await waitForSessionEventQueue();
+      expect(liveTimelineItems(harness, agentId)).toEqual([
+        { type: "assistant_message", text: "Halfway through" },
+      ]);
+
+      session.pushEvent(terminalEvent("turn_canceled", "turn-1"));
+      await waitForSessionEventQueue();
+      await expect(cancel).resolves.toEqual({ status: "settled" });
     } finally {
       harness.cleanup();
     }

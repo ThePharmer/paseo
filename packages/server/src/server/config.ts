@@ -8,9 +8,11 @@ import { expandTilde } from "../utils/path.js";
 
 import type { PaseoDaemonConfig } from "./bootstrap.js";
 import {
+  AssistantTextDeliverySchema,
   loadPersistedConfig,
   LogFormatSchema,
   LogLevelSchema,
+  type AssistantTextDelivery,
   type PersistedConfig,
 } from "./persisted-config.js";
 import type { AgentProvider } from "./agent/agent-sdk-types.js";
@@ -97,6 +99,24 @@ function normalizeLogEnv(value: string | undefined): string | undefined {
   }
 
   return value.trim().toLowerCase();
+}
+
+function parseAssistantTextDeliveryEnv(
+  value: string | undefined,
+): AssistantTextDelivery | undefined {
+  const parsed = AssistantTextDeliverySchema.safeParse(value?.trim().toLowerCase());
+  return parsed.success ? parsed.data : undefined;
+}
+
+function resolveAssistantTextDelivery(
+  env: NodeJS.ProcessEnv,
+  persisted: PersistedConfig,
+): AssistantTextDelivery {
+  return (
+    parseAssistantTextDeliveryEnv(env.PASEO_ASSISTANT_TEXT_DELIVERY) ??
+    persisted.daemon?.assistantTextDelivery ??
+    "token"
+  );
 }
 
 function resolveGitProcessConfig(
@@ -620,6 +640,7 @@ export function resolveConfigFromPersisted(
     git: resolveGitProcessConfig(env, persisted),
     autoArchiveAfterMerge,
     enableTerminalAgentHooks: persisted.daemon?.enableTerminalAgentHooks ?? false,
+    assistantTextDelivery: resolveAssistantTextDelivery(env, persisted),
     appendSystemPrompt,
     terminalProfiles,
     agentProfiles,
@@ -722,6 +743,9 @@ function resolveCoreDaemonOverridePaths(
     parsePositiveGitOverride(env.PASEO_GIT_MAX_PROCESS_CONCURRENCY ?? env.PASEO_GIT_CONCURRENCY)
   ) {
     paths.push("daemon.git.maxProcessConcurrency");
+  }
+  if (parseAssistantTextDeliveryEnv(env.PASEO_ASSISTANT_TEXT_DELIVERY) !== undefined) {
+    paths.push("daemon.assistantTextDelivery");
   }
   if (env.PASEO_APP_BASE_URL !== undefined) paths.push("app.baseUrl");
   if (env.PASEO_PASSWORD?.trim()) paths.push("daemon.auth.password");
