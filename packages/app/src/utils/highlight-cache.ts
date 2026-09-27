@@ -63,6 +63,25 @@ export function tokenizeToLines(code: string, ext: string | null): HighlightToke
   return lines;
 }
 
+/** Cached tokens for `code`, without tokenizing on a miss. */
+export function peekTokenizedLines(
+  code: string,
+  ext: string | null,
+): HighlightToken[][] | undefined {
+  if (!ext) return undefined;
+  return tokenizationCache.get(`${ext}:${code}`);
+}
+
+/**
+ * Keep tokens computed off the render path, such as by a background highlight of a
+ * finished code block, so a remount of the same code does not parse it again. Store
+ * only settled code: every prefix of a streaming block would evict useful entries.
+ */
+export function storeTokenizedLines(code: string, ext: string, lines: HighlightToken[][]): void {
+  if (code.length > MAX_HIGHLIGHT_CHARS) return;
+  tokenizationCache.set(`${ext}:${code}`, lines);
+}
+
 function toKeyedLine(tokens: HighlightToken[], lineIndex: number): KeyedLine {
   return {
     key: `line-${lineIndex}`,

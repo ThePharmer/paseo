@@ -6,11 +6,19 @@ import * as Clipboard from "expo-clipboard";
 import { Check, Copy } from "lucide-react-native";
 import { useTranslation } from "react-i18next";
 import type { HighlightToken } from "@getpaseo/highlight";
+import type { MarkdownPhase } from "@/components/markdown/fence/types";
 import { isNative, isWeb } from "@/constants/platform";
 import { useIsCompactFormFactor } from "@/constants/layout";
 import { syntaxTokenStyleFor } from "@/styles/syntax-token-styles";
 import { CODE_SURFACE_DATASET } from "@/styles/code-surface";
-import { highlightToKeyedLines, type KeyedLine } from "@/utils/highlight-cache";
+import { composeCodeHighlight, useBackgroundHighlight } from "@/hooks/use-background-highlight";
+import { useHeldWhileSelected } from "@/hooks/use-held-while-selected";
+import {
+  MAX_HIGHLIGHT_CHARS,
+  peekTokenizedLines,
+  storeTokenizedLines,
+  tokenizeToLines,
+} from "@/utils/highlight-cache";
 import {
   markdownCopyCodeBlockDataSet,
   markdownCopyDataSet,
@@ -20,9 +28,16 @@ import {
 interface HighlightedCodeBlockProps {
   code: string;
   language: string | null | undefined;
+  /** A streaming block keeps growing, so it is always highlighted off the render path. */
+  phase?: MarkdownPhase;
   inheritedStyles: TextStyle;
   textStyle: TextStyle;
 }
+
+// Largest settled block highlighted during render. Hermes has no JIT; a full parse
+// costs roughly 10ms per 1,000 characters on a mid-range core, so anything longer is
+// painted plain first and colored by the background highlighter.
+const SYNC_HIGHLIGHT_MAX_CHARS = 1_000;
 
 // Fence info strings ("```ts", "```typescript", "```ts {1,3}") map to the
 // extension-based parser table in @getpaseo/highlight. Aliases here only
@@ -57,6 +72,7 @@ function stripTerminalFenceNewline(code: string): string {
 export const HighlightedCodeBlock = React.memo(function HighlightedCodeBlock({
   code,
   language,
+  phase = "complete",
   inheritedStyles,
   textStyle,
 }: HighlightedCodeBlockProps) {
@@ -73,10 +89,36 @@ export const HighlightedCodeBlock = React.memo(function HighlightedCodeBlock({
     [language],
   );
 
-  const keyedLines = useMemo<KeyedLine[] | null>(
-    () => highlightToKeyedLines(renderedCode, fenceLanguageToExtension(language)),
-    [renderedCode, language],
+  const extension = useMemo(() => fenceLanguageToExtension(language), [language]);
+  const highlightable = extension !== null && renderedCode.length <= MAX_HIGHLIGHT_CHARS;
+  const settled = phase === "complete";
+  const inBackground =
+    highlightable &&
+    (!settled ||
+      (renderedCode.length > SYNC_HIGHLIGHT_MAX_CHARS &&
+        peekTokenizedLines(renderedCode, extension) === undefined));
+  const syncLines = useMemo(
+    () => (highlightable && !inBackground ? tokenizeToLines(renderedCode, extension) : null),
+    [highlightable, inBackground, renderedCode, extension],
   );
+  const containerRef = useRef<View>(null);
+  // Colors replace the text nodes a selection is anchored in, so a settled block
+  // waits for the reader to finish selecting before taking them.
+  const background = useHeldWhileSelected(
+    useBackgroundHighlight(renderedCode, extension, { enabled: inBackground, settled }),
+    containerRef,
+    inBackground && settled,
+  );
+  useEffect(() => {
+    if (settled && extension && background?.exact && background.code === renderedCode) {
+      storeTokenizedLines(renderedCode, extension, background.lines);
+    }
+  }, [settled, extension, background, renderedCode]);
+  const display = useMemo(() => {
+    if (syncLines) return { lines: syncLines, plainTail: null };
+    if (inBackground) return composeCodeHighlight(renderedCode, background);
+    return null;
+  }, [syncLines, inBackground, renderedCode, background]);
 
   const isCompact = useIsCompactFormFactor();
   const [isHovered, setIsHovered] = useState(false);
@@ -90,14 +132,25 @@ export const HighlightedCodeBlock = React.memo(function HighlightedCodeBlock({
 
   return (
     <View
+      ref={containerRef}
       style={containerStyle}
       dataSet={copyDataSet}
       onPointerEnter={handlePointerEnter}
       onPointerLeave={handlePointerLeave}
     >
-      {keyedLines ? (
+      {display ? (
         <MarkdownTextSpan style={innerTextStyle} copyTag="code">
-          {renderCodeSegments(keyedLines)}
+          {display.lines.map((tokens, index) => (
+            // Lines are keyed by position: a streaming block only grows at its end.
+            // oxlint-disable-next-line react/no-array-index-key
+            <CodeLine key={index} tokens={tokens} leadingNewline={index > 0} />
+          ))}
+          {display.plainTail !== null ? (
+            <CodeTextSpan
+              key="plain-tail"
+              text={display.lines.length > 0 ? `\n${display.plainTail}` : display.plainTail}
+            />
+          ) : null}
         </MarkdownTextSpan>
       ) : (
         <MarkdownTextSpan style={innerTextStyle} copyTag="code">
@@ -109,19 +162,24 @@ export const HighlightedCodeBlock = React.memo(function HighlightedCodeBlock({
   );
 });
 
-function renderCodeSegments(keyedLines: KeyedLine[]): React.ReactNode[] {
-  const segments: React.ReactNode[] = [];
-  for (let lineIndex = 0; lineIndex < keyedLines.length; lineIndex += 1) {
-    const line = keyedLines[lineIndex];
-    if (lineIndex > 0) {
-      segments.push(<CodeTextSpan key={`${line.key}-newline`} text={"\n"} />);
-    }
-    for (const { key, token } of line.tokens) {
-      segments.push(<TokenSpan key={`${line.key}-${key}`} token={token} />);
-    }
-  }
-  return segments;
+interface CodeLineProps {
+  tokens: HighlightToken[];
+  leadingNewline: boolean;
 }
+
+// A line re-renders only when its tokens change, which the highlighters avoid for
+// lines whose text did not.
+const CodeLine = React.memo(function CodeLine({ tokens, leadingNewline }: CodeLineProps) {
+  return (
+    <>
+      {leadingNewline ? <CodeTextSpan text={"\n"} /> : null}
+      {tokens.map((token, index) => (
+        // oxlint-disable-next-line react/no-array-index-key
+        <TokenSpan key={index} token={token} />
+      ))}
+    </>
+  );
+});
 
 interface TokenSpanProps {
   token: HighlightToken;
