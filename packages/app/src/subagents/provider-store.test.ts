@@ -19,6 +19,10 @@ afterEach(() => {
   });
 });
 
+function unexpectedSubscription(): never {
+  throw new Error("The host broadcasts child timelines; no subscription expected");
+}
+
 function observeChildTimeline() {
   useProviderSubagentStore.getState().retainTimeline(SERVER_ID, PARENT_ID, SUBAGENT_ID);
 }
@@ -600,10 +604,12 @@ describe("projected child history", () => {
         calls++;
         return calls === 1 ? response("A", 1, 1) : response("ABC", 1, 3);
       },
+      observeProviderSubagentTimeline: unexpectedSubscription,
     };
     const errors: unknown[] = [];
     const stop = observeProviderSubagentTimeline({
       client,
+      scopedDelivery: false,
       serverId: SERVER_ID,
       parentAgentId: PARENT_ID,
       subagentId: SUBAGENT_ID,
@@ -636,7 +642,9 @@ describe("projected child history", () => {
           if (calls === 2) throw new DaemonConnectionError("Connection lost");
           return calls === 1 ? response("A", 1, 1) : response("ABCD", 1, 4);
         },
+        observeProviderSubagentTimeline: unexpectedSubscription,
       },
+      scopedDelivery: false,
       serverId: SERVER_ID,
       parentAgentId: PARENT_ID,
       subagentId: SUBAGENT_ID,
@@ -666,7 +674,9 @@ describe("projected child history", () => {
         async fetchProviderSubagentTimeline() {
           throw failure;
         },
+        observeProviderSubagentTimeline: unexpectedSubscription,
       },
+      scopedDelivery: false,
       serverId: SERVER_ID,
       parentAgentId: PARENT_ID,
       subagentId: SUBAGENT_ID,
@@ -797,23 +807,141 @@ describe("child timelines follow their observers", () => {
       ],
     };
   }
-  function openPane(client: Parameters<typeof observeProviderSubagentTimeline>[0]["client"]) {
+  type PaneClient = Parameters<typeof observeProviderSubagentTimeline>[0]["client"];
+  function openPane(client: PaneClient, scopedDelivery = false) {
     return observeProviderSubagentTimeline({
       client,
       serverId: SERVER_ID,
       parentAgentId: PARENT_ID,
       subagentId: SUBAGENT_ID,
       limit: 100,
+      scopedDelivery,
       reportError: (error) => {
         throw error;
       },
     });
   }
-  const tailClient = {
+  const tailClient: PaneClient = {
     async fetchProviderSubagentTimeline() {
       return tailPage("A", 1);
     },
+    observeProviderSubagentTimeline: unexpectedSubscription,
   };
+  type ChildSubscription = ReturnType<PaneClient["observeProviderSubagentTimeline"]>;
+  type ChildObserver = Parameters<ChildSubscription["subscribe"]>[0];
+  /** A host that owns one child subscription per call; `acknowledge` models each (re)subscribe. */
+  function scopedHost(pages: () => Payload) {
+    const subscriptions: Array<{
+      target: [string, string];
+      observers: Set<ChildObserver>;
+      released: boolean;
+    }> = [];
+    let fetches = 0;
+    const client: PaneClient = {
+      async fetchProviderSubagentTimeline() {
+        fetches++;
+        return pages();
+      },
+      observeProviderSubagentTimeline(parentAgentId, subagentId) {
+        const subscription = {
+          target: [parentAgentId, subagentId] as [string, string],
+          observers: new Set<ChildObserver>(),
+          released: false,
+        };
+        subscriptions.push(subscription);
+        const handle: ChildSubscription = {
+          subscriptionId: null,
+          ready: new Promise(() => {}),
+          subscribe(observer) {
+            subscription.observers.add(observer);
+            return () => subscription.observers.delete(observer);
+          },
+          async release() {
+            subscription.released = true;
+            subscription.observers.clear();
+          },
+        };
+        return handle;
+      },
+    };
+    return {
+      client,
+      subscriptions,
+      fetches: () => fetches,
+      acknowledge() {
+        for (const subscription of subscriptions)
+          for (const observer of subscription.observers)
+            observer.snapshot({
+              requestId: "r",
+              subscriptionId: crypto.randomUUID(),
+              parentAgentId: PARENT_ID,
+              subagentId: SUBAGENT_ID,
+            });
+      },
+      deliver(seq: number, value: string) {
+        for (const subscription of subscriptions)
+          for (const observer of subscription.observers)
+            observer.update({
+              type: "agent.provider_subagents.update",
+              payload: {
+                kind: "timeline",
+                parentAgentId: PARENT_ID,
+                subagentId: SUBAGENT_ID,
+                provider: "codex",
+                epoch: "e",
+                seq,
+                timestamp,
+                item: { type: "assistant_message", messageId: "m", text: value },
+              },
+            });
+      },
+    };
+  }
+
+  test("subscribes to the child while the pane observes it on a host that scopes delivery", async () => {
+    const host = scopedHost(() => tailPage("A", 1));
+    const closePane = openPane(host.client, true);
+    await expect.poll(text).toBe("A");
+
+    host.deliver(2, "B");
+    expect(text()).toBe("AB");
+    expect(host.subscriptions.map(({ target, released }) => ({ target, released }))).toEqual([
+      { target: [PARENT_ID, SUBAGENT_ID], released: false },
+    ]);
+
+    closePane();
+    expect(host.subscriptions.map(({ released }) => released)).toEqual([true]);
+    expect(hasTimeline()).toBe(false);
+  });
+
+  test("refetches the tail when the host restores the subscription after a reconnect", async () => {
+    let page = tailPage("A", 1);
+    const host = scopedHost(() => page);
+    const closePane = openPane(host.client, true);
+    try {
+      await expect.poll(text).toBe("A");
+      expect(host.fetches()).toBe(1);
+
+      page = tailPage("Missed while offline", 3);
+      host.acknowledge();
+
+      await expect.poll(text).toBe("Missed while offline");
+      expect(host.fetches()).toBe(2);
+    } finally {
+      closePane();
+    }
+  });
+
+  test("keeps reading the broadcast feed without subscribing on older hosts", async () => {
+    const closePane = openPane(tailClient);
+    await expect.poll(text).toBe("A");
+
+    stream(2, "B");
+    expect(text()).toBe("AB");
+
+    closePane();
+    expect(hasTimeline()).toBe(false);
+  });
 
   test("does not store live updates for a child nobody observes", () => {
     const before = useProviderSubagentStore.getState();
@@ -861,11 +989,12 @@ describe("child timelines follow their observers", () => {
 
   test("fetches the tail page again when the pane reopens", async () => {
     let calls = 0;
-    const client = {
+    const client: PaneClient = {
       async fetchProviderSubagentTimeline() {
         calls++;
         return tailPage(calls === 1 ? "First open" : "Second open", calls);
       },
+      observeProviderSubagentTimeline: unexpectedSubscription,
     };
     const closeFirst = openPane(client);
     await expect.poll(text).toBe("First open");

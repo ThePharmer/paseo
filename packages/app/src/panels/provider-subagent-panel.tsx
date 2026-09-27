@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Text, View } from "react-native";
 import { StyleSheet } from "react-native-unistyles";
 import invariant from "tiny-invariant";
+import type { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { useShallow } from "zustand/react/shallow";
 import { AgentStreamView } from "@/agent-stream/view";
 import { getProviderIcon } from "@/components/provider-icons";
@@ -107,6 +108,47 @@ function useProviderSubagentDescriptor(
   };
 }
 
+/** Holds the child's history and live delivery while the pane is mounted. */
+function useObservedChildTimeline({
+  client,
+  supported,
+  serverId,
+  parentAgentId,
+  subagentId,
+}: {
+  client: DaemonClient | null;
+  supported: boolean;
+  serverId: string;
+  parentAgentId: string;
+  subagentId: string;
+}) {
+  // COMPAT(providerSubagentTimelineSubscriptions): added after v0.9.2, remove after 2027-03-27.
+  const scopedDelivery = useSessionStore(
+    (state) =>
+      state.sessions[serverId]?.serverInfo?.features?.providerSubagentTimelineSubscriptions ===
+      true,
+  );
+  useEffect(() => {
+    if (!client || !supported) return;
+    return observeProviderSubagentTimeline({
+      client,
+      serverId,
+      parentAgentId,
+      subagentId,
+      limit: TIMELINE_FETCH_PAGE_SIZE,
+      scopedDelivery,
+      reportError: (error) => {
+        console.error("[ProviderSubagentTimeline] Failed to sync child history", {
+          error,
+          serverId,
+          parentAgentId,
+          subagentId,
+        });
+      },
+    });
+  }, [client, supported, scopedDelivery, serverId, parentAgentId, subagentId]);
+}
+
 function ProviderSubagentPanel() {
   const { t } = useTranslation();
   const { serverId, target, openFileInWorkspace, openTab } = usePaneContext();
@@ -149,24 +191,13 @@ function ProviderSubagentPanel() {
     void refreshProviderSubagents(client, serverId, target.parentAgentId).catch(() => undefined);
   }, [client, serverId, supported, target.parentAgentId]);
 
-  useEffect(() => {
-    if (!client || !supported) return;
-    return observeProviderSubagentTimeline({
-      client,
-      serverId,
-      parentAgentId: target.parentAgentId,
-      subagentId: target.subagentId,
-      limit: TIMELINE_FETCH_PAGE_SIZE,
-      reportError: (error) => {
-        console.error("[ProviderSubagentTimeline] Failed to refresh child history", {
-          error,
-          serverId,
-          parentAgentId: target.parentAgentId,
-          subagentId: target.subagentId,
-        });
-      },
-    });
-  }, [client, supported, serverId, target.parentAgentId, target.subagentId]);
+  useObservedChildTimeline({
+    client,
+    supported,
+    serverId,
+    parentAgentId: target.parentAgentId,
+    subagentId: target.subagentId,
+  });
 
   const loadOlder = useCallback((): boolean => {
     if (!client || !supported || isLoadingOlder || !timeline?.hasOlder || !timeline.epoch) {
