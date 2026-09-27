@@ -200,6 +200,7 @@ snapshot so a mixed edit can apply its live subset and still name the paths that
     trustedProxies: true | string[], // defaults to ["loopback"]; Express proxy names/CIDRs
     mcp: { enabled: boolean, injectIntoAgents: boolean },
     git: { maxProcessesPerSecond: number, maxProcessConcurrency: number },
+    assistantTextDelivery: "token" | "paragraph", // default "token"; see agent-stream-performance.md
     appendSystemPrompt: string,    // appended to supported provider system/developer prompts
     terminalProfiles: TerminalProfile[],  // named shell commands; omitted means DEFAULT_TERMINAL_PROFILES
     agentProfiles: AgentProfile[],        // named agent launch bundles; omitted means none
