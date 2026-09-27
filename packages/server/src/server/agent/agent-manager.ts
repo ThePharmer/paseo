@@ -222,8 +222,15 @@ export type {
   AgentTimelineWindow,
 } from "./agent-timeline-store-types.js";
 
+/**
+ * Why an agent_state event fired. "usage" marks a snapshot whose only change is
+ * lastUsage, which session delivery may throttle. Anything else is "state" and is
+ * delivered immediately. An absent reason means "state".
+ */
+export type AgentStateUpdateReason = "state" | "usage";
+
 export type AgentManagerEvent =
-  | { type: "agent_state"; agent: ManagedAgent }
+  | { type: "agent_state"; agent: ManagedAgent; reason?: AgentStateUpdateReason }
   | { type: "provider_subagent"; event: ProviderSubagentStoreEvent }
   | { type: "timeline_replacement"; agentId: string; epoch: string }
   | {
@@ -4274,7 +4281,7 @@ export class AgentManager {
         return undefined;
       case "usage_updated":
         agent.lastUsage = event.usage;
-        this.emitState(agent);
+        this.emitState(agent, { reason: "usage" });
         return undefined;
       case "mode_changed":
         agent.currentModeId = event.currentModeId;
@@ -4765,7 +4772,16 @@ export class AgentManager {
     return row;
   }
 
-  private emitState(agent: ManagedAgent, options?: { persist?: boolean }): void {
+  private emitState(
+    agent: ManagedAgent,
+    options?: { persist?: boolean; reason?: AgentStateUpdateReason },
+  ): void {
+    // A usage emit that also observes a lifecycle change carries a transition
+    // (and possibly attention), so it must not be throttled as usage-only.
+    const reason: AgentStateUpdateReason =
+      options?.reason === "usage" && this.previousStatuses.get(agent.id) === agent.lifecycle
+        ? "usage"
+        : "state";
     // Keep attention as an edge-triggered unread signal, not a level signal.
     this.checkAndSetAttention(agent);
     if (options?.persist !== false) {
@@ -4784,6 +4800,7 @@ export class AgentManager {
         activeForegroundTurnId: agent.activeForegroundTurnId,
         pendingPermissions: agent.pendingPermissions.size,
         persist: options?.persist !== false,
+        reason,
       },
       "agent.manager.emit_state",
     );
@@ -4791,6 +4808,7 @@ export class AgentManager {
     this.dispatch({
       type: "agent_state",
       agent: { ...agent },
+      reason,
     });
   }
 
