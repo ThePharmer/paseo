@@ -502,6 +502,8 @@ function createDefaultDeps(): HostRuntimeControllerDeps {
     : undefined;
   const appCapabilities = {
     ...browserAutomationCapabilities,
+    // Opt-in: the child pane subscribes to its child's timeline instead of reading the event feed.
+    [CLIENT_CAPS.providerSubagentTimelineSubscriptions]: true,
   };
 
   return {

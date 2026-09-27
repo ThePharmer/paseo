@@ -3283,8 +3283,10 @@ export class DaemonClient {
   }
 
   /**
-   * Owns live timeline items for one provider child. Descriptor upserts and removes stay on the
-   * `agent.provider_subagents.update` event feed; timeline items arrive on this handle instead.
+   * Owns live timeline items for one provider child. Only a client that advertises
+   * `provider_subagent_timeline_subscriptions` needs it: the host then sends that client's child
+   * timeline items only here, once per socket, so hold one handle per child. Descriptor upserts
+   * and removes stay on the `agent.provider_subagents.update` event feed.
    */
   observeProviderSubagentTimeline(
     parentAgentId: string,
