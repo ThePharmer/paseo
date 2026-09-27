@@ -132,14 +132,15 @@ Descriptor `upsert` and `remove` updates go to every socket subscribed to
 `agent.provider_subagents.update` events; the subagents track needs them for every parent. Timeline
 items carry transcript text and tool output, so a socket advertising
 `provider_subagent_timeline_subscriptions` with owned subscriptions receives them only for children
-it subscribed to with `agent.provider_subagents.timeline.subscribe.request`. The items arrive once
-per socket, on that socket's newest subscription to the child, and stop on
-`subscription.release.request` or disconnect. Other handles to the same child on that socket receive
-nothing, so hold one subscription per child and fan it out locally. Newest wins because a client
-replacing a subscription stops routing the old one before the host processes its release. Other
-sockets on the same logical session are unaffected. Sockets without the capability keep receiving
-every child's items on the event feed. The client package leaves the capability out of its
-defaults, so CLI, plugin and library consumers of the event feed keep receiving child items.
+it subscribed to with `agent.provider_subagents.timeline.subscribe.request`. Each subscription to
+the child receives its own copy of every item until `subscription.release.request` or disconnect,
+so a socket holding two subscriptions to one child receives each item twice. Hold one subscription
+per child and fan it out locally. The host delivers to every subscription because a client drops a
+subscription's route when it starts the release, before the host processes it; an item sent only
+to that subscription would reach no handle. Other sockets on the same logical session are
+unaffected. Sockets without the capability keep receiving every child's items on the event feed.
+The client package leaves the capability out of its defaults, so CLI, plugin and library consumers
+of the event feed keep receiving child items.
 
 The app advertises the capability and gates on `features.providerSubagentTimelineSubscriptions`.
 Panes on the same child share one subscription per client; the last pane to close releases it

@@ -450,6 +450,61 @@ describe("provider subagent client store", () => {
     ]);
   });
 
+  test("applies a live update once when two subscriptions deliver it", () => {
+    observeChildTimeline();
+    const store = useProviderSubagentStore.getState();
+    store.replaceTimeline(SERVER_ID, {
+      projection: "projected",
+      requestId: "current-page",
+      parentAgentId: PARENT_ID,
+      subagentId: SUBAGENT_ID,
+      provider: "codex",
+      direction: "tail",
+      epoch: "epoch-1",
+      reset: true,
+      staleCursor: false,
+      gap: false,
+      window: { minSeq: 1, maxSeq: 1, nextSeq: 2 },
+      hasOlder: false,
+      hasNewer: false,
+      rows: [
+        {
+          seq: 1,
+          timestamp: "2026-07-12T10:00:01.000Z",
+          item: { type: "assistant_message", text: "First." },
+        },
+      ],
+      error: null,
+    });
+    const update = {
+      kind: "timeline",
+      parentAgentId: PARENT_ID,
+      subagentId: SUBAGENT_ID,
+      provider: "codex",
+      epoch: "epoch-1",
+      seq: 2,
+      timestamp: "2026-07-12T10:00:02.000Z",
+      item: { type: "assistant_message", text: " Second." },
+    } as const;
+
+    store.applyUpdate(SERVER_ID, update);
+    const afterFirst = useProviderSubagentStore
+      .getState()
+      .timelines.get(providerSubagentKey(SERVER_ID, PARENT_ID, SUBAGENT_ID));
+    store.applyUpdate(SERVER_ID, update);
+
+    const timeline = useProviderSubagentStore
+      .getState()
+      .timelines.get(providerSubagentKey(SERVER_ID, PARENT_ID, SUBAGENT_ID));
+    expect(timeline).toBe(afterFirst);
+    expect(timeline?.lastSeq).toBe(2);
+    expect(
+      [...(timeline?.tail ?? []), ...(timeline?.head ?? [])]
+        .map((item) => (item.kind === "assistant_message" ? item.text : ""))
+        .join(""),
+    ).toBe("First. Second.");
+  });
+
   test("replaces cached rows with an authoritative tail page after a reconnect gap", () => {
     observeChildTimeline();
     const store = useProviderSubagentStore.getState();
