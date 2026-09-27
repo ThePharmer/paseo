@@ -1262,6 +1262,74 @@ test("archive and delete replies retain their historical names and reach only th
   }
 });
 
+test("agent directory updates precede create, resume and archive replies", async () => {
+  const daemon = await createTestPaseoDaemon({
+    mcpEnabled: false,
+    isDev: true,
+    agentClients: { mock: new MockLoadTestAgentClient() },
+  });
+  const peer = await SubscriptionPeer.connect(daemon.port, "directory-ordering");
+  const messages = () =>
+    peer.frames.flatMap((frame) => (frame.type === "session" ? [frame.message] : []));
+  const replyIndex = (requestId: string) =>
+    messages().findIndex(
+      (message) =>
+        "payload" in message &&
+        "requestId" in message.payload &&
+        message.payload.requestId === requestId,
+    );
+  const upsertIndex = (agentId: string, archived: boolean) =>
+    messages().findIndex(
+      (message) =>
+        message.type === "agent_update" &&
+        message.payload.kind === "upsert" &&
+        message.payload.agent.id === agentId &&
+        Boolean(message.payload.agent.archivedAt) === archived,
+    );
+  const replyAgentId = (requestId: string) => {
+    const reply = messages()[replyIndex(requestId)];
+    if (reply?.type !== "status" || typeof reply.payload.agentId !== "string") {
+      throw new Error(`Expected a status reply carrying an agent id for ${requestId}`);
+    }
+    return reply.payload.agentId;
+  };
+  try {
+    await peer.request({
+      type: "fetch_agents_request",
+      requestId: "directory",
+      filter: { includeArchived: true },
+      subscribe: {},
+    });
+
+    await peer.request({
+      type: "create_agent_request",
+      requestId: "create",
+      config: { provider: "mock", cwd: daemon.staticDir },
+    });
+    const createdId = replyAgentId("create");
+    expect(upsertIndex(createdId, false)).toBeGreaterThanOrEqual(0);
+    expect(upsertIndex(createdId, false)).toBeLessThan(replyIndex("create"));
+
+    await peer.request({ type: "archive_agent_request", requestId: "archive", agentId: createdId });
+    expect(upsertIndex(createdId, true)).toBeGreaterThanOrEqual(0);
+    expect(upsertIndex(createdId, true)).toBeLessThan(replyIndex("archive"));
+
+    await peer.request({
+      type: "import_agent_request",
+      requestId: "resume",
+      provider: "mock",
+      sessionId: "saved-provider-session",
+      cwd: daemon.staticDir,
+    });
+    const resumedId = replyAgentId("resume");
+    expect(upsertIndex(resumedId, false)).toBeGreaterThanOrEqual(0);
+    expect(upsertIndex(resumedId, false)).toBeLessThan(replyIndex("resume"));
+  } finally {
+    peer.close();
+    await daemon.close();
+  }
+});
+
 test("Hub bootstrap sends its server ID before the producer's synchronous snapshot", async () => {
   const daemon = await createTestPaseoDaemon({ mcpEnabled: false });
   const admin = new DaemonClient({ url: `ws://127.0.0.1:${daemon.port}/ws` });

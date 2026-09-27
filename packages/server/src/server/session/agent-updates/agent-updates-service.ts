@@ -5,9 +5,19 @@ import type {
   SessionInboundMessage,
   SessionOutboundMessage,
 } from "../../messages.js";
-import type { ManagedAgent } from "../../agent/agent-manager.js";
+import type { AgentStateUpdateReason, ManagedAgent } from "../../agent/agent-manager.js";
 import type { StoredAgentRecord } from "../../agent/agent-storage.js";
 import { resolveEffectiveThinkingOptionId, toAgentPayload } from "../../agent/agent-projections.js";
+
+/**
+ * Minimum spacing between usage-only snapshots of one agent to one session.
+ * Claude reports usage twice per API step (message_start and message_delta), and
+ * each snapshot costs a storage read, project placement, a directory sequence and
+ * a workspace descriptor rebuild for every connected client. lastUsage only feeds
+ * usage displays such as the context meter, so they can lag by up to this window.
+ * State changes are never throttled and carry the latest usage with them.
+ */
+export const USAGE_UPDATE_THROTTLE_MS = 2000;
 
 type AgentUpdatePayload = Extract<SessionOutboundMessage, { type: "agent_update" }>["payload"];
 type AgentUpdatesFilter = NonNullable<
@@ -40,7 +50,17 @@ export interface AgentUpdatesService {
   clearSubscription(subscriptionId: string): void;
   hasSubscription(): boolean;
   includesLiveAgent(agent: ManagedAgent, subscriptionIds?: ReadonlySet<string>): Promise<boolean>;
-  forwardLiveAgent(agent: ManagedAgent): Promise<void>;
+  /**
+   * Publish a live agent snapshot. "state" (the default) is sent immediately.
+   * "usage" is sent immediately when the agent has no open usage window, and
+   * otherwise at most once per window with the latest snapshot. The returned
+   * promise settles once a snapshot sent now has gone out; a throttled usage
+   * snapshot resolves at once.
+   */
+  forwardLiveAgent(
+    agent: ManagedAgent,
+    options?: { reason?: AgentStateUpdateReason },
+  ): Promise<void>;
   emitStoredRecord(record: StoredAgentRecord): Promise<AgentSnapshotPayload>;
   removeAgent(agentId: string): Promise<void>;
   dispose(): void;
@@ -147,6 +167,11 @@ export function matchesAgentUpdatesFilter(input: {
   return true;
 }
 
+interface UsageWindow {
+  timer: ReturnType<typeof setTimeout>;
+  pendingAgent: ManagedAgent | null;
+}
+
 function agentUpdateTargetId(update: AgentUpdatePayload): string {
   return update.kind === "remove" ? update.agentId : update.agent.id;
 }
@@ -154,6 +179,7 @@ function agentUpdateTargetId(update: AgentUpdatePayload): string {
 export function createAgentUpdatesService(deps: AgentUpdatesServiceDeps): AgentUpdatesService {
   const subscriptions = new Map<string, AgentUpdatesSubscriptionState>();
   const liveAgentUpdateTails = new Map<string, Promise<void>>();
+  const usageWindows = new Map<string, UsageWindow>();
   const sequence = <T extends AgentUpdatePayload>(
     sub: AgentUpdatesSubscriptionState,
     payload: T,
@@ -216,6 +242,7 @@ export function createAgentUpdatesService(deps: AgentUpdatesServiceDeps): AgentU
 
   function clearSubscription(subscriptionId: string): void {
     subscriptions.delete(subscriptionId);
+    if (subscriptions.size === 0) cancelAllUsageWindows();
   }
 
   function hasSubscription(): boolean {
@@ -269,8 +296,12 @@ export function createAgentUpdatesService(deps: AgentUpdatesServiceDeps): AgentU
   }
 
   async function emitStoredRecord(record: StoredAgentRecord): Promise<AgentSnapshotPayload> {
+    // Archive and detach publish the stored record. Drop any pending usage
+    // snapshot and queue behind in-flight live snapshots so a stale live upsert
+    // cannot land after the archived record and resurrect the agent.
+    cancelUsageWindow(record.id);
     const payload = deps.buildStoredAgentPayload(record);
-    await publishPayload(payload);
+    await enqueueAgentUpdate(record.id, () => publishPayload(payload));
     return payload;
   }
 
@@ -298,7 +329,57 @@ export function createAgentUpdatesService(deps: AgentUpdatesServiceDeps): AgentU
     return next;
   }
 
-  function forwardLiveAgent(agent: ManagedAgent): Promise<void> {
+  function cancelUsageWindow(agentId: string): void {
+    const usageWindow = usageWindows.get(agentId);
+    if (!usageWindow) return;
+    clearTimeout(usageWindow.timer);
+    usageWindows.delete(agentId);
+  }
+
+  function cancelAllUsageWindows(): void {
+    for (const usageWindow of usageWindows.values()) clearTimeout(usageWindow.timer);
+    usageWindows.clear();
+  }
+
+  function openUsageWindow(agentId: string): UsageWindow {
+    const usageWindow: UsageWindow = {
+      timer: setTimeout(() => closeUsageWindow(agentId, usageWindow), USAGE_UPDATE_THROTTLE_MS),
+      pendingAgent: null,
+    };
+    usageWindows.set(agentId, usageWindow);
+    return usageWindow;
+  }
+
+  function closeUsageWindow(agentId: string, usageWindow: UsageWindow): void {
+    if (usageWindows.get(agentId) !== usageWindow) return;
+    usageWindows.delete(agentId);
+    const pendingAgent = usageWindow.pendingAgent;
+    if (!pendingAgent) return;
+    // The trailing send opens the next window, so a steady stream of usage
+    // produces one snapshot per window.
+    openUsageWindow(agentId);
+    void publishLiveAgent(pendingAgent);
+  }
+
+  function forwardLiveAgent(
+    agent: ManagedAgent,
+    options?: { reason?: AgentStateUpdateReason },
+  ): Promise<void> {
+    const usageWindow = usageWindows.get(agent.id);
+    if (options?.reason === "usage") {
+      if (usageWindow) {
+        usageWindow.pendingAgent = agent;
+        return Promise.resolve();
+      }
+      openUsageWindow(agent.id);
+    } else if (usageWindow) {
+      // This snapshot already carries the latest usage.
+      usageWindow.pendingAgent = null;
+    }
+    return publishLiveAgent(agent);
+  }
+
+  function publishLiveAgent(agent: ManagedAgent): Promise<void> {
     if (!hasSubscription()) {
       const workspaceId = agent.workspaceId;
       return workspaceId
@@ -316,6 +397,7 @@ export function createAgentUpdatesService(deps: AgentUpdatesServiceDeps): AgentU
   }
 
   function removeAgent(agentId: string): Promise<void> {
+    cancelUsageWindow(agentId);
     return enqueueAgentUpdate(agentId, () => {
       for (const sub of subscriptions.values()) {
         bufferOrEmit(sub, sequence(sub, { kind: "remove", agentId }, null, null, agentId));
@@ -325,6 +407,7 @@ export function createAgentUpdatesService(deps: AgentUpdatesServiceDeps): AgentU
 
   function dispose(): void {
     subscriptions.clear();
+    cancelAllUsageWindows();
   }
 
   return {

@@ -1,6 +1,10 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type pino from "pino";
-import { createAgentUpdatesService, matchesAgentUpdatesFilter } from "./agent-updates-service.js";
+import {
+  createAgentUpdatesService,
+  matchesAgentUpdatesFilter,
+  USAGE_UPDATE_THROTTLE_MS,
+} from "./agent-updates-service.js";
 import type {
   AgentSnapshotPayload,
   ProjectPlacementPayload,
@@ -450,6 +454,244 @@ describe("forwardLiveAgent", () => {
     await expect(h.service.forwardLiveAgent(h.managed("a"))).resolves.toBeUndefined();
     expect(h.loggedErrors).toHaveLength(1);
     expect(h.agentUpdates()).toEqual([]);
+  });
+});
+
+describe("usage-only update throttling", () => {
+  beforeEach(() => {
+    // setImmediate stays real so drain() can let resolved enrichment chains settle.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function drain(): Promise<void> {
+    return new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  function withUsage(agent: ManagedAgent, usedTokens: number): ManagedAgent {
+    return {
+      ...agent,
+      lastUsage: { contextWindowUsedTokens: usedTokens, contextWindowMaxTokens: 200_000 },
+    };
+  }
+
+  function usedTokensOf(update: AgentUpdatePayload | undefined): number | undefined {
+    return update?.kind === "upsert" ? update.agent.lastUsage?.contextWindowUsedTokens : undefined;
+  }
+
+  function subscribedHarness(options?: { syncEnabled?: boolean }) {
+    const h = buildHarness();
+    h.service.beginSubscription({
+      subscriptionId: "sub",
+      filter: {},
+      syncEnabled: options?.syncEnabled,
+    });
+    h.service.flushBootstrapped("sub");
+    h.useProjectedPayload();
+    return h;
+  }
+
+  test("a usage burst sends the first snapshot and one trailing snapshot with the latest usage", async () => {
+    const h = subscribedHarness();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 150), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 175), { reason: "usage" });
+    expect(h.agentUpdates().map(usedTokensOf)).toEqual([100]);
+
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS - 1);
+    await drain();
+    expect(h.agentUpdates().map(usedTokensOf)).toEqual([100]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await drain();
+    expect(h.agentUpdates().map(usedTokensOf)).toEqual([100, 175]);
+    expect(h.workspaceUpdates).toEqual(["ws-1", "ws-1"]);
+
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS * 3);
+    await drain();
+    expect(h.agentUpdates().map(usedTokensOf)).toEqual([100, 175]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test("throttles each agent independently", async () => {
+    const h = subscribedHarness();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+    h.register(makeAgentPayload({ id: "b", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("b"), 200), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 110), { reason: "usage" });
+
+    expect(h.agentUpdates().map((update) => update.kind === "upsert" && update.agent.id)).toEqual([
+      "a",
+      "b",
+    ]);
+  });
+
+  test("sequences the trailing snapshot when it is sent", async () => {
+    const h = subscribedHarness({ syncEnabled: true });
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+    h.register(makeAgentPayload({ id: "b", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 150), { reason: "usage" });
+    await h.service.forwardLiveAgent(h.managed("b"));
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS);
+    await drain();
+
+    const seqs = h.agentUpdates().map((update) => ({
+      id: update.kind === "upsert" ? update.agent.id : update.agentId,
+      seq: (update as { seq?: number }).seq,
+    }));
+    expect(seqs).toEqual([
+      { id: "a", seq: expect.any(Number) },
+      { id: "b", seq: expect.any(Number) },
+      { id: "a", seq: expect.any(Number) },
+    ]);
+    expect(seqs[2]!.seq!).toBeGreaterThan(seqs[1]!.seq!);
+  });
+
+  test("a state update during a usage window goes out immediately and cancels the trailing usage send", async () => {
+    const h = subscribedHarness();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 150), { reason: "usage" });
+    const idle = { ...withUsage(h.managed("a"), 150), lifecycle: "idle" } as ManagedAgent;
+    await h.service.forwardLiveAgent(idle, { reason: "state" });
+
+    expect(
+      h.agentUpdates().map((update) => update.kind === "upsert" && update.agent.status),
+    ).toEqual(["running", "idle"]);
+
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS);
+    await drain();
+    expect(h.agentUpdates()).toHaveLength(2);
+
+    // The window has closed, so the next usage change is sent at once.
+    await h.service.forwardLiveAgent(withUsage(idle, 160), { reason: "usage" });
+    expect(h.agentUpdates().map(usedTokensOf)).toEqual([100, 150, 160]);
+  });
+
+  test("an untagged forward is treated as a state update", async () => {
+    const h = subscribedHarness();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 120));
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 130));
+
+    expect(h.agentUpdates().map(usedTokensOf)).toEqual([100, 120, 130]);
+  });
+
+  test("archiving cancels a pending usage send so the archived agent is not re-emitted", async () => {
+    const h = subscribedHarness();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 150), { reason: "usage" });
+    h.register(
+      makeAgentPayload({ id: "a", workspaceId: "ws-1", archivedAt: "2026-03-02T00:00:00.000Z" }),
+    );
+    await h.service.emitStoredRecord(h.stored("a"));
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS * 2);
+    await drain();
+
+    expect(h.agentUpdates().at(-1)).toEqual({ kind: "remove", agentId: "a" });
+    expect(h.agentUpdates()).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test("archiving waits for an earlier queued live snapshot of the same agent", async () => {
+    const h = buildHarness();
+    h.service.beginSubscription({ subscriptionId: "sub", filter: {} });
+    h.service.flushBootstrapped("sub");
+    const running = makeAgentPayload({ id: "a", workspaceId: "ws-1" });
+    h.register(running);
+    const delayedBuild = deferred<AgentSnapshotPayload>();
+    h.queuePayloadBuilds(delayedBuild.promise);
+
+    const liveForward = h.service.forwardLiveAgent(h.managed("a"), { reason: "usage" });
+    h.register(
+      makeAgentPayload({ id: "a", workspaceId: "ws-1", archivedAt: "2026-03-02T00:00:00.000Z" }),
+    );
+    const archive = h.service.emitStoredRecord(h.stored("a"));
+    await drain();
+    delayedBuild.resolve(running);
+    await Promise.all([liveForward, archive]);
+
+    expect(h.agentUpdates()).toEqual([
+      { kind: "upsert", agent: expect.objectContaining({ id: "a" }), project: makeProject() },
+      { kind: "remove", agentId: "a" },
+    ]);
+  });
+
+  test("deleting cancels a pending usage send so the deleted agent is not re-emitted", async () => {
+    const h = subscribedHarness();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 150), { reason: "usage" });
+    await h.service.removeAgent("a");
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS * 2);
+    await drain();
+
+    expect(h.agentUpdates()).toEqual([
+      expect.objectContaining({ kind: "upsert" }),
+      { kind: "remove", agentId: "a" },
+    ]);
+    expect(h.workspaceUpdates).toEqual(["ws-1"]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  test("dispose clears pending usage timers", async () => {
+    const h = subscribedHarness();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 150), { reason: "usage" });
+    h.service.dispose();
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS);
+    await drain();
+    expect(h.agentUpdates()).toHaveLength(1);
+    expect(h.workspaceUpdates).toEqual(["ws-1"]);
+  });
+
+  test("clearing the last subscription clears pending usage timers", async () => {
+    const h = subscribedHarness();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 150), { reason: "usage" });
+    h.service.clearSubscription("sub");
+
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS);
+    await drain();
+    expect(h.agentUpdates()).toHaveLength(1);
+  });
+
+  test("usage during bootstrap buffers only the latest snapshot per agent", async () => {
+    const h = buildHarness();
+    h.service.beginSubscription({ subscriptionId: "sub", filter: {} });
+    h.useProjectedPayload();
+    h.register(makeAgentPayload({ id: "a", workspaceId: "ws-1" }));
+
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 100), { reason: "usage" });
+    await h.service.forwardLiveAgent(withUsage(h.managed("a"), 150), { reason: "usage" });
+    await vi.advanceTimersByTimeAsync(USAGE_UPDATE_THROTTLE_MS);
+    await drain();
+    expect(h.agentUpdates()).toEqual([]);
+
+    h.service.flushBootstrapped("sub");
+    expect(h.agentUpdates().map(usedTokensOf)).toEqual([150]);
   });
 });
 

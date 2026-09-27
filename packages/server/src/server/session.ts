@@ -1988,7 +1988,7 @@ export class Session {
             },
             "agent.session.forward_update",
           );
-          void this.agentUpdates.forwardLiveAgent(event.agent);
+          void this.agentUpdates.forwardLiveAgent(event.agent, { reason: event.reason });
           return;
         }
 
