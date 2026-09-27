@@ -14,6 +14,24 @@ import {
   visibleRevealedText,
 } from "@/agent-stream/text-reveal";
 import type { MarkdownPhase } from "@/components/markdown/fence/types";
+import { isWeb } from "@/constants/platform";
+
+/**
+ * Paces streamed text on web; native paints each arrival whole.
+ *
+ * Native pacing is off as a precaution. Pacing raises the React commit rate of a
+ * streaming block on native from one per arrival (about 16/s) to up to 60/s, and a
+ * fast native-heap growth while streaming on Android is under investigation. If
+ * that growth is per commit, pacing accelerates it. Turn native pacing back on
+ * once the growth is explained.
+ */
+export const useRevealedText: (text: string, phase: MarkdownPhase) => string = isWeb
+  ? usePacedRevealedText
+  : paintArrivalWhole;
+
+function paintArrivalWhole(text: string): string {
+  return text;
+}
 
 /**
  * Binds the paced reveal in @/agent-stream/text-reveal to a frame clock.
@@ -27,7 +45,7 @@ import type { MarkdownPhase } from "@/components/markdown/fence/types";
  * effects run after the whole subtree has rendered and committed, so the sample
  * covers the Markdown and highlighting work of the block this hook reveals.
  */
-export function useRevealedText(text: string, phase: MarkdownPhase): string {
+function usePacedRevealedText(text: string, phase: MarkdownPhase): string {
   const stateRef = useRef<TextRevealState>(beginTextReveal(text));
   const [, forceRender] = useState(0);
   const frameRef = useRef<number | null>(null);
