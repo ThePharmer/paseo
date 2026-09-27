@@ -1336,12 +1336,28 @@ export class MockLoadTestAgentSession implements AgentSession {
       this.finishTurnWithText(turn, `${request.count} synthetic subagents completed`);
     });
 
+    let step = 0;
     const runNext = () => {
       if (this.activeTurn !== turn) {
         return;
       }
       this.clearTurnTimer(turn);
       steps.shift()?.();
+      step += 1;
+      if (steps.length > 0) {
+        // A working parent reports context usage as it goes, like Claude does per API step.
+        this.emit({
+          type: "usage_updated",
+          provider: this.provider,
+          turnId: turn.turnId,
+          usage: {
+            inputTokens: step * 512,
+            outputTokens: step * 64,
+            contextWindowUsedTokens: step * 576,
+            contextWindowMaxTokens: 200_000,
+          },
+        });
+      }
       if (steps.length > 0) {
         turn.timer = setTimeout(runNext, request.intervalMs);
         turn.timer.unref?.();
