@@ -1896,10 +1896,9 @@ export class Session {
   /**
    * Whether this source receives child timeline items only through its child timeline
    * subscriptions. Scoping needs owned subscriptions: a legacy socket cannot route or release them.
+   * The capability is opt-in, so sockets without it keep child items on the event feed for good.
    */
   private scopesProviderSubagentTimelines(source: object): boolean {
-    // COMPAT(providerSubagentTimelineSubscriptions): added after v0.9.2, remove the broadcast of
-    // child timeline items after 2027-03-27 once the client floor advertises the capability.
     return (
       this.delivery.isModern(source) &&
       this.supportsForSource(CLIENT_CAPS.providerSubagentTimelineSubscriptions, source)

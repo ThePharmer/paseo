@@ -138,14 +138,15 @@ per socket, on that socket's newest subscription to the child, and stop on
 nothing, so hold one subscription per child and fan it out locally. Newest wins because a client
 replacing a subscription stops routing the old one before the host processes its release. Other
 sockets on the same logical session are unaffected. Sockets without the capability keep receiving
-every child's items on the event feed.
+every child's items on the event feed. The client package leaves the capability out of its
+defaults, so CLI, plugin and library consumers of the event feed keep receiving child items.
 
-The app gates on `features.providerSubagentTimelineSubscriptions`. Panes on the same child share one
-subscription per client; the last pane to close releases it
-(`packages/app/src/subagents/provider-store.ts`).
-The client restores the subscription after a reconnect, and each restored acknowledgement refetches
-the tail to repair rows missed while offline. On older hosts the pane reads the broadcast feed and
-the store drops items for children no pane observes.
+The app advertises the capability and gates on `features.providerSubagentTimelineSubscriptions`.
+Panes on the same child share one subscription per client; the last pane to close releases it
+(`packages/app/src/subagents/provider-store.ts`). The client restores the subscription after a
+reconnect, and each restored acknowledgement refetches the tail to repair rows missed while
+offline. On older hosts the pane reads the broadcast feed and the store drops items for children no
+pane observes.
 
 ## Client replica lifetime
 

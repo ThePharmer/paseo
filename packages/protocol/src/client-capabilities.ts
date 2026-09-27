@@ -27,9 +27,9 @@ export const CLIENT_CAPS = {
   providerSubagents: "provider_subagents",
   // COMPAT(projectedSubagentTimeline): added after v0.8.0, remove gates after 2027-03-14; retain wire capability.
   projectedSubagentTimeline: "projected_subagent_timeline",
-  // COMPAT(providerSubagentTimelineSubscriptions): added after v0.9.2. Capable clients receive
-  // provider child timeline items only for children they subscribed to; upserts and removes stay
-  // broadcast. Remove the broadcast path after 2027-03-27 once the client floor has it.
+  // Added after v0.9.2. Opt-in, not a client default: capable clients receive provider child
+  // timeline items only for children they subscribed to; upserts and removes stay broadcast.
+  // Clients without it, including the CLI and plugins, keep child items on the event feed.
   providerSubagentTimelineSubscriptions: "provider_subagent_timeline_subscriptions",
   // COMPAT(projectUpdates): added in v0.1.109, remove gate after 2027-01-15.
   projectUpdates: "project_updates",

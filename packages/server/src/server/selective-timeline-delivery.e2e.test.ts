@@ -6,7 +6,11 @@ import { createPersistedWorkspaceRecord } from "./workspace-registry.js";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { CLIENT_CAPS } from "@getpaseo/protocol/client-capabilities";
 import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
-import { DaemonClient, type WebSocketLike } from "@getpaseo/client/internal/daemon-client";
+import {
+  DaemonClient,
+  type DaemonClientConfig,
+  type WebSocketLike,
+} from "@getpaseo/client/internal/daemon-client";
 import { WebSocket } from "ws";
 import { createTestPaseoDaemon, type TestPaseoDaemon } from "./test-utils/paseo-daemon.js";
 import {
@@ -195,26 +199,34 @@ async function connect(input: {
   pluginTimelineItems?: boolean;
   workspaceSetupBlocked?: boolean;
 }): Promise<ConnectedClient> {
+  return open(input.clientId, {
+    [CLIENT_CAPS.ownedSubscriptions]: input.ownedSubscriptions ?? false,
+    [CLIENT_CAPS.providerSubagentTimelineSubscriptions]:
+      input.providerSubagentTimelineSubscriptions ?? false,
+    [CLIENT_CAPS.selectiveAgentTimeline]: input.selective,
+    [CLIENT_CAPS.pluginTimelineItems]: input.pluginTimelineItems ?? false,
+    [CLIENT_CAPS.workspaceSetupBlocked]: input.workspaceSetupBlocked ?? false,
+    ...(input.timelineNotifications === undefined
+      ? {}
+      : { [CLIENT_CAPS.timelineNotifications]: input.timelineNotifications }),
+    [CLIENT_CAPS.timelineReplacementInvalidation]: input.timelineReplacementInvalidation ?? false,
+  });
+}
+
+/** Without `capabilities` the client advertises the client package defaults. */
+async function open(
+  clientId: string,
+  capabilities?: DaemonClientConfig["capabilities"],
+): Promise<ConnectedClient> {
   let socket!: WebSocket;
   const client = new DaemonClient({
     url: `ws://127.0.0.1:${daemon.port}/ws`,
-    clientId: input.clientId,
+    clientId,
     webSocketFactory: (url) => {
       socket = new WebSocket(url);
       return socket as unknown as WebSocketLike;
     },
-    capabilities: {
-      [CLIENT_CAPS.ownedSubscriptions]: input.ownedSubscriptions ?? false,
-      [CLIENT_CAPS.providerSubagentTimelineSubscriptions]:
-        input.providerSubagentTimelineSubscriptions ?? false,
-      [CLIENT_CAPS.selectiveAgentTimeline]: input.selective,
-      [CLIENT_CAPS.pluginTimelineItems]: input.pluginTimelineItems ?? false,
-      [CLIENT_CAPS.workspaceSetupBlocked]: input.workspaceSetupBlocked ?? false,
-      ...(input.timelineNotifications === undefined
-        ? {}
-        : { [CLIENT_CAPS.timelineNotifications]: input.timelineNotifications }),
-      [CLIENT_CAPS.timelineReplacementInvalidation]: input.timelineReplacementInvalidation ?? false,
-    },
+    ...(capabilities ? { capabilities } : {}),
     reconnect: { enabled: false },
   });
   await client.connect();
@@ -844,6 +856,29 @@ function pushChildText(provider: CompatibilityProvider, id: string, text: string
     event: { type: "timeline", id, item: { type: "assistant_message", text } },
   });
 }
+
+test("clients on the client package defaults keep provider child timelines on the event feed", async () => {
+  const provider = await startProviderChildDaemon();
+  const library = await open("child-library");
+  expect(library.client.getLastServerInfoMessage()?.features).toMatchObject({
+    providerSubagentTimelineSubscriptions: true,
+  });
+  await library.client.observeEvents(["agent.provider_subagents.update"]).ready;
+  await library.client.createAgent({ provider: "mock", cwd: "/tmp", model: "ten-second-stream" });
+  provider.session.push({
+    type: "provider_subagent",
+    provider: "mock",
+    event: { type: "upsert", id: "child-a", title: "child-a", status: "running" },
+  });
+  pushChildText(provider, "child-a", "A1");
+
+  await library.next(isChildTimeline("child-a", "A1"), "default client child timeline");
+  await library.barrier("child-library");
+  expect({
+    timelines: childTimelineTexts(library),
+    descriptors: childDescriptorChanges(library),
+  }).toEqual({ timelines: ["child-a:A1"], descriptors: ["upsert:child-a"] });
+}, 30_000);
 
 test("capable sockets receive provider child timelines only for subscribed children", async () => {
   const provider = await startProviderChildDaemon();

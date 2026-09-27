@@ -1031,7 +1031,6 @@ test("advertises client capabilities in hello", async () => {
       project_updates: true,
       provider_subagents: true,
       projected_subagent_timeline: true,
-      provider_subagent_timeline_subscriptions: true,
       reasoning_merge_enum: true,
       terminal_reflowable_snapshot: true,
       timeline_notifications: true,

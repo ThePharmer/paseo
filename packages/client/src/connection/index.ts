@@ -124,6 +124,9 @@ export class ConnectionSubscriptions extends OwnedSubscriptions {
 
 // Protocol support belongs to the installed client. Only browser hosting needs
 // a resource supplied by the caller. Keep this exhaustive as the protocol evolves.
+// Opt-in capabilities change what an existing API delivers, so a caller migrated to the
+// replacement advertises them itself. Scoped provider child timelines move child items off the
+// `agent.provider_subagents.update` event feed onto observeProviderSubagentTimeline.
 export const DEFAULT_CLIENT_CAPABILITIES = {
   [CLIENT_CAPS.helloRejection]: true,
   [CLIENT_CAPS.ownedSubscriptions]: true,
@@ -134,7 +137,6 @@ export const DEFAULT_CLIENT_CAPABILITIES = {
   [CLIENT_CAPS.terminalReflowableSnapshot]: true,
   [CLIENT_CAPS.providerSubagents]: true,
   [CLIENT_CAPS.projectedSubagentTimeline]: true,
-  [CLIENT_CAPS.providerSubagentTimelineSubscriptions]: true,
   [CLIENT_CAPS.projectUpdates]: true,
   [CLIENT_CAPS.compactProviderSnapshots]: true,
   [CLIENT_CAPS.providerSnapshotReferences]: true,
@@ -143,7 +145,13 @@ export const DEFAULT_CLIENT_CAPABILITIES = {
   [CLIENT_CAPS.pluginTimelineItems]: true,
   [CLIENT_CAPS.workspaceSetupBlocked]: true,
   [CLIENT_CAPS.explicitEventSubscriptions]: true,
-} satisfies Record<Exclude<ClientCapability, typeof CLIENT_CAPS.browserHost>, true>;
+} satisfies Record<
+  Exclude<
+    ClientCapability,
+    typeof CLIENT_CAPS.browserHost | typeof CLIENT_CAPS.providerSubagentTimelineSubscriptions
+  >,
+  true
+>;
 
 /** Calling releases demand; ready waits for membership, or local attachment on broadcast hosts. */
 export type TimelineSubscription = (() => void) & {

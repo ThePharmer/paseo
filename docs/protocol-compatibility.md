@@ -48,6 +48,11 @@ The app, CLI, and plugins inherit those defaults; they supply only host resource
 automation, or explicit overrides. A schema accepting a message does not establish support for
 its delivery semantics.
 
+A capability that moves traffic off an existing API is opt-in instead. Leave it out of the defaults
+and advertise it only from the callers migrated to the replacement; a default would silently empty
+the old API for every other consumer. `provider_subagent_timeline_subscriptions` is the example:
+only the app advertises it (`packages/app/src/runtime/host-runtime.ts`).
+
 On capable daemons, connecting creates no timeline or event demand. Client subscriptions own their network membership,
 release it on unsubscribe, and restore it after reconnect. Raw message observers inspect traffic
 without requesting streams. Application caches and which agents are visible remain caller-owned.
