@@ -1514,7 +1514,11 @@ export const AssistantMessage = memo(function AssistantMessage({
       renderFullContent ? { text: message, capped: false } : capAssistantMessageForRender(message),
     [message, renderFullContent],
   );
-  const revealedText = useRevealedText(renderedMessage.text, phase);
+  // Content shown in full is not revealed, so pacing it would only cost renders.
+  const revealedText = useRevealedText(
+    renderedMessage.text,
+    renderFullContent ? "complete" : phase,
+  );
   const revealedMessage = renderFullContent ? renderedMessage.text : revealedText;
   const fullMessageByteLength = useMemo(
     () => (renderedMessage.capped && phase === "complete" ? getUtf8ByteLength(message) : null),
