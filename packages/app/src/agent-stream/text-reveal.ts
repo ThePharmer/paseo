@@ -16,12 +16,26 @@
  * which keeps the policy testable without a renderer.
  */
 
+import { graphemeBoundaryAtOrBefore } from "@/utils/grapheme-boundary";
+
 // Backlog is drained over this horizon. Shorter feels more like the raw arrival
 // pattern; longer adds lag the user can notice at the end of a turn.
 export const TEXT_REVEAL_HORIZON_MS = 150;
 
 /** Reveal at most once per 60Hz frame, even on high-refresh displays. */
 export const TEXT_REVEAL_FRAME_INTERVAL_MS = 1000 / 60;
+
+/**
+ * Share of the JS thread that reveal-driven re-renders of one block may take.
+ *
+ * Each reveal step re-renders the growing block, and that render costs time in
+ * proportion to the block: Markdown parsing, and a full syntax-highlight parse for a
+ * code fence. Hermes has no JIT, so on a phone a long block costs tens of
+ * milliseconds per render, and a 60Hz reveal would leave no time for input. Frames
+ * are spaced by the measured render cost instead, which keeps 60Hz where rendering
+ * is cheap and slows the reveal where it is not.
+ */
+export const TEXT_REVEAL_RENDER_BUDGET = 0.25;
 
 // A frame's elapsed time is clamped to this before it is used, so a long stall
 // (backgrounded tab, blocked main thread) doesn't produce a wild step from one
@@ -62,19 +76,6 @@ export function computeRevealStep(input: {
 
 const ZERO_WIDTH_JOINER = 0x200d;
 
-const graphemeSegmenter =
-  typeof Intl.Segmenter === "function"
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : null;
-
-/**
- * Pacing needs a conformant grapheme segmenter. Older runtimes paint each
- * arrival whole instead of risking a transient broken glyph.
- */
-export function isTextRevealPacingSupported(): boolean {
-  return graphemeSegmenter !== null;
-}
-
 /**
  * Pull a cut index back to somewhere it is safe to slice.
  *
@@ -85,15 +86,7 @@ export function isTextRevealPacingSupported(): boolean {
  * a long cluster can never stall the reveal — the next frame steps past it.
  */
 export function clampToSafeRevealBoundary(text: string, index: number): number {
-  if (index <= 0) {
-    return 0;
-  }
-  if (index >= text.length) {
-    return text.length;
-  }
-
-  const segment = graphemeSegmenter?.segment(text).containing(index);
-  return segment?.index ?? 0;
+  return graphemeBoundaryAtOrBefore(text, index);
 }
 
 export interface TextRevealFrame {
@@ -101,17 +94,42 @@ export interface TextRevealFrame {
   frameAtMs: number;
 }
 
+/** Time between reveal commits for a block whose renders cost `renderCostMs`. */
+export function revealFrameIntervalMs(renderCostMs: number | null): number {
+  return Math.max(TEXT_REVEAL_FRAME_INTERVAL_MS, (renderCostMs ?? 0) / TEXT_REVEAL_RENDER_BUDGET);
+}
+
+/** Smoothed render cost, so one slow commit such as a GC pause moves it only halfway. */
+export function nextRevealRenderCost(previousMs: number | null, sampleMs: number): number {
+  return previousMs === null ? sampleMs : (previousMs + sampleMs) / 2;
+}
+
 /**
- * Keep reveal commits at 60Hz while carrying timing remainder forward so a
- * high-refresh display does not make the reveal render at hardware frame rate.
+ * Whether enough time has passed since the last reveal commit. Unlike the frame
+ * clock this survives the reveal settling, so a block that renders slowly is not
+ * re-rendered on every arrival once it has caught up.
+ */
+export function isRevealCommitDue(
+  lastCommitAtMs: number | null,
+  timestampMs: number,
+  intervalMs: number,
+): boolean {
+  return lastCommitAtMs === null || timestampMs - lastCommitAtMs >= intervalMs;
+}
+
+/**
+ * Keep reveal commits at the frame interval (60Hz unless render cost stretches it)
+ * while carrying timing remainder forward so a high-refresh display does not make
+ * the reveal render at hardware frame rate. The first frame after the reveal
+ * settles counts as one interval, so it releases one frame's worth at that pace.
  */
 export function nextTextRevealFrame(
   previousFrameAtMs: number | null,
   timestampMs: number,
+  intervalMs: number = TEXT_REVEAL_FRAME_INTERVAL_MS,
 ): TextRevealFrame | null {
-  const elapsedMs =
-    previousFrameAtMs === null ? TEXT_REVEAL_FRAME_INTERVAL_MS : timestampMs - previousFrameAtMs;
-  if (elapsedMs < TEXT_REVEAL_FRAME_INTERVAL_MS) {
+  const elapsedMs = previousFrameAtMs === null ? intervalMs : timestampMs - previousFrameAtMs;
+  if (elapsedMs < intervalMs) {
     return null;
   }
   return {

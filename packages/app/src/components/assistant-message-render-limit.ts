@@ -1,7 +1,4 @@
-const graphemeSegmenter =
-  typeof Intl.Segmenter === "function"
-    ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
-    : null;
+import { graphemeBoundaryAtOrBefore } from "@/utils/grapheme-boundary";
 
 export const ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT = 32_000;
 
@@ -41,15 +38,6 @@ export function capAssistantMessageForRender(message: string): CappedAssistantMe
     return { text: message, capped: false };
   }
 
-  let end = ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT;
-  if (graphemeSegmenter) {
-    end = graphemeSegmenter.segment(message).containing(end)!.index;
-  } else {
-    const finalCodeUnit = message.charCodeAt(end - 1);
-    if (finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff) {
-      end -= 1;
-    }
-  }
-
+  const end = graphemeBoundaryAtOrBefore(message, ASSISTANT_MESSAGE_RENDER_CHARACTER_LIMIT);
   return { text: message.slice(0, end), capped: true };
 }
