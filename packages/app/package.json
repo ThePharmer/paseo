@@ -166,7 +166,8 @@
   },
   "reanimated": {
     "staticFeatureFlags": {
-      "FORCE_REACT_RENDER_FOR_SETTLED_ANIMATIONS": false
+      "FORCE_REACT_RENDER_FOR_SETTLED_ANIMATIONS": false,
+      "ANDROID_SYNCHRONOUSLY_UPDATE_UI_PROPS": true
     }
   }
 }
