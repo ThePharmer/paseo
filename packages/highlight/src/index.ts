@@ -7,6 +7,11 @@ export {
 } from "./parsers.js";
 export { createCodeMirrorHighlightStyle } from "./syntax-roles.js";
 export { highlightCode, highlightLine } from "./highlighter.js";
+export {
+  BackgroundHighlighter,
+  createBackgroundHighlighter,
+  type BackgroundHighlight,
+} from "./background.js";
 export { darkHighlightColors, lightHighlightColors } from "./colors.js";
 export type { SyntaxThemeId, SyntaxThemeOption, SyntaxColors } from "./themes.js";
 export {

@@ -1,3 +1,4 @@
+import type { Tree } from "@lezer/common";
 import { highlightTree } from "@lezer/highlight";
 import type { HighlightStyle, HighlightToken } from "./types.js";
 import { getParserForFile } from "./parsers.js";
@@ -11,8 +12,21 @@ export function highlightCode(code: string, filename: string): HighlightToken[][
     return code.split("\n").map((line) => [{ text: line, style: null }]);
   }
 
-  const tree = parser.parse(code);
-  const lines = code.split("\n");
+  return highlightTreeLines(code, parser.parse(code), 0, code.length);
+}
+
+/**
+ * Tokens for `code` between `from` and `to`, one list per line, read from a parse of
+ * the whole of `code`. A range that starts or ends partway through a line gives that
+ * line's part, so a caller can tokenize a long document a piece at a time.
+ */
+export function highlightTreeLines(
+  code: string,
+  tree: Tree,
+  from: number,
+  to: number,
+): HighlightToken[][] {
+  const lines = code.slice(from, to).split("\n");
   const result: HighlightToken[][] = [];
 
   for (let i = 0; i < lines.length; i++) {
@@ -20,13 +34,19 @@ export function highlightCode(code: string, filename: string): HighlightToken[][
   }
 
   // Build a map of character positions to styles
-  const styleMap: Array<HighlightStyle | null> = Array.from({ length: code.length }, () => null);
+  const styleMap: Array<HighlightStyle | null> = Array.from({ length: to - from }, () => null);
 
-  highlightTree(tree, staticSyntaxHighlighter, (from, to, classes) => {
-    for (let i = from; i < to && i < styleMap.length; i++) {
-      styleMap[i] = classes as HighlightStyle;
-    }
-  });
+  highlightTree(
+    tree,
+    staticSyntaxHighlighter,
+    (start, end, classes) => {
+      for (let i = Math.max(start, from); i < end && i < to; i++) {
+        styleMap[i - from] = classes as HighlightStyle;
+      }
+    },
+    from,
+    to,
+  );
 
   // Convert style map to tokens per line
   let pos = 0;
