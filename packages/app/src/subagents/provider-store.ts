@@ -362,10 +362,83 @@ export const useProviderSubagentStore = create<ProviderSubagentState>((set) => (
   },
 }));
 
+type ChildTimelineClient = Pick<
+  DaemonClient,
+  "fetchProviderSubagentTimeline" | "observeProviderSubagentTimeline"
+>;
+
+interface SharedChildSubscription {
+  /** One listener per open pane, called when the host (re)acknowledges the subscription. */
+  readonly acknowledged: Set<() => void>;
+  close(reportError: (error: unknown) => void): void;
+}
+
+/**
+ * Open child subscriptions per client, one per child. The host delivers each child item to a
+ * socket once, on one of that socket's subscriptions for the child, so a second handle would be
+ * acknowledged and then starve. Panes on the same child share one subscription instead, and the
+ * last pane to close releases it.
+ */
+const childSubscriptions = new WeakMap<ChildTimelineClient, Map<string, SharedChildSubscription>>();
+
+function retainChildSubscription({
+  client,
+  serverId,
+  parentAgentId,
+  subagentId,
+  onAcknowledged,
+}: {
+  client: ChildTimelineClient;
+  serverId: string;
+  parentAgentId: string;
+  subagentId: string;
+  onAcknowledged: () => void;
+}): (reportError: (error: unknown) => void) => void {
+  let subscriptions = childSubscriptions.get(client);
+  if (!subscriptions) {
+    subscriptions = new Map();
+    childSubscriptions.set(client, subscriptions);
+  }
+  const owners = subscriptions;
+  const key = providerSubagentKey(serverId, parentAgentId, subagentId);
+  let shared = owners.get(key);
+  if (!shared) {
+    const live = client.observeProviderSubagentTimeline(parentAgentId, subagentId);
+    const acknowledged = new Set<() => void>();
+    const stop = live.subscribe({
+      snapshot: () => {
+        for (const listener of acknowledged) listener();
+      },
+      update: (message) => {
+        if (message.type !== "agent.provider_subagents.update") return;
+        useProviderSubagentStore.getState().applyUpdate(serverId, message.payload);
+      },
+    });
+    shared = {
+      acknowledged,
+      close: (reportError) => {
+        owners.delete(key);
+        stop();
+        void live.release().catch(reportError);
+      },
+    };
+    owners.set(key, shared);
+  }
+  const owner = shared;
+  // A fresh closure per pane, so two panes never collapse into one set entry.
+  const listener = () => onAcknowledged();
+  owner.acknowledged.add(listener);
+  return (reportError) => {
+    if (!owner.acknowledged.delete(listener)) return;
+    if (owner.acknowledged.size === 0) owner.close(reportError);
+  };
+}
+
 /**
  * Owns child history bootstrap, live delivery and recovery while a pane observes the child.
  * With `scopedDelivery` the host sends this child's timeline items only to sockets subscribed to
- * it, so the pane holds that subscription; otherwise they arrive on the shared event feed.
+ * it, so the pane shares the client's subscription to that child; otherwise they arrive on the
+ * shared event feed.
  */
 export function observeProviderSubagentTimeline({
   client,
@@ -376,7 +449,7 @@ export function observeProviderSubagentTimeline({
   scopedDelivery,
   reportError,
 }: {
-  client: Pick<DaemonClient, "fetchProviderSubagentTimeline" | "observeProviderSubagentTimeline">;
+  client: ChildTimelineClient;
   serverId: string;
   parentAgentId: string;
   subagentId: string;
@@ -419,25 +492,23 @@ export function observeProviderSubagentTimeline({
     if (state.timelines.get(key)?.needsRefresh) requestRefresh();
   });
   // Subscribe before the first tail read: the host registers the subscription before it reads
-  // the page, so no row falls between the page and the stream.
-  const live = scopedDelivery
-    ? client.observeProviderSubagentTimeline(parentAgentId, subagentId)
+  // the page, so no row falls between the page and the stream. The first acknowledgement usually
+  // lands while the initial read is in flight and is a no-op. Later ones follow a reconnect, where
+  // the tail repairs rows missed while offline.
+  const releaseLive = scopedDelivery
+    ? retainChildSubscription({
+        client,
+        serverId,
+        parentAgentId,
+        subagentId,
+        onAcknowledged: requestRefresh,
+      })
     : null;
-  const stopLive = live?.subscribe({
-    // The first acknowledgement usually lands while the initial read is in flight and is a
-    // no-op. Later ones follow a reconnect, where the tail repairs rows missed while offline.
-    snapshot: requestRefresh,
-    update: (message) => {
-      if (message.type !== "agent.provider_subagents.update") return;
-      useProviderSubagentStore.getState().applyUpdate(serverId, message.payload);
-    },
-  });
   requestRefresh();
   return () => {
     active = false;
     unsubscribe();
-    stopLive?.();
-    void live?.release().catch(reportError);
+    releaseLive?.(reportError);
     useProviderSubagentStore.getState().releaseTimeline(serverId, parentAgentId, subagentId);
   };
 }

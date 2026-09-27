@@ -906,6 +906,50 @@ test("capable sockets receive provider child timelines only for subscribed child
   expect(childTimelineTexts(capable)).toEqual([]);
 }, 30_000);
 
+test("a socket with two subscriptions to one child receives each item once, on the newest", async () => {
+  const provider = await startProviderChildDaemon();
+  const capable = await connectChildObserver({ clientId: "child-handles", scoped: true });
+  const agent = await capable.client.createAgent({
+    provider: "mock",
+    cwd: "/tmp",
+    model: "ten-second-stream",
+  });
+  function track(handle: ReturnType<DaemonClient["observeProviderSubagentTimeline"]>) {
+    const texts: string[] = [];
+    handle.subscribe({
+      snapshot: () => {},
+      update: (message) => {
+        if (
+          message.type === "agent.provider_subagents.update" &&
+          message.payload.kind === "timeline" &&
+          message.payload.item.type === "assistant_message"
+        )
+          texts.push(message.payload.item.text);
+      },
+    });
+    return texts;
+  }
+  const older = capable.client.observeProviderSubagentTimeline(agent.id, "child-a");
+  await older.ready;
+  const newer = capable.client.observeProviderSubagentTimeline(agent.id, "child-a");
+  await newer.ready;
+  const received = { older: track(older), newer: track(newer) };
+
+  pushChildText(provider, "child-a", "both open");
+  await capable.next(isChildTimeline("child-a", "both open"), "one delivery per socket");
+  await capable.barrier("child-handles-both");
+  expect(childTimelineTexts(capable)).toEqual(["child-a:both open"]);
+  expect(received).toEqual({ older: [], newer: ["both open"] });
+
+  await newer.release();
+  capable.clear();
+  pushChildText(provider, "child-a", "older remains");
+  await capable.next(isChildTimeline("child-a", "older remains"), "remaining handle delivery");
+  await capable.barrier("child-handles-older");
+  expect(childTimelineTexts(capable)).toEqual(["child-a:older remains"]);
+  expect(received).toEqual({ older: ["older remains"], newer: ["both open"] });
+}, 30_000);
+
 test("provider child subscriptions belong to one socket and survive only through reconnect", async () => {
   const provider = await startProviderChildDaemon();
   const owner = await connectChildObserver({ clientId: "child-shared", scoped: true });
