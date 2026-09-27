@@ -14,12 +14,18 @@ afterEach(() => {
   useProviderSubagentStore.setState({
     descriptors: new Map(),
     timelines: new Map(),
+    observedTimelines: new Map(),
     hiddenFromTrack: new Set(),
   });
 });
 
+function observeChildTimeline() {
+  useProviderSubagentStore.getState().retainTimeline(SERVER_ID, PARENT_ID, SUBAGENT_ID);
+}
+
 describe("provider subagent client store", () => {
   test("builds a shared stream model from ordered provider updates", () => {
+    observeChildTimeline();
     const subagents = useProviderSubagentStore.getState();
     subagents.applyUpdate(SERVER_ID, {
       kind: "upsert",
@@ -118,6 +124,7 @@ describe("provider subagent client store", () => {
   });
 
   test("removes timelines for children no longer returned by the provider", () => {
+    observeChildTimeline();
     const store = useProviderSubagentStore.getState();
     store.applyUpdate(SERVER_ID, {
       kind: "timeline",
@@ -140,6 +147,7 @@ describe("provider subagent client store", () => {
   });
 
   test("hides finished children locally without removing their timelines", () => {
+    observeChildTimeline();
     const store = useProviderSubagentStore.getState();
     store.applyUpdate(SERVER_ID, {
       kind: "upsert",
@@ -257,6 +265,7 @@ describe("provider subagent client store", () => {
     expect(useProviderSubagentStore.getState().hiddenFromTrack.has(key)).toBe(true);
   });
   test("applies terminal list status to a timeline received before its descriptor", () => {
+    observeChildTimeline();
     const store = useProviderSubagentStore.getState();
     store.applyUpdate(SERVER_ID, {
       kind: "timeline",
@@ -293,6 +302,7 @@ describe("provider subagent client store", () => {
   });
 
   test("keeps late timeline rows terminal after the descriptor completes", () => {
+    observeChildTimeline();
     const store = useProviderSubagentStore.getState();
     store.applyUpdate(SERVER_ID, {
       kind: "upsert",
@@ -329,6 +339,7 @@ describe("provider subagent client store", () => {
   });
 
   test("merges bounded older pages and tracks whether more history remains", () => {
+    observeChildTimeline();
     const store = useProviderSubagentStore.getState();
     store.replaceTimeline(SERVER_ID, {
       projection: "projected",
@@ -388,6 +399,7 @@ describe("provider subagent client store", () => {
   });
 
   test("ignores delayed live updates from a stale timeline epoch", () => {
+    observeChildTimeline();
     const store = useProviderSubagentStore.getState();
     store.replaceTimeline(SERVER_ID, {
       projection: "projected",
@@ -435,6 +447,7 @@ describe("provider subagent client store", () => {
   });
 
   test("replaces cached rows with an authoritative tail page after a reconnect gap", () => {
+    observeChildTimeline();
     const store = useProviderSubagentStore.getState();
     store.replaceTimeline(SERVER_ID, {
       projection: "projected",
@@ -562,6 +575,7 @@ describe("projected child history", () => {
       .replaceTimeline(SERVER_ID, response(value, seqStart, seqEnd, direction));
   }
   test("replaces overlapping fetched text and continues live streaming", () => {
+    observeChildTimeline();
     page("AB", 1, 2);
     stream(3, "C");
     page("ABCD", 1, 4, "after");
@@ -570,6 +584,7 @@ describe("projected child history", () => {
     expect(text()).toBe("ABCDE");
   });
   test("reconciles a tail snapshot racing newer live text", () => {
+    observeChildTimeline();
     stream(1, "A");
     stream(2, "B");
     stream(3, "C");
@@ -667,6 +682,7 @@ describe("projected child history", () => {
     }
   });
   test("keeps a completed tool at its original position after fetching its latest update", () => {
+    observeChildTimeline();
     const payload = response("Answer", 1, 5);
     payload.rows = [
       {
@@ -703,6 +719,7 @@ describe("projected child history", () => {
     ]);
   });
   test("retains projected display state rather than cumulative tool snapshots", () => {
+    observeChildTimeline();
     for (let seq = 1; seq <= 2000; seq++) {
       useProviderSubagentStore.getState().applyUpdate(SERVER_ID, {
         kind: "timeline",
@@ -725,5 +742,141 @@ describe("projected child history", () => {
     expect([...current().tail, ...current().head]).toHaveLength(1);
     expect(JSON.stringify(current()).length).toBeLessThan(1_000_000);
     expect(current().lastSeq).toBe(2000);
+  });
+});
+
+describe("child timelines follow their observers", () => {
+  const key = providerSubagentKey(SERVER_ID, PARENT_ID, SUBAGENT_ID);
+  const timestamp = "2026-09-27T00:00:00.000Z";
+  const hasTimeline = () => useProviderSubagentStore.getState().timelines.has(key);
+  const text = () => {
+    const timeline = useProviderSubagentStore.getState().timelines.get(key);
+    return [...(timeline?.tail ?? []), ...(timeline?.head ?? [])]
+      .map((item) => (item.kind === "assistant_message" ? item.text : ""))
+      .join("");
+  };
+  function stream(seq: number, value: string) {
+    useProviderSubagentStore.getState().applyUpdate(SERVER_ID, {
+      kind: "timeline",
+      parentAgentId: PARENT_ID,
+      subagentId: SUBAGENT_ID,
+      provider: "codex",
+      epoch: "e",
+      seq,
+      timestamp,
+      item: { type: "assistant_message", messageId: "m", text: value },
+    });
+  }
+  type Payload = Parameters<
+    ReturnType<typeof useProviderSubagentStore.getState>["replaceTimeline"]
+  >[1];
+  function tailPage(value: string, seq: number): Payload {
+    return {
+      requestId: "r",
+      parentAgentId: PARENT_ID,
+      subagentId: SUBAGENT_ID,
+      provider: "codex",
+      epoch: "e",
+      direction: "tail",
+      projection: "projected",
+      reset: false,
+      staleCursor: false,
+      gap: false,
+      window: { minSeq: 1, maxSeq: seq, nextSeq: seq + 1 },
+      startCursor: { epoch: "e", seq },
+      endCursor: { epoch: "e", seq },
+      hasOlder: false,
+      hasNewer: false,
+      error: null,
+      rows: [
+        {
+          seq,
+          timestamp,
+          item: { type: "assistant_message", messageId: "m", text: value },
+        },
+      ],
+    };
+  }
+  function openPane(client: Parameters<typeof observeProviderSubagentTimeline>[0]["client"]) {
+    return observeProviderSubagentTimeline({
+      client,
+      serverId: SERVER_ID,
+      parentAgentId: PARENT_ID,
+      subagentId: SUBAGENT_ID,
+      limit: 100,
+      reportError: (error) => {
+        throw error;
+      },
+    });
+  }
+  const tailClient = {
+    async fetchProviderSubagentTimeline() {
+      return tailPage("A", 1);
+    },
+  };
+
+  test("does not store live updates for a child nobody observes", () => {
+    const before = useProviderSubagentStore.getState();
+
+    stream(1, "A");
+
+    expect(useProviderSubagentStore.getState()).toBe(before);
+    expect(hasTimeline()).toBe(false);
+  });
+
+  test("drops the timeline when the last observer stops and ignores later updates", async () => {
+    const closePane = openPane(tailClient);
+    await expect.poll(text).toBe("A");
+
+    closePane();
+    expect(hasTimeline()).toBe(false);
+
+    stream(2, "B");
+    expect(hasTimeline()).toBe(false);
+  });
+
+  test("keeps the timeline and live updates while another observer remains", async () => {
+    const closeFirst = openPane(tailClient);
+    const closeSecond = openPane(tailClient);
+    await expect.poll(text).toBe("A");
+
+    closeFirst();
+    expect(text()).toBe("A");
+    stream(2, "B");
+    expect(text()).toBe("AB");
+
+    closeSecond();
+    expect(hasTimeline()).toBe(false);
+  });
+
+  test("discards a history page that resolves after the pane closed", async () => {
+    const closePane = openPane(tailClient);
+    await expect.poll(text).toBe("A");
+    closePane();
+
+    useProviderSubagentStore.getState().replaceTimeline(SERVER_ID, tailPage("Late page", 1));
+
+    expect(hasTimeline()).toBe(false);
+  });
+
+  test("fetches the tail page again when the pane reopens", async () => {
+    let calls = 0;
+    const client = {
+      async fetchProviderSubagentTimeline() {
+        calls++;
+        return tailPage(calls === 1 ? "First open" : "Second open", calls);
+      },
+    };
+    const closeFirst = openPane(client);
+    await expect.poll(text).toBe("First open");
+    closeFirst();
+
+    const closeSecond = openPane(client);
+    try {
+      await expect.poll(text).toBe("Second open");
+      expect(calls).toBe(2);
+    } finally {
+      closeSecond();
+    }
   });
 });
