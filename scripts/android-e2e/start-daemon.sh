@@ -28,7 +28,10 @@ git -C "${workspace}" -c user.name=e2e -c user.email=e2e@example.invalid commit 
 # The supervisor entrypoint is the supported launch path (docs/ad-hoc-daemon-testing.md).
 # No relay, no speech model downloads, any Origin. Binding loopback is enough:
 # the emulator reaches it through `adb reverse`.
+# PASEO_NODE_ENV=development, when the caller sets it, registers the mock
+# providers that the agent-memory scenario drives.
 PASEO_HOME="${home}" \
+  PASEO_NODE_ENV="${PASEO_NODE_ENV:-}" \
   PASEO_LISTEN="127.0.0.1:${port}" \
   PASEO_RELAY_ENABLED=0 \
   PASEO_DICTATION_ENABLED=0 \

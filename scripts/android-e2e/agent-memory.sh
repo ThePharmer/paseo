@@ -106,8 +106,13 @@ for batch in $(seq 1 "${batches}"); do
     "${cli[@]}" run -d --json "${host[@]}" \
       --provider mock --model ten-second-stream \
       --workspace "${WORKSPACE_ID}" --cwd "${WORKSPACE_DIR}" \
-      --title "memory ${batch}.${index}" "${prompt}" >>"${out}/spawned.jsonl" 2>>"${out}/spawn-errors.log" ||
+      --title "memory ${batch}.${index}" "${prompt}" >>"${out}/spawned.jsonl" 2>>"${out}/spawn-errors.log" || {
+      # Without agents the run measures an idle app; stop instead of reporting that.
       log_event "batch ${batch}: spawn ${index} failed"
+      tail -n 20 "${out}/spawn-errors.log"
+      echo "::error::Spawning mock agents failed; see agent-memory/spawn-errors.log."
+      exit 1
+    }
   done
   sleep "${batch_gap_s}"
   pid="$(app_pid)"

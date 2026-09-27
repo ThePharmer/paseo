@@ -218,6 +218,8 @@ jobs:
         run: npm install -g "agent-device@$AGENT_DEVICE_VERSION"
 
       - name: Start the daemon with a fixture workspace
+        env:
+          PASEO_NODE_ENV: ${{ inputs.scenario == 'agent-memory' && 'development' || '' }}
         run: bash ci/scripts/android-e2e/start-daemon.sh "$DAEMON_SRC_DIR" "$RUNNER_TEMP/e2e" "$DAEMON_PORT"
 
       - name: Enable KVM
