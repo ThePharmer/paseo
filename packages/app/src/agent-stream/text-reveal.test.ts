@@ -6,11 +6,15 @@ import {
   clampToSafeRevealBoundary,
   completeTextReveal,
   computeRevealStep,
+  isRevealCommitDue,
+  nextRevealRenderCost,
   nextTextRevealFrame,
   isTextRevealSettled,
   retargetTextReveal,
+  revealFrameIntervalMs,
   TEXT_REVEAL_FRAME_INTERVAL_MS,
   TEXT_REVEAL_HORIZON_MS,
+  TEXT_REVEAL_RENDER_BUDGET,
   visibleRevealedText,
 } from "./text-reveal";
 
@@ -158,6 +162,43 @@ describe("nextTextRevealFrame", () => {
       elapsedMs: 17,
       frameAtMs: expect.closeTo(TEXT_REVEAL_FRAME_INTERVAL_MS, 5),
     });
+  });
+});
+
+describe("reveal render budget", () => {
+  it("keeps 60Hz while renders are cheap or unmeasured", () => {
+    expect(revealFrameIntervalMs(null)).toBe(TEXT_REVEAL_FRAME_INTERVAL_MS);
+    expect(revealFrameIntervalMs(2)).toBe(TEXT_REVEAL_FRAME_INTERVAL_MS);
+  });
+
+  it("spaces frames so renders stay within the budget", () => {
+    expect(revealFrameIntervalMs(30)).toBe(30 / TEXT_REVEAL_RENDER_BUDGET);
+    expect(30 / revealFrameIntervalMs(30)).toBeCloseTo(TEXT_REVEAL_RENDER_BUDGET);
+  });
+
+  it("smooths render cost samples", () => {
+    expect(nextRevealRenderCost(null, 40)).toBe(40);
+    expect(nextRevealRenderCost(40, 200)).toBe(120);
+    expect(nextRevealRenderCost(120, 40)).toBe(80);
+  });
+
+  it("holds a commit until the interval has passed since the last one", () => {
+    expect(isRevealCommitDue(null, 5, 120)).toBe(true);
+    expect(isRevealCommitDue(100, 150, 120)).toBe(false);
+    expect(isRevealCommitDue(100, 220, 120)).toBe(true);
+  });
+
+  it("stretches the frame clock to the interval", () => {
+    expect(nextTextRevealFrame(0, 100, 120)).toBeNull();
+    expect(nextTextRevealFrame(0, 125, 120)?.elapsedMs).toBe(125);
+    expect(nextTextRevealFrame(null, 500, 120)?.elapsedMs).toBe(120);
+  });
+
+  it("releases the whole backlog once a frame spans the horizon", () => {
+    let state = retargetTextReveal(beginTextReveal("a"), `a${"b".repeat(400)}`);
+    const frame = nextTextRevealFrame(null, 0, revealFrameIntervalMs(TEXT_REVEAL_HORIZON_MS));
+    state = advanceTextReveal(state, frame!.elapsedMs);
+    expect(isTextRevealSettled(state)).toBe(true);
   });
 });
 
