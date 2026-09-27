@@ -135,13 +135,18 @@ function connection(
   };
 }
 
-test("a plain client advertises every protocol capability and no browser host", async () => {
+test("a plain client advertises every default protocol capability and no host-owned ones", async () => {
   const h = connection();
   try {
     const ready = h.client.connect();
     h.open();
     await ready;
-    const { browserHost: _browser, ...protocolCapabilities } = CLIENT_CAPS;
+    const {
+      browserHost: _browser,
+      // Opt-in: event feed consumers keep child timeline items unless their host subscribes.
+      providerSubagentTimelineSubscriptions: _childTimelines,
+      ...protocolCapabilities
+    } = CLIENT_CAPS;
     // Every new capability needs a deliberate default or a host-owned exception.
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0].capabilities).toEqual(
