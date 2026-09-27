@@ -932,6 +932,89 @@ describe("child timelines follow their observers", () => {
     }
   });
 
+  /**
+   * One socket to a host that scopes child delivery. The host sends each child item once per
+   * socket, tagged with the first subscription it still holds for the child, and the client routes
+   * it only to that handle. Releasing a handle drops its client route at once; the host forgets the
+   * subscription only when it processes the release.
+   */
+  function socketHost(pages: () => Payload) {
+    const onHost: string[] = [];
+    const routes = new Map<string, Set<ChildObserver>>();
+    const releasing: string[] = [];
+    let created = 0;
+    const client: PaneClient = {
+      async fetchProviderSubagentTimeline() {
+        return pages();
+      },
+      observeProviderSubagentTimeline() {
+        const id = `subscription-${++created}`;
+        onHost.push(id);
+        const observers = new Set<ChildObserver>();
+        routes.set(id, observers);
+        const handle: ChildSubscription = {
+          subscriptionId: id,
+          ready: new Promise(() => {}),
+          subscribe(observer) {
+            observers.add(observer);
+            return () => observers.delete(observer);
+          },
+          async release() {
+            routes.delete(id);
+            releasing.push(id);
+          },
+        };
+        return handle;
+      },
+    };
+    return {
+      client,
+      hostSubscriptions: () => [...onHost],
+      processReleases() {
+        for (const id of releasing.splice(0)) onHost.splice(onHost.indexOf(id), 1);
+      },
+      deliver(seq: number, value: string) {
+        const [tagged] = onHost;
+        for (const observer of (tagged && routes.get(tagged)) || [])
+          observer.update({
+            type: "agent.provider_subagents.update",
+            payload: {
+              kind: "timeline",
+              parentAgentId: PARENT_ID,
+              subagentId: SUBAGENT_ID,
+              provider: "codex",
+              epoch: "e",
+              seq,
+              timestamp,
+              item: { type: "assistant_message", messageId: "m", text: value },
+            },
+          });
+      },
+    };
+  }
+
+  test("two panes on one child share a subscription that outlives the first pane", async () => {
+    const host = socketHost(() => tailPage("A", 1));
+    const closeFirst = openPane(host.client, true);
+    const closeSecond = openPane(host.client, true);
+    await expect.poll(text).toBe("A");
+    host.deliver(2, "B");
+    expect(text()).toBe("AB");
+    expect(host.hostSubscriptions()).toHaveLength(1);
+
+    closeFirst();
+    // The child's final update reaches the socket before the host sees any release.
+    host.deliver(3, "C");
+    host.processReleases();
+    expect(text()).toBe("ABC");
+    expect(host.hostSubscriptions()).toHaveLength(1);
+
+    closeSecond();
+    host.processReleases();
+    expect(host.hostSubscriptions()).toEqual([]);
+    expect(hasTimeline()).toBe(false);
+  });
+
   test("keeps reading the broadcast feed without subscribing on older hosts", async () => {
     const closePane = openPane(tailClient);
     await expect.poll(text).toBe("A");

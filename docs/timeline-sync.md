@@ -132,13 +132,17 @@ Descriptor `upsert` and `remove` updates go to every socket subscribed to
 `agent.provider_subagents.update` events; the subagents track needs them for every parent. Timeline
 items carry transcript text and tool output, so a socket advertising
 `provider_subagent_timeline_subscriptions` with owned subscriptions receives them only for children
-it subscribed to with `agent.provider_subagents.timeline.subscribe.request`. The items arrive on that
-subscription, once per socket, and stop on `subscription.release.request` or disconnect. Other
+it subscribed to with `agent.provider_subagents.timeline.subscribe.request`. The items arrive once
+per socket, on that socket's newest subscription to the child, and stop on
+`subscription.release.request` or disconnect. Other handles to the same child on that socket receive
+nothing, so hold one subscription per child and fan it out locally. Newest wins because a client
+replacing a subscription stops routing the old one before the host processes its release. Other
 sockets on the same logical session are unaffected. Sockets without the capability keep receiving
 every child's items on the event feed.
 
-The app gates on `features.providerSubagentTimelineSubscriptions`: an open child pane holds the
-subscription and releases it when the pane closes (`packages/app/src/subagents/provider-store.ts`).
+The app gates on `features.providerSubagentTimelineSubscriptions`. Panes on the same child share one
+subscription per client; the last pane to close releases it
+(`packages/app/src/subagents/provider-store.ts`).
 The client restores the subscription after a reconnect, and each restored acknowledgement refetches
 the tail to repair rows missed while offline. On older hosts the pane reads the broadcast feed and
 the store drops items for children no pane observes.

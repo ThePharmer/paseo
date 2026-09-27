@@ -1910,20 +1910,23 @@ export class Session {
     update: Extract<ProviderSubagentManagerEvent, { type: "timeline" }>,
     message: SessionOutboundMessage,
   ): void {
-    // A socket holding several subscriptions to one child receives each item once.
-    const delivered = new Set<object>();
+    // A socket holding several subscriptions to one child receives each item once, on its newest.
+    // A client that replaces its subscription stops routing the old one before this host
+    // processes the release, so an item tagged with the old one would be dropped.
+    const newest = new Map<object, OwnedSubscription>();
     for (const subscription of this.providerSubagentTimelineSubscriptions.values()) {
-      const source = subscription.owner.source;
       if (
-        delivered.has(source) ||
-        subscription.parentAgentId !== update.parentAgentId ||
-        subscription.subagentId !== update.subagentId ||
-        !this.scopesProviderSubagentTimelines(source) ||
-        !this.supportsSubagentTimelineItem(update.row.item, source)
+        subscription.parentAgentId === update.parentAgentId &&
+        subscription.subagentId === update.subagentId
       )
-        continue;
-      subscription.owner.emit(message);
-      delivered.add(source);
+        newest.set(subscription.owner.source, subscription.owner);
+    }
+    for (const [source, owner] of newest) {
+      if (
+        this.scopesProviderSubagentTimelines(source) &&
+        this.supportsSubagentTimelineItem(update.row.item, source)
+      )
+        owner.emit(message);
     }
   }
 
