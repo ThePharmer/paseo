@@ -28,8 +28,9 @@ interface ProviderSubagentState {
   descriptors: Map<string, ProviderSubagentDescriptorPayload>;
   timelines: Map<string, ProviderSubagentTimelineState>;
   /**
-   * Open panes per child. The daemon broadcasts every child's timeline to every client, so
-   * the app keeps a transcript only while a pane observes it; opening a pane fetches the tail.
+   * Open panes per child. The app keeps a transcript only while a pane observes it; opening a
+   * pane fetches the tail. Older hosts broadcast every child's timeline, so updates for children
+   * nobody observes are dropped here.
    */
   observedTimelines: Map<string, number>;
   hiddenFromTrack: Set<string>;
@@ -361,20 +362,26 @@ export const useProviderSubagentStore = create<ProviderSubagentState>((set) => (
   },
 }));
 
-/** Owns child history bootstrap and recovery while a pane observes the child. */
+/**
+ * Owns child history bootstrap, live delivery and recovery while a pane observes the child.
+ * With `scopedDelivery` the host sends this child's timeline items only to sockets subscribed to
+ * it, so the pane holds that subscription; otherwise they arrive on the shared event feed.
+ */
 export function observeProviderSubagentTimeline({
   client,
   serverId,
   parentAgentId,
   subagentId,
   limit,
+  scopedDelivery,
   reportError,
 }: {
-  client: Pick<DaemonClient, "fetchProviderSubagentTimeline">;
+  client: Pick<DaemonClient, "fetchProviderSubagentTimeline" | "observeProviderSubagentTimeline">;
   serverId: string;
   parentAgentId: string;
   subagentId: string;
   limit: number;
+  scopedDelivery: boolean;
   reportError: (error: unknown) => void;
 }): () => void {
   const key = providerSubagentKey(serverId, parentAgentId, subagentId);
@@ -411,10 +418,26 @@ export function observeProviderSubagentTimeline({
   const unsubscribe = useProviderSubagentStore.subscribe((state) => {
     if (state.timelines.get(key)?.needsRefresh) requestRefresh();
   });
+  // Subscribe before the first tail read: the host registers the subscription before it reads
+  // the page, so no row falls between the page and the stream.
+  const live = scopedDelivery
+    ? client.observeProviderSubagentTimeline(parentAgentId, subagentId)
+    : null;
+  const stopLive = live?.subscribe({
+    // The first acknowledgement usually lands while the initial read is in flight and is a
+    // no-op. Later ones follow a reconnect, where the tail repairs rows missed while offline.
+    snapshot: requestRefresh,
+    update: (message) => {
+      if (message.type !== "agent.provider_subagents.update") return;
+      useProviderSubagentStore.getState().applyUpdate(serverId, message.payload);
+    },
+  });
   requestRefresh();
   return () => {
     active = false;
     unsubscribe();
+    stopLive?.();
+    void live?.release().catch(reportError);
     useProviderSubagentStore.getState().releaseTimeline(serverId, parentAgentId, subagentId);
   };
 }
