@@ -30,6 +30,7 @@ import type {
   ToolCallDetail,
   ToolCallTimelineItem,
 } from "../agent-sdk-types.js";
+import type { ProviderSubagentInputEvent } from "../provider-subagents/store.js";
 import { importSessionFromPersistence } from "../provider-session-import.js";
 import { getAgentProviderDefinition } from "@getpaseo/protocol/provider-manifest";
 
@@ -225,6 +226,13 @@ interface LargeAgentStreamPayloadRequest {
 interface AgentStreamStressRequest {
   count: number;
   coalesced: boolean;
+}
+
+interface SyntheticSubagentsRequest {
+  count: number;
+  toolResults: number;
+  toolResultBytes: number;
+  intervalMs: number;
 }
 
 type SteeringReplayShape = "claude" | "codex";
@@ -423,6 +431,39 @@ function parseAgentStreamStressPrompt(prompt: AgentPromptInput): AgentStreamStre
     count: Math.min(count, 5_000),
     coalesced: Boolean(match[2]),
   };
+}
+
+// Drives many-agent memory tests: the subagents' timelines reach every client that subscribes to
+// provider subagent updates, like Claude's Task sidechains.
+function parseSyntheticSubagentsPrompt(prompt: AgentPromptInput): SyntheticSubagentsRequest | null {
+  const match =
+    /emit\s+(\d+)\s+synthetic\s+subagents?(?:\s+with\s+(\d+)\s+tool\s+results?)?(?:\s+of\s+(\d+)\s*KB)?(?:\s+every\s+(\d+)\s*ms)?/i.exec(
+      promptToText(prompt),
+    );
+  if (!match) {
+    return null;
+  }
+  const count = Number(match[1]);
+  if (!Number.isSafeInteger(count) || count <= 0) {
+    return null;
+  }
+  return {
+    count: Math.min(count, 20),
+    toolResults: Math.min(Number(match[2] ?? 10), 200),
+    toolResultBytes: Math.min(Number(match[3] ?? 16), 64) * 1024,
+    intervalMs: Math.min(Number(match[4] ?? 250), 10_000),
+  };
+}
+
+function buildSyntheticFileContent(label: string, bytes: number): string {
+  const lines: string[] = [];
+  let length = 0;
+  for (let line = 1; length < bytes; line += 1) {
+    const text = `export const ${label.replace(/[^A-Za-z0-9]/g, "_")}_${line} = "${line.toString(36).padStart(8, "0")}";`;
+    lines.push(text);
+    length += text.length + 1;
+  }
+  return lines.join("\n");
 }
 
 function parseStructuredBranchNamePrompt(
@@ -830,6 +871,7 @@ export class MockLoadTestAgentSession implements AgentSession {
     this.activeTurn = turn;
     const largePayload = parseLargeAgentStreamPayloadPrompt(prompt);
     const stress = parseAgentStreamStressPrompt(prompt);
+    const syntheticSubagents = parseSyntheticSubagentsPrompt(prompt);
     const questionPrompt = parseMockQuestionPrompt(prompt);
     const structuredBranchName = parseStructuredBranchNamePrompt(prompt);
     const settledAssistantImageMarkdown = parseSettledAssistantImageMarkdown(prompt);
@@ -855,6 +897,8 @@ export class MockLoadTestAgentSession implements AgentSession {
         this.scheduleLargePayloadTurn(turn, largePayload);
       } else if (stress) {
         this.scheduleStressTurn(turn, stress);
+      } else if (syntheticSubagents) {
+        this.scheduleSyntheticSubagentsTurn(turn, syntheticSubagents);
       } else {
         this.schedule(turn, 0);
       }
@@ -1193,6 +1237,117 @@ export class MockLoadTestAgentSession implements AgentSession {
     turn.timer = setTimeout(() => {
       this.emitStressTurn(turn, stress);
     }, 0);
+    turn.timer.unref?.();
+  }
+
+  private scheduleSyntheticSubagentsTurn(
+    turn: ActiveTurn,
+    request: SyntheticSubagentsRequest,
+  ): void {
+    const subagents = Array.from({ length: request.count }, (_, index) => ({
+      id: `${turn.turnId}:subagent:${index + 1}`,
+      taskCallId: `${turn.turnId}:task:${index + 1}`,
+      title: `Synthetic subagent ${index + 1}`,
+    }));
+    const emitSubagent = (event: ProviderSubagentInputEvent) => {
+      this.emit({ type: "provider_subagent", provider: this.provider, event });
+    };
+    const taskDetail = (title: string, log: string): ToolCallDetail => ({
+      type: "sub_agent",
+      subAgentType: "Explore",
+      description: title,
+      log,
+    });
+    const steps: Array<() => void> = [
+      () => {
+        this.emitTurnStarted(turn);
+        this.emitTimeline(turn.turnId, {
+          type: "assistant_message",
+          text: `Spawning ${request.count} synthetic subagents.`,
+          messageId: turn.assistantMessageId,
+        });
+        for (const subagent of subagents) {
+          this.emitTimeline(
+            turn.turnId,
+            createToolCall({
+              callId: subagent.taskCallId,
+              name: "Task",
+              status: "running",
+              detail: taskDetail(subagent.title, ""),
+            }),
+          );
+          emitSubagent({
+            type: "upsert",
+            id: subagent.id,
+            title: subagent.title,
+            description: "Synthetic subagent for many-agent memory tests",
+            status: "running",
+            toolCallId: subagent.taskCallId,
+          });
+        }
+      },
+    ];
+    for (let result = 1; result <= request.toolResults; result += 1) {
+      for (const subagent of subagents) {
+        steps.push(() => {
+          const callId = `${subagent.id}:read:${result}`;
+          const filePath = `src/synthetic/${subagent.id.slice(-12)}/file-${result}.ts`;
+          emitSubagent({
+            type: "timeline",
+            id: subagent.id,
+            item: {
+              type: "assistant_message",
+              text: `Reading ${filePath} to check how it handles step ${result}.`,
+            },
+          });
+          emitSubagent({
+            type: "timeline",
+            id: subagent.id,
+            item: createToolCall({
+              callId,
+              name: "read",
+              status: "completed",
+              detail: {
+                type: "read",
+                filePath,
+                content: buildSyntheticFileContent(
+                  `${subagent.title} ${result}`,
+                  request.toolResultBytes,
+                ),
+              },
+            }),
+          });
+        });
+      }
+    }
+    steps.push(() => {
+      for (const subagent of subagents) {
+        emitSubagent({ type: "upsert", id: subagent.id, status: "completed" });
+        this.emitTimeline(
+          turn.turnId,
+          createToolCall({
+            callId: subagent.taskCallId,
+            name: "Task",
+            status: "completed",
+            detail: taskDetail(subagent.title, `[read] ${request.toolResults} files`),
+          }),
+        );
+      }
+      this.finishTurnWithText(turn, `${request.count} synthetic subagents completed`);
+    });
+
+    const runNext = () => {
+      if (this.activeTurn !== turn) {
+        return;
+      }
+      this.clearTurnTimer(turn);
+      steps.shift()?.();
+      if (steps.length > 0) {
+        turn.timer = setTimeout(runNext, request.intervalMs);
+        turn.timer.unref?.();
+      }
+    };
+    turn.timer = setTimeout(runNext, 0);
     turn.timer.unref?.();
   }
 

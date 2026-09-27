@@ -547,4 +547,67 @@ describe("MockLoadTestAgentClient", () => {
       rmSync(workdir, { recursive: true, force: true });
     }
   });
+
+  test("spawns provider subagents that stream large tool results when the prompt asks", async () => {
+    vi.useFakeTimers();
+    const workdir = mkdtempSync(join(tmpdir(), "paseo-mock-subagents-"));
+    try {
+      const client = new MockLoadTestAgentClient();
+      const manager = new AgentManager({
+        clients: { mock: client },
+        idFactory: () => "00000000-0000-4000-8000-000000000002",
+        logger: createTestLogger(),
+      });
+      const agent = await manager.createAgent(
+        { provider: "mock", cwd: workdir, model: "ten-second-stream" },
+        "00000000-0000-4000-8000-000000000002",
+        { workspaceId: undefined },
+      );
+
+      const resultPromise = manager.runAgent(
+        agent.id,
+        "Emit 3 synthetic subagents with 4 tool results of 8 KB every 100 ms.",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      const running = manager.listProviderSubagents(agent.id);
+      expect(running.map((subagent) => subagent.status)).toEqual(["running", "running", "running"]);
+
+      await vi.advanceTimersByTimeAsync(3 * 4 * 100 + 1_000);
+      await resultPromise;
+
+      const subagents = manager.listProviderSubagents(agent.id);
+      expect(subagents.map((subagent) => subagent.status)).toEqual([
+        "completed",
+        "completed",
+        "completed",
+      ]);
+      for (const subagent of subagents) {
+        const { rows } = manager.fetchProviderSubagentTimeline(agent.id, subagent.id);
+        const reads = rows.flatMap((row) =>
+          row.item.type === "tool_call" &&
+          row.item.status === "completed" &&
+          row.item.detail.type === "read"
+            ? [row.item.detail]
+            : [],
+        );
+        expect(reads).toHaveLength(4);
+        for (const read of reads) {
+          expect(read.content?.length).toBeGreaterThanOrEqual(8 * 1024);
+        }
+        expect(rows.some((row) => row.item.type === "assistant_message")).toBe(true);
+      }
+
+      const parentTasks = manager
+        .getTimeline(agent.id)
+        .filter(
+          (item) =>
+            item.type === "tool_call" &&
+            item.detail.type === "sub_agent" &&
+            item.status === "completed",
+        );
+      expect(parentTasks).toHaveLength(3);
+    } finally {
+      rmSync(workdir, { recursive: true, force: true });
+    }
+  });
 });
