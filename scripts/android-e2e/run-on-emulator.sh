@@ -3,9 +3,10 @@
 # the APK, connects the app to the E2E daemon, and runs the Android suites
 # from the built source. Every suite runs even after an earlier one fails, so
 # one run reports every broken flow; the exit status is non-zero if any failed.
+# With SCENARIO=agent-memory it runs agent-memory.sh instead of the suites.
 #
 # Needs: SRC_DIR, APK_PATH, APP_ID, DAEMON_PORT, SERVER_ID, WORKSPACE_ID,
-# WORKSPACE_DIR, ARTIFACTS_DIR.
+# WORKSPACE_DIR, ARTIFACTS_DIR; DAEMON_SRC_DIR for SCENARIO=agent-memory.
 set -uo pipefail
 
 : "${SRC_DIR:?}" "${APK_PATH:?}" "${APP_ID:?}" "${DAEMON_PORT:?}" "${SERVER_ID:?}"
@@ -153,6 +154,11 @@ if ! connect_app; then
   adb exec-out screencap -p >"${ARTIFACTS_DIR}/connect-failure.png" 2>/dev/null || true
   echo "::error::Could not connect the app to the E2E daemon; no suite ran. See connect-failure.png and connect.log."
   exit 1
+fi
+
+if [[ "${SCENARIO:-suites}" == "agent-memory" ]]; then
+  bash "$(dirname "$0")/agent-memory.sh"
+  exit $?
 fi
 
 export PASEO_MOBILE_E2E_APP_ID="${APP_ID}"

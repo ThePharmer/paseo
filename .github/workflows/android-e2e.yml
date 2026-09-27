@@ -11,10 +11,17 @@ name: Android E2E
 # job in native-headers-release.yml). Start it by hand the same way:
 #   gh workflow run android-e2e.yml --ref main -f build_run_id=<run id>
 # The result does not gate any release.
+#
+# scenario=agent-memory replaces the suites with a measurement: mock agents
+# spawn in bursts, each with provider subagents streaming large tool results,
+# while the app's memory is sampled (scripts/android-e2e/agent-memory.sh).
+# daemon_ref builds the daemon from a fork branch instead of the built commit,
+# so a daemon-only change (such as a new mock scenario) needs no APK rebuild.
 
 run-name: >-
-  Android E2E for native headers run ${{ inputs.build_run_id }}${{ inputs.e2e_ref
-  && format(' (scripts from {0})', inputs.e2e_ref) || '' }}
+  Android E2E ${{ inputs.scenario == 'agent-memory' && 'agent-memory ' || '' }}for native headers run
+  ${{ inputs.build_run_id }}${{ inputs.e2e_ref && format(' (scripts from {0})', inputs.e2e_ref) || ''
+  }}${{ inputs.daemon_ref && format(' (daemon from {0})', inputs.daemon_ref) || '' }}
 
 on:
   workflow_dispatch:
@@ -25,6 +32,24 @@ on:
         type: string
       e2e_ref:
         description: "Iterate without rebuilding the APK: take packages/app/e2e/mobile and scripts/test-mobile-agent-device.sh from this fork branch instead of the built commit (blank = built commit)"
+        required: false
+        default: ""
+        type: string
+      scenario:
+        description: "suites runs the Android E2E suites; agent-memory measures app memory while many mock agents and subagents spawn"
+        required: false
+        default: suites
+        type: choice
+        options:
+          - suites
+          - agent-memory
+      memory_config:
+        description: "agent-memory only: space-separated key=value overrides, e.g. 'batches=6 batch_size=5 tool_result_kb=16' (see scripts/android-e2e/agent-memory.sh)"
+        required: false
+        default: ""
+        type: string
+      daemon_ref:
+        description: "agent-memory only: build the daemon from this fork branch instead of the built commit (blank = built commit). Keep it protocol-compatible with the APK."
         required: false
         default: ""
         type: string
@@ -111,6 +136,7 @@ jobs:
           echo "Testing ${apks[0]##*/} built from $commit (test branch: $(read_info .test_branch))."
           {
             echo "SRC_DIR=$GITHUB_WORKSPACE/src"
+            echo "DAEMON_SRC_DIR=$GITHUB_WORKSPACE/src"
             echo "APK_PATH=${apks[0]}"
           } >> "$GITHUB_ENV"
 
@@ -129,12 +155,36 @@ jobs:
           echo "::warning::E2E scripts come from $E2E_REF ($(git -C src rev-parse --short FETCH_HEAD)), not from the built commit."
           git -C src status --short
 
+      - name: Build the daemon from ${{ inputs.daemon_ref }}
+        if: inputs.daemon_ref != ''
+        env:
+          DAEMON_REF: ${{ inputs.daemon_ref }}
+          SCENARIO: ${{ inputs.scenario }}
+        run: |
+          set -euo pipefail
+          if [[ "$SCENARIO" != "agent-memory" ]]; then
+            echo "::error::daemon_ref only works with scenario=agent-memory: the suites run scripts from the built commit against its own daemon."
+            exit 1
+          fi
+          git check-ref-format "refs/heads/$DAEMON_REF"
+          git init -q daemon-src
+          git -C daemon-src fetch -q --depth=1 --no-tags "https://github.com/$GITHUB_REPOSITORY.git" "refs/heads/$DAEMON_REF"
+          git -C daemon-src checkout -q --detach FETCH_HEAD
+          echo "::warning::The daemon comes from $DAEMON_REF ($(git -C daemon-src rev-parse --short HEAD)), not from the built commit."
+          echo "DAEMON_SRC_DIR=$GITHUB_WORKSPACE/daemon-src" >> "$GITHUB_ENV"
+
       - name: Check that the built commit can run Android E2E
+        env:
+          SCENARIO: ${{ inputs.scenario }}
         run: |
           set -euo pipefail
           missing=()
-          grep -q PASEO_MOBILE_E2E_PLATFORM src/scripts/test-mobile-agent-device.sh || missing+=("Android support in scripts/test-mobile-agent-device.sh")
-          for file in packages/app/e2e/mobile/setup/connect-direct.android.ad packages/app/e2e/mobile/file-editor/android.sh; do
+          required=(packages/app/e2e/mobile/setup/connect-direct.android.ad)
+          if [[ "$SCENARIO" == "suites" ]]; then
+            grep -q PASEO_MOBILE_E2E_PLATFORM src/scripts/test-mobile-agent-device.sh || missing+=("Android support in scripts/test-mobile-agent-device.sh")
+            required+=(packages/app/e2e/mobile/file-editor/android.sh)
+          fi
+          for file in "${required[@]}"; do
             [[ -f "src/$file" ]] || missing+=("$file")
           done
           if [[ "${#missing[@]}" -gt 0 ]]; then
@@ -154,10 +204,10 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: src/package-lock.json
+          cache-dependency-path: ${{ inputs.daemon_ref && 'daemon-src' || 'src' }}/package-lock.json
 
       - name: Install dependencies and build the daemon
-        working-directory: src
+        working-directory: ${{ env.DAEMON_SRC_DIR }}
         env:
           ONNXRUNTIME_NODE_INSTALL: skip
         run: |
@@ -168,7 +218,7 @@ jobs:
         run: npm install -g "agent-device@$AGENT_DEVICE_VERSION"
 
       - name: Start the daemon with a fixture workspace
-        run: bash ci/scripts/android-e2e/start-daemon.sh src "$RUNNER_TEMP/e2e" "$DAEMON_PORT"
+        run: bash ci/scripts/android-e2e/start-daemon.sh "$DAEMON_SRC_DIR" "$RUNNER_TEMP/e2e" "$DAEMON_PORT"
 
       - name: Enable KVM
         run: |
@@ -208,6 +258,8 @@ jobs:
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         env:
           ARTIFACTS_DIR: ${{ runner.temp }}/e2e/artifacts
+          SCENARIO: ${{ inputs.scenario }}
+          MEMORY_CONFIG: ${{ inputs.memory_config }}
         with:
           api-level: ${{ env.EMULATOR_API_LEVEL }}
           target: ${{ env.EMULATOR_TARGET }}
@@ -237,7 +289,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-e2e-${{ inputs.build_run_id }}-attempt-${{ github.run_attempt }}
+          name: android-e2e-${{ inputs.scenario }}-${{ inputs.build_run_id }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/e2e/artifacts
           if-no-files-found: warn
           retention-days: 14
