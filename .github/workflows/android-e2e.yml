@@ -15,11 +15,14 @@ name: Android E2E
 # scenario=agent-memory replaces the suites with a measurement: mock agents
 # spawn in bursts, each with provider subagents streaming large tool results,
 # while the app's memory is sampled (scripts/android-e2e/agent-memory.sh).
+# scenario=stream-memory opens one mock agent's chat while it streams a long,
+# code-heavy assistant message (scripts/android-e2e/stream-memory.sh);
+# text_delivery picks the daemon's assistant text delivery for an A/B.
 # daemon_ref builds the daemon from a fork branch instead of the built commit,
 # so a daemon-only change (such as a new mock scenario) needs no APK rebuild.
 
 run-name: >-
-  Android E2E ${{ inputs.scenario == 'agent-memory' && 'agent-memory ' || '' }}for native headers run
+  Android E2E ${{ inputs.scenario != 'suites' && format('{0} ({1}) ', inputs.scenario, inputs.text_delivery) || '' }}for native headers run
   ${{ inputs.build_run_id }}${{ inputs.e2e_ref && format(' (scripts from {0})', inputs.e2e_ref) || ''
   }}${{ inputs.daemon_ref && format(' (daemon from {0})', inputs.daemon_ref) || '' }}
 
@@ -36,23 +39,32 @@ on:
         default: ""
         type: string
       scenario:
-        description: "suites runs the Android E2E suites; agent-memory measures app memory while many mock agents and subagents spawn"
+        description: "suites runs the Android E2E suites; agent-memory measures app memory while many mock agents and subagents spawn; stream-memory measures it while one open chat streams a long code-heavy message"
         required: false
         default: suites
         type: choice
         options:
           - suites
           - agent-memory
+          - stream-memory
       memory_config:
-        description: "agent-memory only: space-separated key=value overrides, e.g. 'batches=6 batch_size=5 tool_result_kb=16' (see scripts/android-e2e/agent-memory.sh)"
+        description: "agent-memory/stream-memory only: space-separated key=value overrides, e.g. 'batches=6 batch_size=5' or 'blocks=120 repeats=3' (see the scenario's script in scripts/android-e2e)"
         required: false
         default: ""
         type: string
       daemon_ref:
-        description: "agent-memory only: build the daemon from this fork branch instead of the built commit (blank = built commit). Keep it protocol-compatible with the APK."
+        description: "agent-memory/stream-memory only: build the daemon from this fork branch instead of the built commit (blank = built commit). Keep it protocol-compatible with the APK."
         required: false
         default: ""
         type: string
+      text_delivery:
+        description: "stream-memory/agent-memory only: the daemon's assistant text delivery (PASEO_ASSISTANT_TEXT_DELIVERY)"
+        required: false
+        default: token
+        type: choice
+        options:
+          - token
+          - paragraph
 
 permissions:
   contents: read
@@ -162,8 +174,8 @@ jobs:
           SCENARIO: ${{ inputs.scenario }}
         run: |
           set -euo pipefail
-          if [[ "$SCENARIO" != "agent-memory" ]]; then
-            echo "::error::daemon_ref only works with scenario=agent-memory: the suites run scripts from the built commit against its own daemon."
+          if [[ "$SCENARIO" == "suites" ]]; then
+            echo "::error::daemon_ref only works with the memory scenarios: the suites run scripts from the built commit against its own daemon."
             exit 1
           fi
           git check-ref-format "refs/heads/$DAEMON_REF"
@@ -219,7 +231,8 @@ jobs:
 
       - name: Start the daemon with a fixture workspace
         env:
-          PASEO_NODE_ENV: ${{ inputs.scenario == 'agent-memory' && 'development' || '' }}
+          PASEO_NODE_ENV: ${{ inputs.scenario != 'suites' && 'development' || '' }}
+          PASEO_ASSISTANT_TEXT_DELIVERY: ${{ inputs.scenario != 'suites' && inputs.text_delivery || '' }}
         run: bash ci/scripts/android-e2e/start-daemon.sh "$DAEMON_SRC_DIR" "$RUNNER_TEMP/e2e" "$DAEMON_PORT"
 
       - name: Enable KVM
@@ -262,6 +275,7 @@ jobs:
           ARTIFACTS_DIR: ${{ runner.temp }}/e2e/artifacts
           SCENARIO: ${{ inputs.scenario }}
           MEMORY_CONFIG: ${{ inputs.memory_config }}
+          TEXT_DELIVERY: ${{ inputs.text_delivery }}
         with:
           api-level: ${{ env.EMULATOR_API_LEVEL }}
           target: ${{ env.EMULATOR_TARGET }}
@@ -291,7 +305,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-e2e-${{ inputs.scenario }}-${{ inputs.build_run_id }}-attempt-${{ github.run_attempt }}
+          name: android-e2e-${{ inputs.scenario != 'suites' && format('{0}-{1}', inputs.scenario, inputs.text_delivery) || inputs.scenario }}-${{ inputs.build_run_id }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/e2e/artifacts
           if-no-files-found: warn
           retention-days: 14

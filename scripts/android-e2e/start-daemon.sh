@@ -29,9 +29,12 @@ git -C "${workspace}" -c user.name=e2e -c user.email=e2e@example.invalid commit 
 # No relay, no speech model downloads, any Origin. Binding loopback is enough:
 # the emulator reaches it through `adb reverse`.
 # PASEO_NODE_ENV=development, when the caller sets it, registers the mock
-# providers that the agent-memory scenario drives.
+# providers that the memory scenarios drive. PASEO_ASSISTANT_TEXT_DELIVERY
+# (token or paragraph) selects how assistant text reaches clients; empty keeps
+# the daemon default.
 PASEO_HOME="${home}" \
   PASEO_NODE_ENV="${PASEO_NODE_ENV:-}" \
+  PASEO_ASSISTANT_TEXT_DELIVERY="${PASEO_ASSISTANT_TEXT_DELIVERY:-}" \
   PASEO_LISTEN="127.0.0.1:${port}" \
   PASEO_RELAY_ENABLED=0 \
   PASEO_DICTATION_ENABLED=0 \

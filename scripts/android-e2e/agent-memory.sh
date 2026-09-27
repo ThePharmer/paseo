@@ -24,23 +24,10 @@ step_ms=500         # delay between subagent steps
 baseline_s=60       # idle sampling before the first burst
 settle_s=180        # sampling after the last burst
 sample_s=15         # meminfo interval
-for pair in ${MEMORY_CONFIG:-}; do
-  key="${pair%%=*}"
-  value="${pair#*=}"
-  case "${key}" in
-    batches | batch_size | batch_gap_s | subagents | tool_results | tool_result_kb | step_ms | baseline_s | settle_s | sample_s)
-      [[ "${value}" =~ ^[0-9]+$ ]] || {
-        echo "::error::MEMORY_CONFIG ${key} must be a whole number, got '${value}'."
-        exit 1
-      }
-      printf -v "${key}" '%s' "${value}"
-      ;;
-    *)
-      echo "::error::Unknown MEMORY_CONFIG key '${key}'."
-      exit 1
-      ;;
-  esac
-done
+# shellcheck source=memory-common.sh
+source "$(dirname "$0")/memory-common.sh"
+parse_memory_config batches batch_size batch_gap_s subagents tool_results tool_result_kb \
+  step_ms baseline_s settle_s sample_s || exit 1
 
 out="${ARTIFACTS_DIR}/agent-memory"
 mkdir -p "${out}"
@@ -49,43 +36,6 @@ events="${out}/events.log"
 cli=(node "${DAEMON_SRC_DIR}/packages/cli/bin/paseo")
 host=(--host "127.0.0.1:${DAEMON_PORT}")
 prompt="Emit ${subagents} synthetic subagents with ${tool_results} tool results of ${tool_result_kb} KB every ${step_ms} ms."
-
-log_event() {
-  echo "$(date -Iseconds) $*" | tee -a "${events}"
-}
-
-# Same columns as the phone sampler (~/apks/leak-ab-sampler.sh), plus the
-# daemon's agent count, so runs on the phone and the emulator compare directly.
-sample_memory() {
-  echo "time,elapsed_s,pid,total_pss_kb,native_heap_pss_kb,java_heap_pss_kb,graphics_pss_kb,native_heap_alloc_kb,unknown_pss_kb,total_rss_kb,daemon_agents,views" >"${csv}"
-  local start info pid agents
-  start="$(date +%s)"
-  while :; do
-    info="$(adb shell dumpsys meminfo "${APP_ID}" 2>/dev/null)"
-    agents="$("${cli[@]}" ls -g --json "${host[@]}" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).length)}catch{console.log("")}})')"
-    pid="$(printf '%s\n' "${info}" | sed -n 's/.*MEMINFO in pid \([0-9]*\).*/\1/p' | head -n 1)"
-    if [[ -z "${pid}" ]]; then
-      echo "$(date -Iseconds),$(($(date +%s) - start)),none,,,,,,,,${agents}," >>"${csv}"
-    else
-      printf '%s\n' "${info}" | awk -v t="$(date -Iseconds)" -v e="$(($(date +%s) - start))" -v pid="${pid}" -v agents="${agents}" '
-        /^ *TOTAL PSS:/ { total = $3 }
-        /TOTAL RSS:/ { for (i = 1; i <= NF; i++) if ($i == "RSS:") rss = $(i + 1) }
-        /^ *Native Heap:/ { native = $3 }
-        /^ *Java Heap:/ { java = $3 }
-        /^ *Graphics:/ { graphics = $2 }
-        /^ *Native Heap / && NF >= 9 { alloc = $(NF - 1) }
-        /^ *Unknown / { unknown = $2 }
-        /Views:/ { for (i = 1; i <= NF; i++) if ($i == "Views:") views = $(i + 1) }
-        END { print t "," e "," pid "," total "," native "," java "," graphics "," alloc "," unknown "," rss "," agents "," views }
-      ' >>"${csv}"
-    fi
-    sleep "${sample_s}"
-  done
-}
-
-app_pid() {
-  adb shell pidof "${APP_ID}" 2>/dev/null | tr -d '\r'
-}
 
 sample_memory &
 sampler_pid=$!
@@ -131,25 +81,13 @@ if [[ "${crashed}" == "false" ]]; then
   [[ "${pid}" == "${start_pid}" ]] || crashed=true
 fi
 
-# React Native forces a JS garbage collection on TRIM_MEMORY_RUNNING_CRITICAL. Native memory that
-# drops after it was held only by unreachable JS wrappers (stale Fabric shadow nodes); what stays
-# is retained. Android 14+ never sends this level to a foreground app on its own.
 if [[ "${crashed}" == "false" ]]; then
-  adb shell dumpsys meminfo "${APP_ID}" >"${out}/meminfo-before-gc.txt" 2>&1 || true
-  log_event "forcing a JS GC with send-trim-memory RUNNING_CRITICAL"
-  adb shell am send-trim-memory "${APP_ID}" RUNNING_CRITICAL >>"${events}" 2>&1 || true
-  sleep 10
-  adb shell dumpsys meminfo "${APP_ID}" >"${out}/meminfo-after-gc.txt" 2>&1 || true
-  sleep $((sample_s * 2))
+  force_js_gc
 fi
 log_event "end pid=${pid:-none}"
 
 kill "${sampler_pid}" 2>/dev/null || true
-adb shell dumpsys meminfo "${APP_ID}" >"${out}/meminfo-end.txt" 2>&1 || true
-adb shell dumpsys activity exit-info "${APP_ID}" >"${out}/exit-info.txt" 2>&1 || true
-adb shell dumpsys dropbox --print data_app_native_crash >"${out}/native-crashes.txt" 2>&1 || true
-adb shell dumpsys dropbox --print data_app_crash >"${out}/java-crashes.txt" 2>&1 || true
-adb exec-out screencap -p >"${out}/end-screen.png" 2>/dev/null || true
+collect_end_state
 
 node - "${csv}" "${crashed}" >>"${GITHUB_STEP_SUMMARY:-/dev/null}" <<'EOF'
 const [file, crashed] = process.argv.slice(2);
