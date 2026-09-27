@@ -1,58 +1,92 @@
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useState } from "react";
 import { makeMutable, type SharedValue, useSharedValue } from "react-native-reanimated";
 import { scheduleOnUI } from "react-native-worklets";
+import { useRetainedPanelActive } from "@/components/retained-panel";
+import {
+  advanceStatusRingClock,
+  hideStatusRing,
+  IDLE_STATUS_RING_CLOCK,
+  showStatusRing,
+} from "@/components/status-ring/clock-state";
 import { getStatusRingRotation } from "@/components/status-ring/geometry";
+import { useAppVisible } from "@/hooks/use-app-visible";
 
 const sharedRotation = makeMutable(getStatusRingRotation(Date.now()));
-const activeRingCount = makeMutable(0);
-const clockRunning = makeMutable(false);
+const clock = makeMutable(IDLE_STATUS_RING_CLOCK);
+let nextRotationListenerId = 1;
 
-function advanceSharedRotation(): void {
+function advanceSharedRotation(frameTimestampMs: number): void {
   "worklet";
-  if (activeRingCount.value === 0) {
-    clockRunning.value = false;
+  const frame = advanceStatusRingClock(clock.value, frameTimestampMs);
+  clock.value = frame.clock;
+  if (frame.action === "stop") {
     return;
   }
 
-  sharedRotation.value = getStatusRingRotation(Date.now());
+  if (frame.action === "publish") {
+    sharedRotation.value = getStatusRingRotation(Date.now());
+  }
   requestAnimationFrame(advanceSharedRotation);
 }
 
-function registerStatusRing(registered: SharedValue<boolean>): void {
+function showRing(
+  rotation: SharedValue<number>,
+  registered: SharedValue<boolean>,
+  listenerId: number,
+): void {
   "worklet";
   if (registered.value) {
     return;
   }
 
   registered.value = true;
-  activeRingCount.value += 1;
-
-  if (!clockRunning.value) {
-    clockRunning.value = true;
+  const shown = showStatusRing(clock.value);
+  clock.value = shown.clock;
+  if (shown.startLoop) {
     sharedRotation.value = getStatusRingRotation(Date.now());
     requestAnimationFrame(advanceSharedRotation);
   }
+
+  rotation.value = sharedRotation.value;
+  sharedRotation.addListener(listenerId, (nextRotation) => {
+    rotation.value = nextRotation;
+  });
 }
 
-function unregisterStatusRing(registered: SharedValue<boolean>): void {
+function hideRing(registered: SharedValue<boolean>, listenerId: number): void {
   "worklet";
   if (!registered.value) {
     return;
   }
 
   registered.value = false;
-  activeRingCount.value -= 1;
+  sharedRotation.removeListener(listenerId);
+  clock.value = hideStatusRing(clock.value);
 }
 
+/**
+ * The rotation for one native ring. Every ring on screen copies the same UI-thread value, so they
+ * stay in phase; a ring off screen (its retained panel inactive, or the app not in the foreground)
+ * stays mounted but detaches, and the clock's frame loop ends once no ring is on screen.
+ */
 export function useStatusRingRotation(): SharedValue<number> {
+  const panelActive = useRetainedPanelActive();
+  const appVisible = useAppVisible();
+  const onScreen = panelActive && appVisible;
+  const rotation = useSharedValue(getStatusRingRotation(Date.now()));
   const registered = useSharedValue(false);
+  const [listenerId] = useState(() => nextRotationListenerId++);
 
   useLayoutEffect(() => {
-    scheduleOnUI(registerStatusRing, registered);
-    return () => {
-      scheduleOnUI(unregisterStatusRing, registered);
-    };
-  }, [registered]);
+    if (!onScreen) {
+      return;
+    }
 
-  return sharedRotation;
+    scheduleOnUI(showRing, rotation, registered, listenerId);
+    return () => {
+      scheduleOnUI(hideRing, registered, listenerId);
+    };
+  }, [listenerId, onScreen, registered, rotation]);
+
+  return rotation;
 }
