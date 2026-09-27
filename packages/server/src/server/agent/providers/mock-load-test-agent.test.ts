@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createTestLogger } from "../../../test-utils/test-logger.js";
-import { AgentManager } from "../agent-manager.js";
+import { AgentManager, type AgentManagerEvent } from "../agent-manager.js";
 import type { AgentStreamEvent, AgentTimelineItem } from "../agent-sdk-types.js";
 import {
   MOCK_LOAD_TEST_DEFAULT_MODEL_ID,
@@ -563,6 +563,8 @@ describe("MockLoadTestAgentClient", () => {
         "00000000-0000-4000-8000-000000000002",
         { workspaceId: undefined },
       );
+      const managerEvents: AgentManagerEvent[] = [];
+      manager.subscribe((event) => managerEvents.push(event), { replayState: false });
 
       const resultPromise = manager.runAgent(
         agent.id,
@@ -606,6 +608,10 @@ describe("MockLoadTestAgentClient", () => {
             item.status === "completed",
         );
       expect(parentTasks).toHaveLength(3);
+      const usageUpdates = managerEvents.filter(
+        (event) => event.type === "agent_stream" && event.event.type === "usage_updated",
+      );
+      expect(usageUpdates.length).toBeGreaterThanOrEqual(3 * 4);
     } finally {
       rmSync(workdir, { recursive: true, force: true });
     }
