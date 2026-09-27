@@ -36,6 +36,42 @@ describe("provider subagent protocol", () => {
     });
   });
 
+  test("accepts a child timeline subscription and its acknowledgement", () => {
+    expect(
+      SessionInboundMessageSchema.parse({
+        type: "agent.provider_subagents.timeline.subscribe.request",
+        parentAgentId: "parent-1",
+        subagentId: "child-1",
+        requestId: "request-1",
+      }),
+    ).toEqual({
+      type: "agent.provider_subagents.timeline.subscribe.request",
+      parentAgentId: "parent-1",
+      subagentId: "child-1",
+      requestId: "request-1",
+    });
+
+    expect(
+      SessionOutboundMessageSchema.parse({
+        type: "agent.provider_subagents.timeline.subscribe.response",
+        payload: {
+          requestId: "request-1",
+          subscriptionId: "subscription-1",
+          parentAgentId: "parent-1",
+          subagentId: "child-1",
+        },
+      }),
+    ).toEqual({
+      type: "agent.provider_subagents.timeline.subscribe.response",
+      payload: {
+        requestId: "request-1",
+        subscriptionId: "subscription-1",
+        parentAgentId: "parent-1",
+        subagentId: "child-1",
+      },
+    });
+  });
+
   test("accepts a provider child working directory while remaining compatible when absent", () => {
     const descriptor = {
       id: "child-1",

@@ -86,6 +86,14 @@ class ConnectedClient {
     this.messages.length = 0;
   }
 
+  terminate(): void {
+    this.socket.terminate();
+  }
+
+  async reconnect(): Promise<void> {
+    await this.client.connect();
+  }
+
   next(
     predicate: (message: SessionOutboundMessage) => boolean,
     description: string,
@@ -180,6 +188,8 @@ afterEach(async () => {
 async function connect(input: {
   clientId: string;
   selective: boolean;
+  ownedSubscriptions?: boolean;
+  providerSubagentTimelineSubscriptions?: boolean;
   timelineReplacementInvalidation?: boolean;
   timelineNotifications?: boolean;
   pluginTimelineItems?: boolean;
@@ -194,7 +204,9 @@ async function connect(input: {
       return socket as unknown as WebSocketLike;
     },
     capabilities: {
-      [CLIENT_CAPS.ownedSubscriptions]: false,
+      [CLIENT_CAPS.ownedSubscriptions]: input.ownedSubscriptions ?? false,
+      [CLIENT_CAPS.providerSubagentTimelineSubscriptions]:
+        input.providerSubagentTimelineSubscriptions ?? false,
       [CLIENT_CAPS.selectiveAgentTimeline]: input.selective,
       [CLIENT_CAPS.pluginTimelineItems]: input.pluginTimelineItems ?? false,
       [CLIENT_CAPS.workspaceSetupBlocked]: input.workspaceSetupBlocked ?? false,
@@ -775,6 +787,160 @@ test("plugin items are gated in provider child streams, child fetches, and rewin
   expect(replayItems(legacy).some((item) => item.type === "plugin")).toBe(false);
   expect(replayItems(legacy)).toContainEqual(expect.objectContaining({ type: "user_message" }));
 });
+
+function isChildTimeline(subagentId: string, text: string) {
+  return (message: SessionOutboundMessage): boolean =>
+    message.type === "agent.provider_subagents.update" &&
+    message.payload.kind === "timeline" &&
+    message.payload.subagentId === subagentId &&
+    message.payload.item.type === "assistant_message" &&
+    message.payload.item.text === text;
+}
+
+function childTimelineTexts(client: ConnectedClient): string[] {
+  return client.messages.flatMap((message) =>
+    message.type === "agent.provider_subagents.update" &&
+    message.payload.kind === "timeline" &&
+    message.payload.item.type === "assistant_message"
+      ? [`${message.payload.subagentId}:${message.payload.item.text}`]
+      : [],
+  );
+}
+
+function childDescriptorChanges(client: ConnectedClient): string[] {
+  return client.messages.flatMap((message) => {
+    if (message.type !== "agent.provider_subagents.update") return [];
+    if (message.payload.kind === "upsert") return [`upsert:${message.payload.subagent.id}`];
+    if (message.payload.kind === "remove") return [`remove:${message.payload.subagentId}`];
+    return [];
+  });
+}
+
+async function startProviderChildDaemon(): Promise<CompatibilityProvider> {
+  await daemon.close();
+  const provider = new CompatibilityProvider();
+  daemon = await createTestPaseoDaemon({ isDev: true, agentClients: { mock: provider } });
+  return provider;
+}
+
+async function connectChildObserver(input: {
+  clientId: string;
+  scoped: boolean;
+}): Promise<ConnectedClient> {
+  const connected = await connect({
+    clientId: input.clientId,
+    selective: true,
+    ownedSubscriptions: true,
+    providerSubagentTimelineSubscriptions: input.scoped,
+  });
+  await connected.client.observeEvents(["agent.provider_subagents.update"]).ready;
+  return connected;
+}
+
+function pushChildText(provider: CompatibilityProvider, id: string, text: string): void {
+  provider.session.push({
+    type: "provider_subagent",
+    provider: "mock",
+    event: { type: "timeline", id, item: { type: "assistant_message", text } },
+  });
+}
+
+test("capable sockets receive provider child timelines only for subscribed children", async () => {
+  const provider = await startProviderChildDaemon();
+  const capable = await connectChildObserver({ clientId: "child-capable", scoped: true });
+  const legacy = await connectChildObserver({ clientId: "child-legacy", scoped: false });
+  const agent = await capable.client.createAgent({
+    provider: "mock",
+    cwd: "/tmp",
+    model: "ten-second-stream",
+  });
+  for (const id of ["child-a", "child-b"]) {
+    provider.session.push({
+      type: "provider_subagent",
+      provider: "mock",
+      event: { type: "upsert", id, title: id, status: "running" },
+    });
+  }
+  const subscription = capable.client.observeProviderSubagentTimeline(agent.id, "child-a");
+  await subscription.ready;
+
+  pushChildText(provider, "child-a", "A1");
+  pushChildText(provider, "child-b", "B1");
+  provider.session.push({
+    type: "provider_subagent",
+    provider: "mock",
+    event: { type: "remove", id: "child-b" },
+  });
+  await Promise.all([
+    capable.next(isChildTimeline("child-a", "A1"), "capable subscribed child"),
+    legacy.next(isChildTimeline("child-b", "B1"), "legacy unsubscribed child"),
+  ]);
+  await Promise.all([capable.barrier("child-scope"), legacy.barrier("child-scope")]);
+
+  expect({
+    capable: {
+      timelines: childTimelineTexts(capable),
+      descriptors: childDescriptorChanges(capable),
+    },
+    legacy: {
+      timelines: childTimelineTexts(legacy),
+      descriptors: childDescriptorChanges(legacy),
+    },
+  }).toEqual({
+    capable: {
+      timelines: ["child-a:A1"],
+      descriptors: ["upsert:child-a", "upsert:child-b", "remove:child-b"],
+    },
+    legacy: {
+      timelines: ["child-a:A1", "child-b:B1"],
+      descriptors: ["upsert:child-a", "upsert:child-b", "remove:child-b"],
+    },
+  });
+
+  await subscription.release();
+  capable.clear();
+  legacy.clear();
+  pushChildText(provider, "child-a", "A2");
+  await legacy.next(isChildTimeline("child-a", "A2"), "legacy after release");
+  await capable.barrier("child-released");
+  expect(childTimelineTexts(capable)).toEqual([]);
+}, 30_000);
+
+test("provider child subscriptions belong to one socket and survive only through reconnect", async () => {
+  const provider = await startProviderChildDaemon();
+  const owner = await connectChildObserver({ clientId: "child-shared", scoped: true });
+  const sibling = await connectChildObserver({ clientId: "child-shared", scoped: true });
+  const agent = await owner.client.createAgent({
+    provider: "mock",
+    cwd: "/tmp",
+    model: "ten-second-stream",
+  });
+  const subscription = owner.client.observeProviderSubagentTimeline(agent.id, "child-a");
+  const firstId = (await subscription.ready).subscriptionId;
+
+  pushChildText(provider, "child-a", "before reconnect");
+  await owner.next(isChildTimeline("child-a", "before reconnect"), "owner delivery");
+
+  owner.terminate();
+  await expect.poll(() => owner.client.getConnectionState().status).not.toBe("connected");
+  await owner.reconnect();
+  await expect
+    .poll(() => subscription.subscriptionId)
+    .toSatisfy((id: unknown) => typeof id === "string" && id !== firstId);
+  pushChildText(provider, "child-a", "after reconnect");
+  await owner.next(isChildTimeline("child-a", "after reconnect"), "restored owner delivery");
+
+  owner.close();
+  await owner.client.close();
+  clients.splice(clients.indexOf(owner), 1);
+  pushChildText(provider, "child-a", "after disconnect");
+  await sibling.barrier("child-disconnect");
+  expect(childTimelineTexts(sibling)).toEqual([]);
+  // Only the sibling's event subscription remains on the shared session.
+  await expect
+    .poll(async () => (await sibling.client.collectDiagnostics()).diagnostic)
+    .toMatch(/Registrations: 1(?!\d)/);
+}, 30_000);
 
 async function createAttentionWorkspace(client: DaemonClient): Promise<string> {
   const result = await client.createWorkspace({

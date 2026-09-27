@@ -36,7 +36,11 @@ test("projects Codex child history and confines old-client degradation to the ch
   });
   const legacy = new DaemonClient({
     url: `ws://127.0.0.1:${ctx.daemon.port}/ws`,
-    capabilities: { [CLIENT_CAPS.projectedSubagentTimeline]: false },
+    capabilities: {
+      [CLIENT_CAPS.projectedSubagentTimeline]: false,
+      // Keep child items on the event feed so this asserts the projection gate alone.
+      [CLIENT_CAPS.providerSubagentTimelineSubscriptions]: false,
+    },
   });
   await legacy.connect();
   const messages = createMessageCollector(legacy);
