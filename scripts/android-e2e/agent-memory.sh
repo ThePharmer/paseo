@@ -57,7 +57,7 @@ log_event() {
 # Same columns as the phone sampler (~/apks/leak-ab-sampler.sh), plus the
 # daemon's agent count, so runs on the phone and the emulator compare directly.
 sample_memory() {
-  echo "time,elapsed_s,pid,total_pss_kb,native_heap_pss_kb,java_heap_pss_kb,graphics_pss_kb,native_heap_alloc_kb,unknown_pss_kb,total_rss_kb,daemon_agents" >"${csv}"
+  echo "time,elapsed_s,pid,total_pss_kb,native_heap_pss_kb,java_heap_pss_kb,graphics_pss_kb,native_heap_alloc_kb,unknown_pss_kb,total_rss_kb,daemon_agents,views" >"${csv}"
   local start info pid agents
   start="$(date +%s)"
   while :; do
@@ -65,7 +65,7 @@ sample_memory() {
     agents="$("${cli[@]}" ls -g --json "${host[@]}" 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).length)}catch{console.log("")}})')"
     pid="$(printf '%s\n' "${info}" | sed -n 's/.*MEMINFO in pid \([0-9]*\).*/\1/p' | head -n 1)"
     if [[ -z "${pid}" ]]; then
-      echo "$(date -Iseconds),$(($(date +%s) - start)),none,,,,,,,,${agents}" >>"${csv}"
+      echo "$(date -Iseconds),$(($(date +%s) - start)),none,,,,,,,,${agents}," >>"${csv}"
     else
       printf '%s\n' "${info}" | awk -v t="$(date -Iseconds)" -v e="$(($(date +%s) - start))" -v pid="${pid}" -v agents="${agents}" '
         /^ *TOTAL PSS:/ { total = $3 }
@@ -75,7 +75,8 @@ sample_memory() {
         /^ *Graphics:/ { graphics = $2 }
         /^ *Native Heap / && NF >= 9 { alloc = $(NF - 1) }
         /^ *Unknown / { unknown = $2 }
-        END { print t "," e "," pid "," total "," native "," java "," graphics "," alloc "," unknown "," rss "," agents }
+        /Views:/ { for (i = 1; i <= NF; i++) if ($i == "Views:") views = $(i + 1) }
+        END { print t "," e "," pid "," total "," native "," java "," graphics "," alloc "," unknown "," rss "," agents "," views }
       ' >>"${csv}"
     fi
     sleep "${sample_s}"
@@ -129,6 +130,18 @@ if [[ "${crashed}" == "false" ]]; then
   pid="$(app_pid)"
   [[ "${pid}" == "${start_pid}" ]] || crashed=true
 fi
+
+# React Native forces a JS garbage collection on TRIM_MEMORY_RUNNING_CRITICAL. Native memory that
+# drops after it was held only by unreachable JS wrappers (stale Fabric shadow nodes); what stays
+# is retained. Android 14+ never sends this level to a foreground app on its own.
+if [[ "${crashed}" == "false" ]]; then
+  adb shell dumpsys meminfo "${APP_ID}" >"${out}/meminfo-before-gc.txt" 2>&1 || true
+  log_event "forcing a JS GC with send-trim-memory RUNNING_CRITICAL"
+  adb shell am send-trim-memory "${APP_ID}" RUNNING_CRITICAL >>"${events}" 2>&1 || true
+  sleep 10
+  adb shell dumpsys meminfo "${APP_ID}" >"${out}/meminfo-after-gc.txt" 2>&1 || true
+  sleep $((sample_s * 2))
+fi
 log_event "end pid=${pid:-none}"
 
 kill "${sampler_pid}" 2>/dev/null || true
@@ -153,6 +166,9 @@ console.log(`App process died: **${crashed === "true" ? "yes" : "no"}**. Samples
 console.log("| | first min | last min | max |\n|---|---|---|---|");
 console.log(`| Native heap PSS MB | ${Math.round(first(native))} | ${Math.round(last(native))} | ${Math.max(...native)} |`);
 console.log(`| Total PSS MB | ${Math.round(first(pss))} | ${Math.round(last(pss))} | ${Math.max(...pss)} |`);
+const gcNative = (name) => { try { const m = /^ *Native Heap:\s+(\d+)/m.exec(require("fs").readFileSync(require("path").join(require("path").dirname(file), name), "utf8")); return m ? mb(m[1]) : null; } catch { return null; } };
+const before = gcNative("meminfo-before-gc.txt"), after = gcNative("meminfo-after-gc.txt");
+if (before !== null && after !== null) console.log(`\nForced JS GC at the end: native heap ${before} MB -> ${after} MB.`);
 EOF
 
 if [[ "${crashed}" == "true" ]]; then
