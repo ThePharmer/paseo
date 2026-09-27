@@ -63,6 +63,7 @@ So arrival sets a _target_ and the reveal rate is derived from the backlog inste
 
 - **Smoothness (user-perceived):** `packages/app/e2e/browser/agent-stream-smoothness.spec.ts`, gated behind `PASEO_AGENT_STREAM_PERF_E2E=1`. Drives the mock provider's `bursty-stream` model and reports coefficient of variation of characters painted per frame (smoothness) plus p95 gap between visible updates (stalls). Both numbers are needed: a stalled stream is perfectly smooth.
 - **Reproducing bursty arrival:** the `bursty-stream` model in `mock-load-test-agent.ts` emits uneven runs of tokens separated by idle gaps. Burst sizes come from a seeded generator, so a run repeats exactly.
+- **Code-heavy messages:** prompt the mock provider with `Stream N code blocks of M lines every S ms.` for one assistant message of N sections, each a prose paragraph and a fenced `ts` block of M lines, sent as sub-word tokens every S ms. Omitted parts default to 20 blocks, 40 lines, 20ms; N caps at 200 and M at 400. Use it to compare `token` and `paragraph` delivery on a device.
 - **Rate policy in isolation:** `computeRevealStep` in `packages/app/src/agent-stream/text-reveal.ts` is pure; `text-reveal.test.ts` covers convergence and burst flattening without a renderer.
 
 Healthy numbers (2026-08, Expo web against a local dev daemon, real Claude Haiku agent, ~8.5s samples during active streaming). Setting `TEXT_REVEAL_HORIZON_MS` to 0 makes the reveal paint on arrival, which is how the baseline column was taken:
