@@ -1,6 +1,6 @@
 # Agent stream performance
 
-How assistant text gets from a provider to the screen, and why it is paced on the way. Read this before changing `packages/server/src/server/agent/agent-stream-coalescer.ts`, the reducer queue in `packages/app/src/timeline/session-stream-reducers.ts`, or the reveal in `packages/app/src/hooks/use-revealed-text.ts`.
+How assistant text gets from a provider to the screen, and why it is paced on the way. Read this before changing `packages/server/src/server/agent/agent-stream-coalescer.ts`, the reducer queue in `packages/app/src/timeline/session-stream-reducers.ts`, the reveal in `packages/app/src/hooks/use-revealed-text.ts`, or code highlighting in `packages/app/src/components/highlighted-code-block.tsx`.
 
 For terminal output, which is a separate pipeline with separate budgets, see [terminal-performance.md](terminal-performance.md).
 
@@ -23,6 +23,18 @@ Every provider delivers incremental text, so there is no provider that needs spe
 Arrival is lumpy and there is no fixing that at the source. A 60ms coalescing window carries however many characters the model produced in those 60ms, which swings by an order of magnitude within a single turn. Painting each delta as it lands makes the size of those lumps visible, and that is what reads as jagged.
 
 So arrival sets a _target_ and the reveal rate is derived from the backlog instead. A burst makes the text catch up faster; it does not make the text jump. Shrinking the coalescing window does not fix this — it makes the lumps smaller and more frequent, at the cost of message rate on a daemon loop that already contends with terminal frames and per-message relay encryption.
+
+## Render cost on Hermes
+
+iOS and Android run Hermes, which has no JIT. Each reveal step re-renders the growing block, and the JS cost of that render grows with the block. Per render of the live block, pure JS only (no React or native layout), from `packages/app/scripts/stream-render-bench` on one core of a 2013 Xeon E5-2680 v2 (2026-09). A recent flagship phone core is faster than that; a mid-range one is comparable:
+
+| live block                           | Node (V8) p50 | Hermes p50 | Hermes p95 |
+| ------------------------------------ | ------------- | ---------- | ---------- |
+| tight list, 4,000 chars              | 1.4ms         | 14ms       | 18ms       |
+| code fence, 10,000 chars, full parse | 5.3ms         | 75ms       | 194ms      |
+| code fence, 10,000 chars, background | 0.6ms         | 6ms        | 8ms        |
+
+Lezer's full parse is almost all of the code fence cost: about 10ms per 1,000 characters on Hermes. That is why highlighting a growing or long code block never happens during render (see the invariants below). Node's numbers understate Hermes cost by roughly ten times, so measure hot paths under Hermes.
 
 ## Invariants
 
@@ -48,6 +60,9 @@ So arrival sets a _target_ and the reveal rate is derived from the backlog inste
   occurrence keys.
 - **First sight of a text is revealed whole.** Only growth is paced. This is what makes history hydration, timeline replay, a virtualized row remounting on scroll, and an already-finished message all render complete on first paint without a special case for each.
 - **Leaving `phase: "streaming"` snaps the reveal.** A completed turn must never be left holding characters. `layoutStream` sets the phase, so anything outside the live head with an active turn is already complete.
+- **The reveal runs on every engine.** Hermes has no `Intl.Segmenter`, and the reveal was once switched off wherever it was missing, so the paced reveal only ever ran on web. `utils/grapheme-boundary.ts` falls back to the UAX #29 pair rules, widened toward joining where Hermes cannot test a property cheaply: a missed boundary holds text back for a frame, a false one paints half a grapheme. Its test checks the fallback against `Intl.Segmenter` on random mixed-script text. Do not gate pacing on a platform API again without a fallback.
+- **Reveal commits are spaced by render cost.** `useRevealedText` times each reveal-driven commit from its render to its layout effect and spaces frames so those renders take at most `TEXT_REVEAL_RENDER_BUDGET` of the JS thread. The sample includes scheduling and other work in the same commit, so treat it as a congestion signal, not an attribution. It keeps 60Hz where rendering is cheap; it does not bound a single long render, which only lowering the render cost does.
+- **Growing or long code is highlighted off the render path.** `HighlightedCodeBlock` highlights a streaming fence, and any settled block over `SYNC_HIGHLIGHT_MAX_CHARS`, with `BackgroundHighlighter` in 4ms slices between frames. It paints unhighlighted text past the last finished highlight. While code grows it reuses the previous Lezer parse and tokenizes only the last few lines again; once the block settles it tokenizes every line, so the final colors match a one-shot highlight, and stores the result in the shared tokenization cache so a remount does not parse again. Do not cache streaming prefixes there: each one would evict a useful entry. Tokenizing steps may stop partway through a line, so a long minified line cannot become one long step. On web, a settled block does not take new colors while a selection is inside it, because replacing the text nodes collapses the selection.
 - **The reducer queue commits on a frame, with a timer as the ceiling.** A frame callback never fires in a hidden tab, so a timer races it and wins when nothing is painting — the store has to keep advancing either way.
 - **A history row re-renders only when its item or layout item identity changes.** The inverted
   FlatList hands every mounted cell a new `index` and `ref` whenever a row is prepended, so without a
@@ -64,6 +79,7 @@ So arrival sets a _target_ and the reveal rate is derived from the backlog inste
 - **Smoothness (user-perceived):** `packages/app/e2e/browser/agent-stream-smoothness.spec.ts`, gated behind `PASEO_AGENT_STREAM_PERF_E2E=1`. Drives the mock provider's `bursty-stream` model and reports coefficient of variation of characters painted per frame (smoothness) plus p95 gap between visible updates (stalls). Both numbers are needed: a stalled stream is perfectly smooth.
 - **Reproducing bursty arrival:** the `bursty-stream` model in `mock-load-test-agent.ts` emits uneven runs of tokens separated by idle gaps. Burst sizes come from a seeded generator, so a run repeats exactly.
 - **Rate policy in isolation:** `computeRevealStep` in `packages/app/src/agent-stream/text-reveal.ts` is pure; `text-reveal.test.ts` covers convergence and burst flattening without a renderer.
+- **Per-render JS cost on Hermes:** `node packages/app/scripts/stream-render-bench/run.mjs` replays a streaming prose list and code fence through the same split, parse, and highlight functions the app calls, under Node. Set `PASEO_BENCH_HERMES` to a Hermes CLI to run the same bundle under Hermes, lowered with the React Native Babel preset the way Metro lowers it. Build that CLI from the tag in `node_modules/react-native/sdks/.hermesversion` (`cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DHERMES_ENABLE_TEST_SUITE=OFF`, target `hermes`; Linux needs `libicu-dev`). The CLI has no `performance.now`, so its numbers have 1ms resolution. Do not measure while a native build is running on the same machine: preemption shows up as 4–6ms steps.
 
 Healthy numbers (2026-08, Expo web against a local dev daemon, real Claude Haiku agent, ~8.5s samples during active streaming). Setting `TEXT_REVEAL_HORIZON_MS` to 0 makes the reveal paint on arrival, which is how the baseline column was taken:
 
