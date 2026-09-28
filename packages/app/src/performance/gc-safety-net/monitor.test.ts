@@ -401,6 +401,26 @@ describe("gc safety net fallback", () => {
     expect(runtime.logs).toHaveLength(2);
   });
 
+  test("a due fallback runs before any deref in its tick, and collection is observed a tick later", () => {
+    const runtime = createFakeRuntime();
+    const net = triggeredNet(runtime);
+    runtime.setNativeHeapMb(200 + 450);
+    runtime.gcFreesToMb(260);
+    runSeconds(runtime, net, 10);
+
+    expect(runtime.gcCalls).toEqual([11_000]);
+    expect(lastTaskCalls(runtime)).toEqual(["gc", "log"]);
+
+    runSeconds(runtime, net, 1);
+
+    expect(lastTaskCalls(runtime)).toEqual(["deref balloon1"]);
+    expect(net.readDiagnostics().events.map((event) => [event.kind, event.at])).toEqual([
+      ["trigger", 1000],
+      ["fallback-gc", 11_000],
+      ["collected", 12_150],
+    ]);
+  });
+
   test("does not force a collection once the dropped balloon is collected", () => {
     const runtime = createFakeRuntime();
     const net = triggeredNet(runtime);

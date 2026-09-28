@@ -337,6 +337,19 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     );
   }
 
+  function trackHighGrowth(at: number, growth: number): void {
+    if (growth <= FALLBACK_GROWTH_BYTES) {
+      highGrowthSince = null;
+    } else if (highGrowthSince === null) {
+      highGrowthSince = at;
+    }
+  }
+
+  // Order matters twice here. deref() of a live target keeps it strongly
+  // reachable until the task drains its microtasks (lib/VM/JSLib/WeakRef.cpp:104),
+  // so a due fallback runs before any deref and the tick that ran it does not
+  // deref at all; the next tick observes the collection. And the balloon step
+  // runs last, because a trigger must not be followed by an allocation.
   function tick(): void {
     if (mode === "off") {
       return;
@@ -345,24 +358,19 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     const heap = ports.readNativeHeapBytes();
     const stats = ports.readStats === null ? null : ports.readStats();
     nativeHeapBytes = heap;
-    if (createBalloonRef && stats) {
-      observeCollection(at, heap, stats);
-    }
     rebaselineIfDue(at, heap, stats);
     // Follow the floor down so a startup peak does not hide later growth.
     const baseline = baselineBytes === null ? heap : Math.min(baselineBytes, heap);
     baselineBytes = baseline;
-    if (createBalloonRef && stats) {
-      tickBalloon({ createRef: createBalloonRef, at, heap, baseline, stats });
-    }
     const growth = heap - baseline;
-    if (growth <= FALLBACK_GROWTH_BYTES) {
-      highGrowthSince = null;
-    } else if (highGrowthSince === null) {
-      highGrowthSince = at;
-    }
+    trackHighGrowth(at, growth);
     if (ports.collectGarbage && isFallbackDue(at, growth)) {
       forceCollection(ports.collectGarbage, at, heap);
+      return;
+    }
+    if (createBalloonRef && stats) {
+      observeCollection(at, heap, stats);
+      tickBalloon({ createRef: createBalloonRef, at, heap, baseline, stats });
     }
   }
 
