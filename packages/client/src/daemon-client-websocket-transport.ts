@@ -72,7 +72,7 @@ export function createWebSocketTransportFactory(factory: WebSocketFactory): Daem
         // connect timeouts does not crash the CLI with an unhandled error event.
         const suppressEarlyCloseError = bindTemporaryEarlyCloseErrorHandler(ws);
         try {
-          ws.close(code, reason);
+          closeOrForceClose(ws, code, reason);
         } finally {
           if (typeof ws.on !== "function" && typeof ws.addEventListener !== "function") {
             suppressEarlyCloseError();
@@ -85,6 +85,18 @@ export function createWebSocketTransportFactory(factory: WebSocketFactory): Daem
       onMessage: (handler) => bindWsMessageHandler(ws, handler),
     };
   };
+}
+
+// Browser WebSocket.close throws, and leaves the socket open, for a code other than 1000 or
+// 3000-4999 or a reason over 123 bytes. Close without arguments so the socket and its daemon
+// session still go away, then rethrow so the caller can report the rejected arguments.
+function closeOrForceClose(ws: WebSocketLike, code?: number, reason?: string): void {
+  try {
+    ws.close(code, reason);
+  } catch (error) {
+    ws.close();
+    throw error;
+  }
 }
 
 function bindWsMessageHandler(
