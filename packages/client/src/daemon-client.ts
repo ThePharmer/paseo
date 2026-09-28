@@ -251,6 +251,52 @@ function authFailureFromLegacyClose(event: unknown): DaemonAuthFailureReason | n
   return null;
 }
 
+interface HandshakeAuthorization {
+  /** The Authorization header the client derives from its own credential, if any. */
+  derived: string | undefined;
+  /** The paseo.bearer subprotocol already carries the password to the daemon. */
+  subprotocolCarriesPassword: boolean;
+  /** The client authenticates to the daemon (password, local credential, or authHeader). */
+  carriesDaemonCredential: boolean;
+}
+
+function isBearerAuthorization(value: string): boolean {
+  return /^bearer(?:\s|$)/i.test(value.trim());
+}
+
+/**
+ * The daemon checks a Bearer Authorization against its password before the
+ * subprotocol, so a custom Bearer entry would fail admission whenever the client
+ * authenticates on its own. It ignores other schemes, so a proxy credential such as
+ * Basic stays. Only one Authorization header can be sent: a non-Bearer custom entry
+ * wins over the derived Bearer header when the subprotocol already carries the same
+ * password, and loses to authHeader, which is the client's only credential channel.
+ */
+function keepCustomAuthorization(value: string, auth: HandshakeAuthorization): boolean {
+  if (!auth.carriesDaemonCredential) return true;
+  if (isBearerAuthorization(value)) return false;
+  return !auth.derived || auth.subprotocolCarriesPassword;
+}
+
+function buildHandshakeHeaders(
+  customHeaders: Record<string, string> | undefined,
+  auth: HandshakeAuthorization,
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  let hasCustomAuthorization = false;
+  for (const [name, value] of Object.entries(customHeaders ?? {})) {
+    if (name.toLowerCase() === "authorization") {
+      if (!keepCustomAuthorization(value, auth)) continue;
+      hasCustomAuthorization = true;
+    }
+    headers[name] = value;
+  }
+  if (auth.derived && !hasCustomAuthorization) {
+    headers.Authorization = auth.derived;
+  }
+  return headers;
+}
+
 function chooseConnectionAuth(
   config: DaemonClientConfig,
   localCredential: string | undefined,
@@ -259,11 +305,16 @@ function chooseConnectionAuth(
   let helloAuth: HelloAuth;
   if (localCredential) helloAuth = { kind: "localCredential", token: localCredential };
   else if (password) helloAuth = { kind: "password", password };
-  const headers: Record<string, string> = {};
   const compatibleBearer = localCredential ? null : compatibleBearerPassword(password);
+  let derived: string | undefined;
   // COMPAT(headerAuth): added in v0.9.1, remove after 2027-03-24.
-  if (compatibleBearer) headers.Authorization = `Bearer ${compatibleBearer}`;
-  else if (!localCredential && config.authHeader) headers.Authorization = config.authHeader;
+  if (compatibleBearer) derived = `Bearer ${compatibleBearer}`;
+  else if (!localCredential && config.authHeader) derived = config.authHeader;
+  const headers = buildHandshakeHeaders(config.headers, {
+    derived,
+    subprotocolCarriesPassword: compatibleBearer !== null,
+    carriesDaemonCredential: Boolean(localCredential || password || config.authHeader),
+  });
   return {
     helloAuth,
     headers,
@@ -397,6 +448,15 @@ export interface DaemonClientConfig {
   password?: string;
   localCredential?: () => string | undefined | Promise<string | undefined>;
   authHeader?: string;
+  /**
+   * Extra WebSocket handshake headers. Only a WebSocket constructor that accepts an
+   * options object honours them (React Native's global, or an injected `ws`-style
+   * factory); the browser two-argument constructor ignores them. When `password`,
+   * `localCredential`, or `authHeader` is set, a custom Bearer Authorization entry is
+   * dropped under any casing; see keepCustomAuthorization for other schemes. Relay
+   * connections never send them.
+   */
+  headers?: Record<string, string>;
   suppressSendErrors?: boolean;
   transportFactory?: DaemonTransportFactory;
   webSocketFactory?: WebSocketFactory;
