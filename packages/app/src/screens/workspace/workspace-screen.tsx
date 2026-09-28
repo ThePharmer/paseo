@@ -1738,6 +1738,9 @@ function WorkspaceScreenContent({
   const hasHydratedAgents = useSessionStore(
     (state) => state.sessions[normalizedServerId]?.hasHydratedAgents ?? false,
   );
+  const hasCurrentAgentDirectory = useSessionStore(
+    (state) => state.sessions[normalizedServerId]?.hasCurrentAgentDirectory ?? false,
+  );
   const workspaceRouteState = useResolvedWorkspaceRouteState({
     serverId: normalizedServerId,
     workspace: workspaceDescriptor,
@@ -2045,6 +2048,7 @@ function WorkspaceScreenContent({
       buildWorkspaceTabSnapshot({
         agentVisibility: workspaceAgentVisibility,
         agentsHydrated: hasHydratedAgents,
+        agentDirectoryCurrent: hasCurrentAgentDirectory,
         terminalsHydrated: terminalsQuery.isSuccess,
         knownTerminalIds,
         standaloneTerminalIds,
@@ -2054,6 +2058,7 @@ function WorkspaceScreenContent({
       }),
     );
   }, [
+    hasCurrentAgentDirectory,
     hasHydratedAgents,
     hasHydratedWorkspaceLayoutStore,
     pendingTerminalCreateInput,

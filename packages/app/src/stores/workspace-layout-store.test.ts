@@ -4040,6 +4040,7 @@ describe("workspace-layout-store actions", () => {
 
       workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
         agentsHydrated: true,
+        agentDirectoryCurrent: true,
         terminalsHydrated: true,
         activeAgentIds: ["own-agent"],
         autoOpenAgentIds: ["own-agent"],
@@ -4062,6 +4063,7 @@ describe("workspace-layout-store actions", () => {
 
       workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
         agentsHydrated: true,
+        agentDirectoryCurrent: true,
         terminalsHydrated: true,
         activeAgentIds: ["own-agent"],
         autoOpenAgentIds: ["own-agent"],
@@ -4071,6 +4073,45 @@ describe("workspace-layout-store actions", () => {
 
       const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
       expect(findPaneById(layout.root, layout.focusedPaneId)?.focusedTabId).toBe("agent_own-agent");
+    });
+
+    it("keeps the tab while ownership comes from a previous connection", () => {
+      // After a reconnect the directory still holds the previous connection's
+      // records until the refresh completes, so the agent can look foreign here.
+      const workspaceKey = createWorkspaceKey();
+      pinForeignAgentBesideOwnAgent(workspaceKey);
+      const store = workspaceLayoutStore.getState();
+
+      store.reconcileTabs(workspaceKey, {
+        agentsHydrated: true,
+        agentDirectoryCurrent: false,
+        terminalsHydrated: true,
+        activeAgentIds: ["own-agent"],
+        autoOpenAgentIds: ["own-agent"],
+        foreignAgentIds: ["foreign-agent"],
+        standaloneTerminalIds: [],
+      });
+
+      expect(contentTabIds(workspaceKey)).toEqual(["agent_own-agent", "agent_foreign-agent"]);
+      expect(
+        Array.from(workspaceLayoutStore.getState().pinnedAgentIdsByWorkspace[workspaceKey] ?? []),
+      ).toEqual(["foreign-agent"]);
+
+      // The refresh reports the agent archived in this workspace: no longer foreign.
+      store.reconcileTabs(workspaceKey, {
+        agentsHydrated: true,
+        agentDirectoryCurrent: true,
+        terminalsHydrated: true,
+        activeAgentIds: ["own-agent"],
+        autoOpenAgentIds: ["own-agent"],
+        foreignAgentIds: [],
+        standaloneTerminalIds: [],
+      });
+
+      expect(contentTabIds(workspaceKey)).toEqual(["agent_own-agent", "agent_foreign-agent"]);
+      expect(
+        Array.from(workspaceLayoutStore.getState().pinnedAgentIdsByWorkspace[workspaceKey] ?? []),
+      ).toEqual(["foreign-agent"]);
     });
 
     it("keeps the tab while agents are not hydrated", () => {
@@ -4099,6 +4140,7 @@ describe("workspace-layout-store actions", () => {
 
       workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
         agentsHydrated: true,
+        agentDirectoryCurrent: true,
         terminalsHydrated: true,
         activeAgentIds: ["own-agent"],
         autoOpenAgentIds: ["own-agent"],
@@ -4125,6 +4167,7 @@ describe("workspace-layout-store actions", () => {
 
       store.reconcileTabs(workspaceKey, {
         agentsHydrated: true,
+        agentDirectoryCurrent: true,
         terminalsHydrated: true,
         activeAgentIds: ["own-agent"],
         autoOpenAgentIds: ["own-agent"],

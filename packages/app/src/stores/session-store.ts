@@ -373,6 +373,10 @@ export interface SessionState {
 
   // Hydration status
   hasHydratedAgents: boolean;
+  // True once an agent directory refresh completes on the current connection.
+  // Cleared on disconnect/reconnect, while hasHydratedAgents and the previous
+  // connection's agents remain until the next refresh replaces them.
+  hasCurrentAgentDirectory: boolean;
   hasHydratedWorkspaces: boolean;
   hasWorkspaceDirectorySnapshot: boolean;
 
@@ -603,6 +607,7 @@ interface SessionStoreActions {
 
   // Hydration
   setHasHydratedAgents: (serverId: string, hydrated: boolean) => void;
+  setHasCurrentAgentDirectory: (serverId: string, current: boolean) => void;
   setHasHydratedWorkspaces: (serverId: string, hydrated: boolean) => void;
   setHasWorkspaceDirectorySnapshot: (serverId: string, available: boolean) => void;
 
@@ -627,6 +632,7 @@ function createInitialSessionState(
     viewedTimelineSync: null,
     serverInfo: null,
     hasHydratedAgents: false,
+    hasCurrentAgentDirectory: false,
     hasHydratedWorkspaces: false,
     hasWorkspaceDirectorySnapshot: false,
     isPlayingAudio: false,
@@ -1810,6 +1816,22 @@ export const useSessionStore = create<SessionStore>()(
             sessions: {
               ...prev.sessions,
               [serverId]: { ...session, hasHydratedAgents: hydrated },
+            },
+          };
+        });
+      },
+
+      setHasCurrentAgentDirectory: (serverId, current) => {
+        set((prev) => {
+          const session = prev.sessions[serverId];
+          if (!session || session.hasCurrentAgentDirectory === current) {
+            return prev;
+          }
+          return {
+            ...prev,
+            sessions: {
+              ...prev.sessions,
+              [serverId]: { ...session, hasCurrentAgentDirectory: current },
             },
           };
         });

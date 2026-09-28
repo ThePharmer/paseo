@@ -137,6 +137,7 @@ export class AgentStoreProjection {
     );
     store.setPendingPermissions(this.serverId, new Map(pendingPermissions));
     store.setHasHydratedAgents(this.serverId, true);
+    store.setHasCurrentAgentDirectory(this.serverId, true);
     return agents;
   }
 

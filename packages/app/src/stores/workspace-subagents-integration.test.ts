@@ -105,6 +105,7 @@ function reconcileWorkspaceTabs(workspaceKey: string, visibility: WorkspaceAgent
     buildWorkspaceTabSnapshot({
       agentVisibility: visibility,
       agentsHydrated: true,
+      agentDirectoryCurrent: true,
       terminalsHydrated: true,
       knownTerminalIds: [],
       standaloneTerminalIds: [],

@@ -8,9 +8,10 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import type {
   DaemonClient,
+  FetchAgentsEntry,
   WorkspaceLabelListPayload,
 } from "@getpaseo/client/internal/daemon-client";
-import type { SessionOutboundMessage } from "@getpaseo/protocol/messages";
+import type { AgentSnapshotPayload, SessionOutboundMessage } from "@getpaseo/protocol/messages";
 import {
   normalizeProjectDescriptor,
   normalizeWorkspaceDescriptor,
@@ -194,35 +195,37 @@ function createDirectory(
   return { client, directory };
 }
 
+function createAgentPayload(id: string, workspaceId?: string): AgentSnapshotPayload {
+  return {
+    id,
+    provider: "codex",
+    cwd: "/repo",
+    model: null,
+    createdAt: "2026-08-26T00:00:00.000Z",
+    updatedAt: "2026-08-26T00:00:00.000Z",
+    lastUserMessageAt: null,
+    status: "idle",
+    capabilities: {
+      supportsStreaming: true,
+      supportsSessionPersistence: true,
+      supportsDynamicModes: true,
+      supportsMcpServers: true,
+      supportsReasoningStream: true,
+      supportsToolInvocations: true,
+    },
+    currentModeId: null,
+    availableModes: [],
+    pendingPermissions: [],
+    persistence: null,
+    title: "Cached",
+    labels: {},
+    ...(workspaceId ? { workspaceId } : {}),
+  };
+}
+
 function createAgent(serverId: string, id: string) {
   return {
-    ...normalizeAgentSnapshot(
-      {
-        id,
-        provider: "codex",
-        cwd: "/repo",
-        model: null,
-        createdAt: "2026-08-26T00:00:00.000Z",
-        updatedAt: "2026-08-26T00:00:00.000Z",
-        lastUserMessageAt: null,
-        status: "idle",
-        capabilities: {
-          supportsStreaming: true,
-          supportsSessionPersistence: true,
-          supportsDynamicModes: true,
-          supportsMcpServers: true,
-          supportsReasoningStream: true,
-          supportsToolInvocations: true,
-        },
-        currentModeId: null,
-        availableModes: [],
-        pendingPermissions: [],
-        persistence: null,
-        title: "Cached",
-        labels: {},
-      },
-      serverId,
-    ),
+    ...normalizeAgentSnapshot(createAgentPayload(id), serverId),
     projectPlacement: null,
   };
 }
@@ -1138,6 +1141,69 @@ describe("DirectorySync session readiness", () => {
     await currentRefresh;
 
     expect(client.fetchAgentsCalls).toBe(1);
+    directory.dispose();
+  });
+
+  it("marks agent ownership current only after the current connection refreshes agents", async () => {
+    const serverId = "agent-ownership-reconnect";
+    const { client, directory } = createDirectory(serverId);
+    const store = useSessionStore.getState();
+    store.initializeSession(serverId, client as unknown as DaemonClient, 1);
+    const entryOwnedBy = (workspaceId: string): FetchAgentsEntry => ({
+      agent: createAgentPayload("moved-agent", workspaceId),
+      project: {
+        projectKey: "/repo",
+        projectName: "repo",
+        checkout: {
+          cwd: "/repo",
+          isGit: false,
+          currentBranch: null,
+          remoteUrl: null,
+          worktreeRoot: null,
+          isPaseoOwnedWorktree: false,
+          mainRepoRoot: null,
+        },
+      },
+    });
+    const session = () => useSessionStore.getState().sessions[serverId];
+
+    const releaseFirst = client.holdAgentFetch();
+    const first = directory.refreshAgents();
+    await expect.poll(() => client.fetchAgentsCalls).toBe(1);
+    releaseFirst({
+      requestId: "agents",
+      entries: [entryOwnedBy("ws-a")],
+      pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+    });
+    await first;
+    expect(session()?.hasCurrentAgentDirectory).toBe(true);
+
+    directory.connectionChanged({
+      client: null,
+      status: "offline",
+      source: { clientGeneration: 1, connectionEpoch: 1 },
+    });
+    directory.connectionChanged({
+      client: client as unknown as DaemonClient,
+      status: "online",
+      source: { clientGeneration: 1, connectionEpoch: 2 },
+    });
+    const releaseSecond = client.holdAgentFetch();
+    const second = directory.refreshAgents();
+    await expect.poll(() => client.fetchAgentsCalls).toBe(2);
+
+    expect(session()?.hasHydratedAgents).toBe(true);
+    expect(session()?.agents.get("moved-agent")?.workspaceId).toBe("ws-a");
+    expect(session()?.hasCurrentAgentDirectory).toBe(false);
+
+    releaseSecond({
+      requestId: "agents",
+      entries: [entryOwnedBy("ws-b")],
+      pageInfo: { hasMore: false, nextCursor: null, prevCursor: null },
+    });
+    await second;
+    expect(session()?.agents.get("moved-agent")?.workspaceId).toBe("ws-b");
+    expect(session()?.hasCurrentAgentDirectory).toBe(true);
     directory.dispose();
   });
 
