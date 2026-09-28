@@ -5,6 +5,7 @@ import type { ProjectedTimelineForwardFetchPlan } from "./timeline-sync-plan";
 import {
   consumeForcedTimelineTailReplacement,
   createViewedTimelineSync,
+  QUIET_VERIFICATION_LIMIT_MS,
   type TimelineResponsePayload,
   type ViewedTimelineStatus,
   type ViewedTimelineSyncPorts,
@@ -1037,11 +1038,124 @@ test("backgrounding preserves subscriptions and returning verifies the visible c
   world.sync.setActive(true);
 
   world.expectNoPendingMembership();
-  expect(world.sync.getAgentTimelineStatus("agent-b")).toBe("pending");
+  expect(world.sync.getAgentTimelineStatus("agent-b")).toBe("verifying");
   const resume = await world.nextFetch("agent-b");
   resume.respond({ hasNewer: false });
   await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-b")).toBe("ready"));
   world.expectNoPendingFetch();
+});
+
+async function showCaughtUpChat(world: TimelineWorld, agentId: string): Promise<void> {
+  world.sync.setConnected(true);
+  world.show("workspace", [agentId]);
+  (await world.nextMembership()).succeed();
+  (await world.nextFetch(agentId)).respond({ hasNewer: false });
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus(agentId)).toBe("ready"));
+  world.cursors.set(agentId, { epoch: `epoch-${agentId}`, endSeq: 42 });
+}
+
+function recordStatuses(world: TimelineWorld, agentId: string): ViewedTimelineStatus[] {
+  const statuses: ViewedTimelineStatus[] = [];
+  world.sync.subscribe(() => {
+    const status = world.sync.getAgentTimelineStatus(agentId);
+    if (statuses.at(-1) !== status) statuses.push(status);
+  });
+  return statuses;
+}
+
+test("returning to a healthy connection verifies the visible chat without surfacing a catch-up", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+  const statuses = recordStatuses(world, "agent-a");
+
+  world.sync.setActive(false);
+  world.sync.setActive(true);
+  const resume = await world.nextFetch("agent-a");
+  expect(resume.request.direction).toBe("after");
+  resume.respond({ hasNewer: false, seq: 42 });
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
+  expect(statuses).toEqual(["verifying", "ready"]);
+  world.sync.dispose();
+});
+
+test("a foreground verification that finds more history surfaces the catch-up", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+  const statuses = recordStatuses(world, "agent-a");
+
+  world.sync.setActive(false);
+  world.sync.setActive(true);
+  (await world.nextFetch("agent-a")).respond({ hasNewer: true, seq: 82 });
+  const latest = await world.nextFetch("agent-a");
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("pending");
+  latest.respond({ hasNewer: false });
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
+  expect(statuses).toEqual(["verifying", "pending", "ready"]);
+  world.sync.dispose();
+});
+
+test("a slow foreground verification surfaces the catch-up", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+
+  world.sync.setActive(false);
+  world.sync.setActive(true);
+  const resume = await world.nextFetch("agent-a");
+  world.elapse(QUIET_VERIFICATION_LIMIT_MS - 1);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("verifying");
+  world.elapse(QUIET_VERIFICATION_LIMIT_MS);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("pending");
+  resume.respond({ hasNewer: false });
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
+  world.sync.dispose();
+});
+
+test("a failed foreground verification reports the error", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+
+  world.sync.setActive(false);
+  world.sync.setActive(true);
+  (await world.nextFetch("agent-a")).fail("timeline unavailable");
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("error"));
+  world.elapse(QUIET_VERIFICATION_LIMIT_MS);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("error");
+  world.sync.dispose();
+});
+
+test("returning after the connection dropped surfaces the catch-up", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+
+  world.sync.setActive(false);
+  world.sync.setConnected(false);
+  world.sync.setActive(true);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("pending");
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  (await world.nextFetch("agent-a")).respond({ hasNewer: false });
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
+  world.sync.dispose();
+});
+
+test("a connection drop during a quiet verification surfaces the catch-up", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+
+  world.sync.setActive(false);
+  world.sync.setActive(true);
+  await world.nextFetch("agent-a");
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("verifying");
+  world.sync.setConnected(false);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("pending");
+  world.elapse(QUIET_VERIFICATION_LIMIT_MS);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("pending");
+  world.sync.dispose();
 });
 
 test("stale membership retry cannot overwrite a newer effective set", async () => {
