@@ -1,4 +1,9 @@
 import type { ServerInfoStatusPayload } from "@getpaseo/protocol/messages";
+import type {
+  GcSafetyNetDiagnostics,
+  GcSafetyNetEvent,
+  HermesGcStats,
+} from "@/performance/gc-safety-net/monitor";
 import type { HostRuntimeSnapshot } from "@/runtime/host-runtime";
 import type { HostConnection, HostProfile } from "@/types/host-connection";
 
@@ -87,6 +92,67 @@ export function formatServerInfoSection(serverInfo: ServerInfoStatusPayload | nu
       value: formatDiagnosticBoolean(serverInfo.desktopManaged),
     },
     { label: "Features", value: features.length > 0 ? features.join(", ") : "none" },
+  ]);
+}
+
+const BYTES_PER_MB = 1024 * 1024;
+
+function formatMb(bytes: number | null): string {
+  return bytes === null ? "unknown" : `${Math.round(bytes / BYTES_PER_MB)}MB`;
+}
+
+function formatSeconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function formatGcStats(stats: HermesGcStats | null): string {
+  if (stats === null) {
+    return "stats=unavailable";
+  }
+  return [
+    `numGCs=${stats.numGCs}`,
+    `gcTime=${Math.round(stats.gcTimeMs)}ms`,
+    `jsHeap=${formatMb(stats.heapSizeBytes)}`,
+    `external=${formatMb(stats.externalBytes)}`,
+  ].join(" ");
+}
+
+function describeGcEvent(event: GcSafetyNetEvent): string {
+  switch (event.kind) {
+    case "trigger":
+      return [
+        `nativeHeap=${formatMb(event.nativeHeapBytes)}`,
+        `baseline=${formatMb(event.baselineBytes)}`,
+        `pressure=${formatMb(event.pressureBytes)}`,
+      ].join(" ");
+    case "collected":
+      return `after=${formatSeconds(event.sinceTriggerMs)} nativeHeap=${formatMb(event.nativeHeapBytes)}`;
+    case "rebaseline":
+      return `baseline=${formatMb(event.baselineBytes)}`;
+    case "fallback-gc":
+      return [
+        `reason=${event.reason}`,
+        `pause=${Math.round(event.pauseMs)}ms`,
+        `nativeHeap=${formatMb(event.nativeHeapBeforeBytes)}->${formatMb(event.nativeHeapAfterBytes)}`,
+      ].join(" ");
+  }
+}
+
+export function formatGcSafetyNetSection(diagnostics: GcSafetyNetDiagnostics): string {
+  const eventRows = diagnostics.events.map((event, index) => ({
+    label: `Event ${index + 1}`,
+    value: `t+${formatSeconds(event.at)} ${event.kind} ${describeGcEvent(event)} ${formatGcStats(event.stats)}`,
+  }));
+  const noEventsRow = { label: "Events", value: "none" };
+  return formatDiagnosticSection("GC safety net", [
+    { label: "Mode", value: diagnostics.mode },
+    {
+      label: "Notes",
+      value: diagnostics.notes.length > 0 ? diagnostics.notes.join("; ") : "none",
+    },
+    { label: "Native heap", value: formatMb(diagnostics.nativeHeapBytes) },
+    { label: "Baseline", value: formatMb(diagnostics.baselineBytes) },
+    ...(eventRows.length > 0 ? eventRows : [noEventsRow]),
   ]);
 }
 
