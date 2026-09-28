@@ -124,6 +124,11 @@ Do not paper over missing required params by reading global params in the leaf.
 If `useLocalSearchParams()` misses a required param, fix layout ownership or the
 startup route shape.
 
+Hidden workspace routes stay mounted, so a global read of `?open` lets any of
+them pin another workspace's agent into its own tabs. The workspace leaf reads
+`open` locally and consumes it only while focused and while the pathname is its
+own workspace (`packages/app/src/navigation/workspace-open-intent.ts`).
+
 Use the host route context for host-owned leaves that need the host id after
 `h/[serverId]/_layout.tsx` has matched. Do not make a leaf recover from an
 unmatched tree by guessing from global state.
