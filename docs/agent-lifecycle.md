@@ -117,6 +117,8 @@ history hydration. Other archived agents stay archived.
 Opening an agent is a navigation choice, independent of whether its details are cached. The
 layout retains that choice across reload while the panel fetches the agent from the daemon.
 Once the daemon reports the agent active, its tab follows normal archive propagation again.
+If the session store knows the agent belongs to another workspace, the open was misrouted and
+the tab is pruned. An agent the store does not know keeps its tab.
 An empty active list cannot cancel an explicit History selection. Agent-detail loading does
 not own selection or release the explicit open.
 
