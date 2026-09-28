@@ -1754,6 +1754,25 @@ export const en = {
         show: "Show advanced",
         hide: "Hide advanced",
       },
+      headers: {
+        title: "Custom headers",
+        helper:
+          "Sent with every connection handshake, for example a Cloudflare Access service token.",
+        add: "Add header",
+        name: "Name",
+        value: "Value",
+        remove: "Remove header",
+        errors: {
+          missingName: "Enter a name for each header",
+          invalidName: "{{name}} is not a valid header name",
+          invalidValue: "{{name}} contains an invalid line break",
+          duplicateName: "{{name}} is entered more than once",
+          targetChanged:
+            "These headers were entered for a different host, port, or SSL setting, so they were cleared. Add them again for this host.",
+          applyAdvanced:
+            "The connection URI points at a different host than the fields above. Hide advanced to apply it, then connect.",
+        },
+      },
       passwordVisibility: {
         show: "Show password",
         hide: "Hide password",
