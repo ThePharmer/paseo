@@ -1625,6 +1625,19 @@ export class DaemonClient {
     void this.connect();
   }
 
+  /**
+   * Reconnects now without first probing the current transport. Use it when the socket is
+   * likely dead, such as after a long OS suspension. Waiters and subscriptions recover the
+   * same way as after a failed verification.
+   */
+  replaceConnection(reason: string): void {
+    if (this.connectionState.status === "connected") {
+      this.disposeTransport(1001, reason);
+      this.scheduleReconnect({ reason, event: "CONNECTION_REPLACED", reasonCode: "replaced" });
+    }
+    this.ensureConnected();
+  }
+
   private verifyConnection(): void {
     const transport = this.transport;
     if (!transport || this.connectionVerification === transport) return;
