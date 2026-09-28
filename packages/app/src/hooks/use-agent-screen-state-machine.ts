@@ -202,6 +202,9 @@ function resolveAgentScreenSync(args: {
       }),
     };
   }
+  if (input.visibilityCatchUpStatus === "verifying") {
+    return { status: "catching_up", ui: "silent" };
+  }
   return { status: "idle" };
 }
 
