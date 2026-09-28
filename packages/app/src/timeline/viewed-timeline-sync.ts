@@ -323,7 +323,13 @@ export interface ViewedTimelineSyncPorts {
   schedule(task: () => void, delayMs: number): () => void;
 }
 
-export type ViewedTimelineStatus = "ready" | "pending" | "error" | "retrying";
+/**
+ * `verifying` is a catch-up for a chat whose cached content is presumed current: the app
+ * came back to the foreground on a connection that never dropped. It becomes `pending`
+ * once the catch-up finds more history, runs past `QUIET_VERIFICATION_LIMIT_MS`, or the
+ * connection drops, and `error` if it fails.
+ */
+export type ViewedTimelineStatus = "ready" | "verifying" | "pending" | "error" | "retrying";
 
 export interface ViewedTimelineUiBridge {
   replaceVisibleAgentIds(sourceId: string, agentIds: string[]): void;
@@ -416,6 +422,9 @@ export function createViewedTimelineOwner(input: {
 
 const RETRY_DELAY_MS = 1_000;
 const MAX_RETRY_DELAY_MS = 30_000;
+// A healthy foreground catch-up settles well within this (measured ~0.5 s end to end on
+// Android). Past it, the chat can no longer pass for current and the catch-up surfaces.
+export const QUIET_VERIFICATION_LIMIT_MS = 600;
 
 type CatchUpStatus = "running" | "complete" | "error";
 
@@ -484,6 +493,8 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
   // Membership acknowledgement and catch-up completion drain parked requests.
   const pendingCatchUps = new Map<string, ProjectedTimelineForwardFetchPlan>();
   const visibilityCatchUpPending = new Set<string>();
+  // Foreground catch-ups for chats presumed current, with the timer that surfaces them.
+  const quietVerifications = new Map<string, () => void>();
   const visibilityCatchUpErrors = new Map<string, string>();
   // User-initiated retries only. Background retries stay silent; a retry the user asked for
   // owes them a pending state until it settles.
@@ -530,12 +541,35 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
     for (const listener of listeners) listener();
   };
 
+  const endQuietVerification = (agentId: string): boolean => {
+    const cancelSurface = quietVerifications.get(agentId);
+    if (!cancelSurface) return false;
+    cancelSurface();
+    quietVerifications.delete(agentId);
+    return true;
+  };
+
+  const surfaceQuietVerification = (agentId: string) => {
+    if (!endQuietVerification(agentId)) return;
+    visibilityCatchUpPending.add(agentId);
+    notifyListeners();
+  };
+
+  const beginQuietVerification = (agentId: string) => {
+    endQuietVerification(agentId);
+    quietVerifications.set(
+      agentId,
+      ports.schedule(() => surfaceQuietVerification(agentId), QUIET_VERIFICATION_LIMIT_MS),
+    );
+  };
+
   const setVisibilityCatchUpReady = (agentId: string) => {
     const wasPending = visibilityCatchUpPending.delete(agentId);
+    const wasVerifying = endQuietVerification(agentId);
     const hadError = visibilityCatchUpErrors.delete(agentId);
     const wasRetrying = manualRetries.delete(agentId);
     ports.onCatchUpEnded(agentId);
-    if (wasPending || hadError || wasRetrying) notifyListeners();
+    if (wasPending || wasVerifying || hadError || wasRetrying) notifyListeners();
   };
 
   const setVisibilityCatchUpError = (agentIds: string[], error: unknown) => {
@@ -544,6 +578,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
     for (const agentId of agentIds) {
       if (manualRetries.delete(agentId)) changed = true;
       if (visibilityCatchUpPending.delete(agentId)) changed = true;
+      if (endQuietVerification(agentId)) changed = true;
       if (visibilityCatchUpErrors.get(agentId) !== message) {
         visibilityCatchUpErrors.set(agentId, message);
         changed = true;
@@ -571,6 +606,8 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       const page = await ports.fetchPage(agentId, request);
       if (!ownsCatchUp(agentId, generation)) return;
       if (page.hasNewer && page.endCursor) {
+        // The chat was behind, so the cached content was not current after all.
+        surfaceQuietVerification(agentId);
         if (fallbackToLatestTailOnOverflow) {
           await ports.fetchLatestTail(agentId);
           if (!ownsCatchUp(agentId, generation)) return;
@@ -777,6 +814,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
     let statusChanged = false;
     if (options.resetCatchUpStatus) {
       for (const agentId of nextDesired) {
+        endQuietVerification(agentId);
         if (!visibilityCatchUpPending.has(agentId)) {
           visibilityCatchUpPending.add(agentId);
           statusChanged = true;
@@ -795,6 +833,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       if (!nextDesired.includes(agentId)) {
         cancelCatchUp(agentId);
         visibilityCatchUpPending.delete(agentId);
+        endQuietVerification(agentId);
         visibilityCatchUpErrors.delete(agentId);
         manualRetries.delete(agentId);
         released.push(agentId);
@@ -831,6 +870,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       if (manualRetries.has(agentId)) return "retrying";
       if (visibilityCatchUpErrors.has(agentId)) return "error";
       if (!isDesired(agentId) || visibilityCatchUpPending.has(agentId)) return "pending";
+      if (quietVerifications.has(agentId)) return "verifying";
       return "ready";
     },
     getAgentTimelineError(agentId) {
@@ -860,8 +900,20 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
         return;
       }
       for (const agentId of visibleAgentIds()) {
-        visibilityCatchUpPending.add(agentId);
-        visibilityCatchUpErrors.delete(agentId);
+        // A chat that was current when the app left stays presentable as current on a
+        // connection that never dropped; a disconnect already marked it pending.
+        const isPresumedCurrent =
+          connected &&
+          isDesired(agentId) &&
+          !visibilityCatchUpPending.has(agentId) &&
+          !visibilityCatchUpErrors.has(agentId) &&
+          !manualRetries.has(agentId);
+        if (isPresumedCurrent) {
+          beginQuietVerification(agentId);
+        } else {
+          visibilityCatchUpPending.add(agentId);
+          visibilityCatchUpErrors.delete(agentId);
+        }
         startCatchUp(agentId, { supersede: true });
       }
       notifyListeners();
@@ -909,6 +961,8 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       loadedCache.clear();
       cacheLoads.clear();
       visibilityCatchUpPending.clear();
+      for (const cancelSurface of quietVerifications.values()) cancelSurface();
+      quietVerifications.clear();
       visibilityCatchUpErrors.clear();
       manualRetries.clear();
       notifyListeners();
