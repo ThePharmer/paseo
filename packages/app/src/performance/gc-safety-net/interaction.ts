@@ -2,10 +2,10 @@
 // safety net never forces a blocking collection in the middle of one. Writers
 // are hot paths (every chat scroll event), so each mark is one clock read.
 //
-// Hooks: touch start/end on the root view (app/_layout.tsx), chat list scroll
-// events (agent-stream/strategy-native.tsx), and keyboard show/hide events
-// (subscribed by index.android.ts). Callers import markInteraction from the
-// module entry, which makes it a no-op off Android.
+// Hooks: touch start/end on the root view (app/_layout.tsx), user-driven chat
+// list scroll events (agent-stream/strategy-native.tsx), and keyboard
+// show/hide events (subscribed by index.android.ts). Callers import the
+// markers from the module entry, which makes them no-ops off Android.
 
 /** Longest keyboard animation to treat as ongoing, in case its end event never arrives. */
 const KEYBOARD_MOTION_MAX_MS = 1000;
@@ -15,6 +15,16 @@ let keyboardMotionStartedAt: number | null = null;
 
 export function markInteraction(): void {
   lastInteractionAt = performance.now();
+}
+
+/**
+ * Auto-scroll while an agent streams fires scroll events every frame; counting
+ * those would keep the app from ever looking quiet.
+ */
+export function markScrollInteraction(input: { isUserDriven: boolean }): void {
+  if (input.isUserDriven) {
+    markInteraction();
+  }
 }
 
 export function markKeyboardMotionStart(): void {

@@ -131,6 +131,7 @@ function describeGcEvent(event: GcSafetyNetEvent): string {
       return `baseline=${formatMb(event.baselineBytes)}`;
     case "fallback-gc":
       return [
+        `reason=${event.reason}`,
         `pause=${Math.round(event.pauseMs)}ms`,
         `nativeHeap=${formatMb(event.nativeHeapBeforeBytes)}->${formatMb(event.nativeHeapAfterBytes)}`,
       ].join(" ");

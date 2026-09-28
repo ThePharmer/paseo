@@ -23,7 +23,7 @@ interface PaseoGcPressureModule {
 // Null on an APK built before the module existed.
 const gcPressureModule = requireOptionalNativeModule<PaseoGcPressureModule>("PaseoGcPressure");
 
-export { markInteraction } from "./interaction";
+export { markInteraction, markScrollInteraction } from "./interaction";
 
 let current: GcSafetyNetHandle | null = null;
 

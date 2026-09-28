@@ -25,7 +25,7 @@ import { useStableEvent } from "@/hooks/use-stable-event";
 import { useKeyboardStreamInset } from "@/keyboard/shift";
 import { useRevisedHistoryRows } from "./history-row-revision";
 import { useBottomAnchorController } from "./bottom-anchor-controller";
-import { markInteraction } from "@/performance/gc-safety-net";
+import { markScrollInteraction } from "@/performance/gc-safety-net";
 import { useScrollKeyboardDismiss } from "./scroll-keyboard-dismiss/use-scroll-keyboard-dismiss";
 import type { StreamRenderInput, StreamStrategy, StreamViewportHandle } from "./strategy";
 import {
@@ -369,7 +369,7 @@ function NativeStreamViewport(props: StreamRenderInput & { strategy: StreamStrat
 
   const handleScroll = useStableEvent((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    markInteraction();
+    markScrollInteraction({ isUserDriven: isUserScrollActiveRef.current });
     const previousOffsetY = scrollOffsetYRef.current;
     scrollOffsetYRef.current = contentOffset.y;
     scrollKeyboardDismiss.onScroll(event);

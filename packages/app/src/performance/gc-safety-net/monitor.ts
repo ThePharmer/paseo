@@ -24,10 +24,14 @@ export const MIN_TRIGGER_INTERVAL_MS = 5000;
 export const FALLBACK_GROWTH_BYTES = 400 * MB;
 /** How long the balloon gets to work before a forced collection. */
 export const FALLBACK_WAIT_MS = 10_000;
-/** global.gc() blocks the JS thread; never run it inside a gesture, scroll, or keyboard animation. */
+/** global.gc() blocks the JS thread, so it waits this long after a gesture, user scroll, or keyboard animation. */
 export const FALLBACK_QUIET_MS = 500;
 /** A forced full collection is a visible pause; bound how often the app pays it. */
 export const FALLBACK_MIN_INTERVAL_MS = 60_000;
+/** Growth at which a pause mid-gesture beats a Scudo OOM abort, so activity no longer defers a due fallback. */
+export const EMERGENCY_GROWTH_BYTES = 700 * MB;
+/** Longest a due fallback waits for a quiet moment; continuous touch or scroll must not defer it forever. */
+export const MAX_FALLBACK_DEFER_MS = 10_000;
 /** Enough history to read a streaming session from the diagnostics sheet. */
 export const EVENT_RING_SIZE = 50;
 /** An armed balloon carries a token amount so its NativeState exists before it is needed. */
@@ -55,7 +59,7 @@ export interface GcSafetyNetPorts {
   createWeakRef: ((target: object) => WeakTarget) | null;
   /** Null when global.gc is missing. */
   collectGarbage: (() => void) | null;
-  /** Monotonic milliseconds of the latest touch, scroll, or keyboard motion. */
+  /** Monotonic milliseconds of the latest touch, user scroll, or keyboard motion. */
   readLastInteractionAt(): number;
   log(line: string): void;
 }
@@ -86,9 +90,13 @@ export interface GcRebaselineEvent {
   stats: HermesGcStats | null;
 }
 
+/** Why a due fallback ran: the app was quiet, or activity no longer defers it. */
+export type GcFallbackReason = "quiet" | "emergency-growth" | "deferred-too-long";
+
 export interface GcFallbackEvent {
   kind: "fallback-gc";
   at: number;
+  reason: GcFallbackReason;
   pauseMs: number;
   nativeHeapBeforeBytes: number;
   nativeHeapAfterBytes: number;
@@ -183,6 +191,7 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
   let lastTriggerAt: number | null = null;
   let highGrowthSince: number | null = null;
   let lastFallbackAt: number | null = null;
+  let fallbackDeferredSince: number | null = null;
 
   function record(event: GcSafetyNetEvent): void {
     events.push(event);
@@ -305,15 +314,34 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     return highGrowthSince;
   }
 
-  function isFallbackDue(at: number, growth: number): boolean {
+  // A due fallback waits for FALLBACK_QUIET_MS without touch, scroll, or
+  // keyboard motion, but activity defers it only for MAX_FALLBACK_DEFER_MS and
+  // not at all past EMERGENCY_GROWTH_BYTES.
+  function decideFallback(at: number, growth: number): GcFallbackReason | null {
     const waitStart = readFallbackWaitStart();
     const hasWaited = waitStart !== null && at - waitStart >= FALLBACK_WAIT_MS;
-    const isQuiet = at - ports.readLastInteractionAt() >= FALLBACK_QUIET_MS;
     const isSpaced = lastFallbackAt === null || at - lastFallbackAt >= FALLBACK_MIN_INTERVAL_MS;
-    return growth > FALLBACK_GROWTH_BYTES && hasWaited && isQuiet && isSpaced;
+    if (growth <= FALLBACK_GROWTH_BYTES || !hasWaited || !isSpaced) {
+      fallbackDeferredSince = null;
+      return null;
+    }
+    if (at - ports.readLastInteractionAt() >= FALLBACK_QUIET_MS) {
+      return "quiet";
+    }
+    if (growth > EMERGENCY_GROWTH_BYTES) {
+      return "emergency-growth";
+    }
+    fallbackDeferredSince ??= at;
+    return at - fallbackDeferredSince >= MAX_FALLBACK_DEFER_MS ? "deferred-too-long" : null;
   }
 
-  function forceCollection(collectGarbage: () => void, at: number, heapBefore: number): void {
+  function forceCollection(input: {
+    collectGarbage: () => void;
+    reason: GcFallbackReason;
+    at: number;
+    heapBefore: number;
+  }): void {
+    const { collectGarbage, reason, at, heapBefore } = input;
     const startedAt = ports.now();
     collectGarbage();
     const pauseMs = ports.now() - startedAt;
@@ -323,16 +351,18 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     baselineBytes = heapAfter;
     highGrowthSince = null;
     lastFallbackAt = at;
+    fallbackDeferredSince = null;
     record({
       kind: "fallback-gc",
       at,
+      reason,
       pauseMs,
       nativeHeapBeforeBytes: heapBefore,
       nativeHeapAfterBytes: heapAfter,
       stats,
     });
     ports.log(
-      `[GcSafetyNet] fallback gc pause=${Math.round(pauseMs)}ms ` +
+      `[GcSafetyNet] fallback gc reason=${reason} pause=${Math.round(pauseMs)}ms ` +
         `nativeHeap=${formatMb(heapBefore)}->${formatMb(heapAfter)}`,
     );
   }
@@ -364,8 +394,14 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     baselineBytes = baseline;
     const growth = heap - baseline;
     trackHighGrowth(at, growth);
-    if (ports.collectGarbage && isFallbackDue(at, growth)) {
-      forceCollection(ports.collectGarbage, at, heap);
+    const fallbackReason = ports.collectGarbage ? decideFallback(at, growth) : null;
+    if (ports.collectGarbage && fallbackReason) {
+      forceCollection({
+        collectGarbage: ports.collectGarbage,
+        reason: fallbackReason,
+        at,
+        heapBefore: heap,
+      });
       return;
     }
     if (createBalloonRef && stats) {

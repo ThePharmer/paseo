@@ -175,6 +175,15 @@ function runSeconds(runtime: FakeRuntime, net: { tick(): void }, seconds: number
   }
 }
 
+// Like runSeconds, but the user touches or scrolls right before every poll.
+function runBusySeconds(runtime: FakeRuntime, net: { tick(): void }, seconds: number): void {
+  for (let second = 0; second < seconds; second += 1) {
+    runtime.advance(1000);
+    runtime.interact();
+    tickTask(runtime, net);
+  }
+}
+
 /** The port calls made by the most recent task. */
 function lastTaskCalls(runtime: FakeRuntime): string[] {
   const calls = runtime.callLog.slice(0, -1);
@@ -467,6 +476,62 @@ describe("gc safety net fallback", () => {
     tickTask(runtime, net);
 
     expect(runtime.gcCalls).toEqual([11_100]);
+    expect(net.readDiagnostics().events.at(-1)).toMatchObject({
+      kind: "fallback-gc",
+      reason: "quiet",
+    });
+  });
+
+  test("collects despite continuous activity once the fallback has been deferred for 10 s", () => {
+    const runtime = createFakeRuntime();
+    const net = triggeredNet(runtime);
+    runtime.setNativeHeapMb(200 + 450);
+    runBusySeconds(runtime, net, 19);
+
+    expect(runtime.gcCalls).toEqual([]);
+
+    runBusySeconds(runtime, net, 1);
+
+    expect(runtime.gcCalls).toEqual([21_000]);
+    expect(net.readDiagnostics().events.at(-1)).toMatchObject({
+      kind: "fallback-gc",
+      at: 21_000,
+      reason: "deferred-too-long",
+    });
+  });
+
+  test("collects despite continuous activity as soon as it is due when growth passes 700 MB", () => {
+    const runtime = createFakeRuntime();
+    const net = triggeredNet(runtime);
+    runtime.setNativeHeapMb(200 + 750);
+    runBusySeconds(runtime, net, 9);
+
+    expect(runtime.gcCalls).toEqual([]);
+
+    runBusySeconds(runtime, net, 1);
+
+    expect(runtime.gcCalls).toEqual([11_000]);
+    expect(net.readDiagnostics().events.at(-1)).toMatchObject({
+      kind: "fallback-gc",
+      reason: "emergency-growth",
+    });
+  });
+
+  test("the deferral clock restarts when growth drops back under 400 MB", () => {
+    const runtime = createFakeRuntime();
+    const net = triggeredNet(runtime);
+    runtime.setNativeHeapMb(200 + 450);
+    runBusySeconds(runtime, net, 15);
+    runtime.setNativeHeapMb(200 + 350);
+    runBusySeconds(runtime, net, 1);
+    runtime.setNativeHeapMb(200 + 450);
+    runBusySeconds(runtime, net, 10);
+
+    expect(runtime.gcCalls).toEqual([]);
+
+    runBusySeconds(runtime, net, 1);
+
+    expect(runtime.gcCalls).toEqual([28_000]);
   });
 
   test("forces at most one collection per 60 s", () => {

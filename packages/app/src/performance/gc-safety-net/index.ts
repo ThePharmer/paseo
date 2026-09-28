@@ -8,6 +8,8 @@ function stopNothing(): void {}
 
 export function markInteraction(): void {}
 
+export function markScrollInteraction(_input: { isUserDriven: boolean }): void {}
+
 export function startGcSafetyNet(): () => void {
   return stopNothing;
 }
