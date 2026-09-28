@@ -67,6 +67,7 @@ import {
   type HostRuntimeConnectionStatus,
   useHostRuntimeClient,
   useHostRuntimeConnectionStatus,
+  useHostRuntimeHasFailedConnectAttempt,
   useHostRuntimeIsConnected,
   useHostRuntimeLastError,
   useHosts,
@@ -824,6 +825,7 @@ function ChatAgentContent({
 
   const hasHydratedHistoryBefore =
     hasAppliedAuthoritativeHistory || replicaTimelineStatus === "painted";
+  const hasFailedConnectAttempt = useHostRuntimeHasFailedConnectAttempt(serverId);
 
   const attentionController = useAgentAttentionClear({
     agentId,
@@ -896,6 +898,7 @@ function ChatAgentContent({
       isArchived: agentState.archivedAt !== null,
       missingAgentState,
       isConnected,
+      hasFailedConnectAttempt,
       isArchivingCurrentAgent,
       isHistorySyncing,
       needsAuthoritativeSync,
@@ -1289,7 +1292,12 @@ const ChatAgentReadyContent = memo(function ChatAgentReadyContent({
         </View>
       ) : null}
 
-      <TimelineSyncStatus sync={timelineSync} toast={toast} onDismiss={dismiss} />
+      <TimelineSyncStatus
+        statusKey={`${serverId}:${agentId}`}
+        sync={timelineSync}
+        toast={toast}
+        onDismiss={dismiss}
+      />
     </>
   );
 

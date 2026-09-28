@@ -1,0 +1,163 @@
+import { expect, test } from "vitest";
+import {
+  createDelayedSyncNotice,
+  NOTICE_MIN_VISIBLE_MS,
+  RECONNECTING_SHOW_DELAY_MS,
+  UPDATING_SHOW_DELAY_MS,
+  type SyncNotice,
+  type SyncNoticeSignal,
+} from "./sync-status-timing";
+
+const updating: SyncNoticeSignal = { notice: "updating", immediate: false };
+const reconnecting: SyncNoticeSignal = { notice: "reconnecting", immediate: false };
+const hostUnreachable: SyncNoticeSignal = { notice: "reconnecting", immediate: true };
+
+class NoticeClock {
+  private nowMs = 0;
+  private timers: Array<{ dueAt: number; task: () => void }> = [];
+  readonly shown: Array<SyncNotice | null> = [];
+  readonly notice = createDelayedSyncNotice({
+    ports: {
+      now: () => this.nowMs,
+      schedule: (task, delayMs) => {
+        const timer = { dueAt: this.nowMs + delayMs, task };
+        this.timers.push(timer);
+        return () => {
+          this.timers = this.timers.filter((candidate) => candidate !== timer);
+        };
+      },
+    },
+    onChange: (notice) => this.shown.push(notice),
+  });
+
+  advance(elapsedMs: number): void {
+    const target = this.nowMs + elapsedMs;
+    for (;;) {
+      const next = this.timers
+        .filter((timer) => timer.dueAt <= target)
+        .sort((left, right) => left.dueAt - right.dueAt)[0];
+      if (!next) break;
+      this.timers = this.timers.filter((timer) => timer !== next);
+      this.nowMs = next.dueAt;
+      next.task();
+    }
+    this.nowMs = target;
+  }
+
+  current(): SyncNotice | null {
+    return this.shown.at(-1) ?? null;
+  }
+}
+
+test("a catch-up that settles within the show delay never shows", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", updating);
+  clock.advance(UPDATING_SHOW_DELAY_MS - 1);
+  clock.notice.update("agent-a", null);
+  clock.advance(5_000);
+
+  expect(clock.shown).toEqual([]);
+});
+
+test("a catch-up still running after the show delay shows for at least the minimum time", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", updating);
+  clock.advance(UPDATING_SHOW_DELAY_MS);
+  expect(clock.current()).toBe("updating");
+
+  clock.advance(10);
+  clock.notice.update("agent-a", null);
+  clock.advance(NOTICE_MIN_VISIBLE_MS - 11);
+  expect(clock.current()).toBe("updating");
+  clock.advance(1);
+
+  expect(clock.shown).toEqual(["updating", null]);
+});
+
+test("a notice that outlives the minimum time hides as soon as the chat is current", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", updating);
+  clock.advance(UPDATING_SHOW_DELAY_MS + NOTICE_MIN_VISIBLE_MS + 100);
+  clock.notice.update("agent-a", null);
+
+  expect(clock.shown).toEqual(["updating", null]);
+});
+
+test("reconnecting waits longer than updating before it shows", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(RECONNECTING_SHOW_DELAY_MS - 1);
+  expect(clock.shown).toEqual([]);
+  clock.advance(1);
+
+  expect(clock.shown).toEqual(["reconnecting"]);
+});
+
+test("a known unreachable host shows reconnecting at once", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(200);
+  clock.notice.update("agent-a", hostUnreachable);
+
+  expect(clock.shown).toEqual(["reconnecting"]);
+});
+
+test("the delay counts from when the chat stopped being current, not from the latest label", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(300);
+  clock.notice.update("agent-a", updating);
+  expect(clock.shown).toEqual([]);
+  clock.advance(UPDATING_SHOW_DELAY_MS - 300);
+
+  expect(clock.shown).toEqual(["updating"]);
+});
+
+test("a shown notice switches label at once and keeps a fresh minimum time", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", hostUnreachable);
+  clock.advance(2_000);
+  clock.notice.update("agent-a", updating);
+  expect(clock.current()).toBe("updating");
+  clock.notice.update("agent-a", null);
+  clock.advance(NOTICE_MIN_VISIBLE_MS - 1);
+  expect(clock.current()).toBe("updating");
+  clock.advance(1);
+
+  expect(clock.shown).toEqual(["reconnecting", "updating", null]);
+});
+
+test("a status that returns during the minimum time keeps the notice up", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", updating);
+  clock.advance(UPDATING_SHOW_DELAY_MS);
+  clock.notice.update("agent-a", null);
+  clock.advance(100);
+  clock.notice.update("agent-a", updating);
+  clock.advance(NOTICE_MIN_VISIBLE_MS);
+
+  expect(clock.shown).toEqual(["updating"]);
+});
+
+test("switching panes drops the shown notice and restarts the delay for the new pane", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", updating);
+  clock.advance(UPDATING_SHOW_DELAY_MS);
+  clock.notice.update("agent-b", updating);
+  expect(clock.shown).toEqual(["updating", null]);
+  clock.advance(UPDATING_SHOW_DELAY_MS - 1);
+  expect(clock.current()).toBeNull();
+  clock.advance(1);
+
+  expect(clock.shown).toEqual(["updating", null, "updating"]);
+});
+
+test("switching panes cancels a pending show for the previous pane", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(RECONNECTING_SHOW_DELAY_MS - 100);
+  clock.notice.update("agent-b", null);
+  clock.advance(5_000);
+
+  expect(clock.shown).toEqual([]);
+});
