@@ -190,6 +190,9 @@ export class DirectorySync {
     this.flushAbortedTransactions();
     this.releaseSubscriptions();
     workspaceLabels.disconnect(this.serverId);
+    // Agents from the previous connection stay visible until the refresh replaces them,
+    // but their workspace ownership is no longer verified.
+    useSessionStore.getState().setHasCurrentAgentDirectory(this.serverId, false);
     this.connection = connection;
     this.abortPendingSessionWaits();
     if (!connection.client || connection.status !== "online") return true;

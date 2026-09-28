@@ -120,7 +120,8 @@ Once the daemon reports the agent active, its tab follows normal archive propaga
 If the live agent directory lists the agent as active in another workspace, the open was
 misrouted and the tab is pruned. An agent known only from cached details, archived, or unknown
 keeps its tab: a reimport keeps the agent id and moves it to another workspace, so cached
-ownership can be stale.
+ownership can be stale. The directory counts only after it refreshes on the current connection:
+a reconnect keeps the previous connection's records until that refresh replaces them.
 An empty active list cannot cancel an explicit History selection. Agent-detail loading does
 not own selection or release the explicit open.
 

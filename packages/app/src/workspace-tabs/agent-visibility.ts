@@ -10,6 +10,8 @@ export interface WorkspaceAgentVisibility {
    * Active agents the live agent directory places in a different workspace.
    * Cached details and archived agents are excluded: their workspace can be
    * stale, since a reimport keeps the agent id and moves it to a new workspace.
+   * The live directory can also hold the previous connection's records, so
+   * reconciliation trusts this set only once the current connection refreshes.
    */
   foreignAgentIds: Set<string>;
 }
@@ -62,6 +64,7 @@ export function deriveWorkspaceAgentVisibility(input: {
 export function buildWorkspaceTabSnapshot(input: {
   agentVisibility: WorkspaceAgentVisibility;
   agentsHydrated: boolean;
+  agentDirectoryCurrent: boolean;
   terminalsHydrated: boolean;
   knownTerminalIds: Iterable<string>;
   standaloneTerminalIds: Iterable<string>;
@@ -70,6 +73,7 @@ export function buildWorkspaceTabSnapshot(input: {
 }): WorkspaceTabSnapshot {
   return {
     agentsHydrated: input.agentsHydrated,
+    agentDirectoryCurrent: input.agentDirectoryCurrent,
     terminalsHydrated: input.terminalsHydrated,
     activeAgentIds: input.agentVisibility.activeAgentIds,
     autoOpenAgentIds: input.agentVisibility.autoOpenAgentIds,
