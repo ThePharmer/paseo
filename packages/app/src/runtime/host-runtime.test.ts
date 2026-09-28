@@ -3390,7 +3390,7 @@ describe("HostRuntimeStore", () => {
     }
   });
 
-  it("upsertDirectConnection stores SSL on the connection and password on the host", async () => {
+  it("upsertDirectConnection stores SSL and custom headers on the connection and password on the host", async () => {
     const store = new HostRuntimeStore({
       deps: {
         createClient: () => new FakeDaemonClient() as unknown as DaemonClient,
@@ -3408,6 +3408,7 @@ describe("HostRuntimeStore", () => {
       endpoint: "example.paseo.test:7443",
       useTls: true,
       password: "shared-secret",
+      headers: { "CF-Access-Client-Id": "token-id.access" },
       label: "tls host",
     });
 
@@ -3418,6 +3419,7 @@ describe("HostRuntimeStore", () => {
         type: "directTcp",
         endpoint: "example.paseo.test:7443",
         useTls: true,
+        headers: { "CF-Access-Client-Id": "token-id.access" },
       },
     ]);
     expect(host?.password).toBe("shared-secret");
