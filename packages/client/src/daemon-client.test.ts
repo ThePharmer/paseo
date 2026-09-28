@@ -19,6 +19,13 @@ import {
   encodeTerminalStreamFrame,
   TerminalStreamOpcode,
 } from "@getpaseo/protocol/terminal-stream-protocol";
+import {
+  createDaemonChannel,
+  exportPublicKey,
+  generateKeyPair,
+  type EncryptedChannel,
+  type Transport as RelayTransport,
+} from "@getpaseo/relay/e2ee";
 
 expectTypeOf<"getGitDiff" extends keyof DaemonClient ? true : false>().toEqualTypeOf<false>();
 expectTypeOf<
@@ -737,6 +744,111 @@ class DaemonClientSession {
   measureLatency(input: { timeoutMs: number }): Promise<number> {
     return this.client.measureLatency(input);
   }
+}
+
+const SERVER_INFO_FRAME = JSON.stringify({
+  type: "session",
+  message: {
+    type: "status",
+    payload: {
+      status: "server_info",
+      serverId: "srv_browser_socket_test",
+      hostname: null,
+      version: null,
+    },
+  },
+});
+
+// Follows the browser WebSocket contract that the Node `ws` package does not: close() throws for
+// a code other than 1000 or 3000-4999 and for a reason over 123 UTF-8 bytes, and the socket stays
+// open when it throws.
+class BrowserWebSocket {
+  readyState = 0;
+  binaryType = "blob";
+  readonly closeRequests: Array<{ code?: number; reason?: string }> = [];
+  private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+  constructor(private readonly onSend: (data: string | Uint8Array | ArrayBuffer) => void) {}
+
+  addEventListener(event: string, listener: (event: unknown) => void): void {
+    const listeners = this.listeners.get(event) ?? new Set();
+    listeners.add(listener);
+    this.listeners.set(event, listeners);
+  }
+
+  removeEventListener(event: string, listener: (event: unknown) => void): void {
+    this.listeners.get(event)?.delete(listener);
+  }
+
+  send(data: string | Uint8Array | ArrayBuffer): void {
+    this.onSend(data);
+  }
+
+  close(code?: number, reason?: string): void {
+    if (code !== undefined && code !== 1000 && (code < 3000 || code > 4999)) {
+      throw new DOMException(`The close code ${code} is not allowed`, "InvalidAccessError");
+    }
+    if (reason !== undefined && new TextEncoder().encode(reason).byteLength > 123) {
+      throw new DOMException("The close reason is too long", "SyntaxError");
+    }
+    this.closeRequests.push({ code, reason });
+    this.readyState = 2;
+  }
+
+  open(): void {
+    this.readyState = 1;
+    this.dispatch("open", {});
+  }
+
+  receive(data: string | ArrayBuffer): void {
+    this.dispatch("message", { data });
+  }
+
+  private dispatch(event: string, payload: unknown): void {
+    for (const listener of this.listeners.get(event) ?? []) {
+      listener(payload);
+    }
+  }
+}
+
+function toArrayBuffer(data: Uint8Array | ArrayBuffer): ArrayBuffer {
+  if (data instanceof ArrayBuffer) return data;
+  const copy = new Uint8Array(data.byteLength);
+  copy.set(data);
+  return copy.buffer;
+}
+
+// Answers the E2EE handshake and session hello of each relay socket the way the daemon does.
+function createRelayDaemon() {
+  const keyPair = generateKeyPair();
+  return {
+    daemonPublicKeyB64: exportPublicKey(keyPair.publicKey),
+    socket(): BrowserWebSocket {
+      let channel: Promise<EncryptedChannel> | null = null;
+      const socket = new BrowserWebSocket((data) => {
+        const message =
+          typeof data === "string"
+            ? { data, isBinary: false }
+            : { data: toArrayBuffer(data), isBinary: true };
+        setTimeout(() => transport.onmessage?.(message), 0);
+      });
+      const transport: RelayTransport = {
+        send: (data) => {
+          setTimeout(() => socket.receive(data), 0);
+        },
+        close: () => {},
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+      };
+      channel = createDaemonChannel(transport, keyPair, {
+        onmessage: () => {
+          void channel?.then((open) => open.send(SERVER_INFO_FRAME));
+        },
+      });
+      return socket;
+    },
+  };
 }
 
 function useHeartbeatClock(): void {
@@ -2123,7 +2235,7 @@ test("replacing a nominally connected session reconnects at once without a probe
   expect(attempts).toBe(2);
   expect(first.pingTimestamps()).toEqual(["0s"]);
   expect(first.closesFromClient()).toEqual([
-    { code: 1001, reason: "App resumed after a long background" },
+    { code: 1000, reason: "App resumed after a long background" },
   ]);
   await expect(pending).resolves.toBe("App resumed after a long background");
   second.openConnection();
@@ -2155,6 +2267,95 @@ test("replacing a disconnected session connects like ensureConnected", async () 
   expect(attempts).toBe(2);
   second.openConnection();
   expect(client.getConnectionState()).toEqual({ status: "connected" });
+});
+
+test("replacing a connection closes the previous browser socket", async () => {
+  const sockets: BrowserWebSocket[] = [];
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "browser-socket-replace",
+    logger: noopLogger,
+    webSocketFactory: () => {
+      const socket = new BrowserWebSocket(() => {});
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  clients.push(client);
+  const connection = client.connect();
+  await vi.waitFor(() => expect(sockets).toHaveLength(1));
+  sockets[0].open();
+  sockets[0].receive(SERVER_INFO_FRAME);
+  await connection;
+
+  client.replaceConnection("App resumed after a long background");
+
+  await vi.waitFor(() => expect(sockets).toHaveLength(2));
+  expect(sockets[0].readyState).toBe(2);
+  expect(sockets[0].closeRequests).toEqual([
+    { code: 1000, reason: "App resumed after a long background" },
+  ]);
+});
+
+test("replacing a relay connection closes the previous browser socket", async () => {
+  const daemon = createRelayDaemon();
+  const sockets: BrowserWebSocket[] = [];
+  const client = new DaemonClient({
+    url: "ws://relay.test/ws?role=client&serverId=srv_test&v=2",
+    clientId: "relay-browser-socket-replace",
+    logger: noopLogger,
+    e2ee: { enabled: true, daemonPublicKeyB64: daemon.daemonPublicKeyB64 },
+    webSocketFactory: () => {
+      const socket = daemon.socket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  clients.push(client);
+  const connection = client.connect();
+  await vi.waitFor(() => expect(sockets).toHaveLength(1));
+  sockets[0].open();
+  await connection;
+
+  client.replaceConnection("App resumed after a long background");
+
+  await vi.waitFor(() => expect(sockets).toHaveLength(2));
+  expect(sockets[0].readyState).toBe(2);
+  expect(sockets[0].closeRequests).toEqual([
+    { code: 1000, reason: "App resumed after a long background" },
+  ]);
+});
+
+test("a close the browser rejects still closes the socket and is logged", async () => {
+  const logger = createMockLogger();
+  const sockets: BrowserWebSocket[] = [];
+  const reason = "x".repeat(200);
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "browser-socket-long-reason",
+    logger,
+    webSocketFactory: () => {
+      const socket = new BrowserWebSocket(() => {});
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  clients.push(client);
+  const connection = client.connect();
+  await vi.waitFor(() => expect(sockets).toHaveLength(1));
+  sockets[0].open();
+  sockets[0].receive(SERVER_INFO_FRAME);
+  await connection;
+
+  client.replaceConnection(reason);
+
+  await vi.waitFor(() => expect(sockets).toHaveLength(2));
+  expect(sockets[0].readyState).toBe(2);
+  expect(sockets[0].closeRequests).toEqual([{ code: undefined, reason: undefined }]);
+  expect(logger.warn).toHaveBeenCalledWith(
+    { err: expect.objectContaining({ name: "SyntaxError" }), code: 1000, reason },
+    "transport_close_failed",
+  );
 });
 
 test("an obsolete foreground probe cannot close a replacement connection", async () => {
