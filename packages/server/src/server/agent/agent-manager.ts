@@ -2364,6 +2364,10 @@ export class AgentManager {
       this.emitState(agent);
     }
     const dispatch = (event: AgentStreamEvent): void => {
+      // The turn may still be streaming while the command runs, so release any
+      // assistant text it holds first; otherwise the reply lands ahead of text
+      // that arrived before it.
+      this.agentStreamCoalescer.flushFor(agent.id);
       // Persist timeline items so they show up in fetchAgentTimeline; broadcast
       // for live subscribers. Other event types are broadcast only.
       if (event.type === "timeline") {

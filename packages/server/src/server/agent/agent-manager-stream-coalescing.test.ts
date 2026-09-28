@@ -126,6 +126,16 @@ class TestAgentSession implements AgentSession {
     };
   }
 
+  outOfBandHandler: {
+    run(ctx: { emit: (event: AgentStreamEvent) => void }): Promise<void>;
+  } | null = null;
+
+  tryHandleOutOfBand(): {
+    run(ctx: { emit: (event: AgentStreamEvent) => void }): Promise<void>;
+  } | null {
+    return this.outOfBandHandler;
+  }
+
   pushEvent(event: AgentStreamEvent): void {
     for (const callback of this.subscribers) {
       callback(event);
@@ -1507,6 +1517,43 @@ describe("paragraph assistant text delivery", () => {
       expect(getTimelineItems(rows)).toEqual([
         { type: "assistant_message", text: "Let me check" },
         toolCall({ output: "running" }),
+      ]);
+      expect(liveTimelineItems(harness, agentId)).toEqual(getTimelineItems(rows));
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  test("releases held text before an out-of-band command reply so rows keep arrival order", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({ assistantTextDelivery: "paragraph" });
+    try {
+      const { agentId, session } = await createManagedSession(harness);
+      let emitReply: (() => void) | null = null;
+      session.outOfBandHandler = {
+        run: ({ emit }) =>
+          new Promise<void>((resolve) => {
+            emitReply = () => {
+              emit({
+                type: "timeline",
+                provider: "codex",
+                item: { type: "assistant_message", text: "Goal set." },
+              });
+              resolve();
+            };
+          }),
+      };
+
+      expect(harness.manager.tryRunOutOfBand(agentId, "/goal ship it")).toBe(true);
+      session.pushEvent(assistant("Still working", "codex", "turn-1"));
+      await waitForSessionEventQueue();
+      emitReply?.();
+      await vi.advanceTimersByTimeAsync(COALESCE_WINDOW_MS);
+
+      const rows = await harness.manager.getTimelineRows(agentId);
+      expect(getTimelineItems(rows)).toEqual([
+        { type: "assistant_message", text: "Still working" },
+        { type: "assistant_message", text: "Goal set." },
       ]);
       expect(liveTimelineItems(harness, agentId)).toEqual(getTimelineItems(rows));
     } finally {

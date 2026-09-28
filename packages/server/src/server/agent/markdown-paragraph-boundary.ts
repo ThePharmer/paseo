@@ -22,10 +22,16 @@ export interface MarkdownParagraphBoundary {
   openFenceAtLastLineEnd: MarkdownFence | null;
 }
 
-// An opening fence may sit at any indentation, since fences inside list items
-// are indented past the marker. A closing fence may be indented at most three
-// spaces more than its opener; deeper lines are content in the block.
-const FENCE_PATTERN = /^( *)(`{3,}|~{3,})(.*)$/;
+// A fence may follow container markers: blockquote `>` markers and list-item
+// markers (`-`, `*`, `+`, `1.`, `1)`), as in "- ```ts" or "> ~~~". The prefix
+// group captures them together with any indentation, and the fence's indent is
+// the column where its run starts, so a closing fence indented to the list
+// item's content column matches its opener. Any indentation is accepted: this
+// scanner does not track container nesting, and reading a four-space indented
+// line as a fence only holds text longer, which the size cap bounds, whereas
+// missing a real fence would release a code block that is still growing. A
+// closing fence may be indented at most three columns past its opener.
+const FENCE_PATTERN = /^((?:[ ]*(?:>[ ]?|(?:[-*+]|\d{1,9}[.)])[ ]+))*[ ]*)(`{3,}|~{3,})(.*)$/;
 // CommonMark blank lines hold only spaces and tabs. Other whitespace, such as a
 // no-break space, is paragraph content.
 const BLANK_LINE_PATTERN = /^[ \t]*$/;

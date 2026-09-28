@@ -825,6 +825,33 @@ describe("AgentStreamCoalescer paragraph delivery", () => {
     expect(assistantTexts(flushes)).toEqual(["```ts\nconst a = 1;\n\n\nconst b = 2;\n```\n"]);
   });
 
+  test("recognizes a fence opened on a list-marker line and holds it until it closes", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("- ```ts\n  const a = 1;\n\n"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(flushes).toEqual([]);
+
+    coalescer.handle("agent-1", assistant("  const b = 2;\n  ```\n\nDone.\n\nNext"));
+    await vi.advanceTimersByTimeAsync(AGENT_STREAM_COALESCE_DEFAULT_WINDOW_MS);
+
+    expect(assistantTexts(flushes)).toEqual([
+      "- ```ts\n  const a = 1;\n\n  const b = 2;\n  ```\n\nDone.\n\n",
+    ]);
+  });
+
+  test("recognizes fences opened after ordered-list and blockquote markers", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("1. ```sh\n   ls\n\n   pwd\n   ```\n\n"));
+    coalescer.handle("agent-1", assistant("> ~~~\n> x\n>\n> ~~~\n\nTail"));
+    await vi.advanceTimersByTimeAsync(PARAGRAPH_DELIVERY_MIN_INTERVAL_MS);
+
+    expect(assistantTexts(flushes).join("")).toBe(
+      "1. ```sh\n   ls\n\n   pwd\n   ```\n\n> ~~~\n> x\n>\n> ~~~\n\n",
+    );
+  });
+
   test("does not treat a fence line with an info string as a closing fence", async () => {
     const { coalescer, flushes } = createParagraphHarness();
 
