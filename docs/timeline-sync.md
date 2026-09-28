@@ -81,10 +81,25 @@ bounded catch-up. Switching between continuously subscribed open chats needs no 
 Focus alone does not mutate timeline state; the response is compared with the local
 authoritative range first.
 
-Cached history remains readable during recovery. The chat shows Reconnecting to host while the host is
-offline, then Updating messages until authoritative catch-up completes. Socket connectivity alone cannot
-certify that the displayed conversation is current. The timeline owner publishes freshness; the
-view renders it without a toast timer or a separate resume workflow.
+Cached history remains readable during recovery. Socket connectivity alone cannot certify that the
+displayed conversation is current, so the timeline owner publishes freshness and the chat reports it:
+Reconnecting to host while the host is offline, then Updating messages until authoritative catch-up
+completes.
+
+Returning to the foreground on a connection that never dropped is the exception. A chat that was
+current when the app left becomes `verifying`, not `pending`, and its catch-up runs without a notice.
+It becomes `pending` when a page reports newer history, when the catch-up runs past
+`QUIET_VERIFICATION_LIMIT_MS`, or when the connection drops, and it reports a sync error if the
+catch-up fails. Marking every visible chat pending showed Updating messages on every return, although
+a healthy resume usually changes nothing. A single page that brings new rows lands and settles in one
+step, so there is nothing left to announce.
+
+The notice is delayed in `packages/app/src/timeline/sync-status-timing.ts`. Updating messages shows
+after 400 ms and Reconnecting to host after 1 s, both counted from when the chat stopped being
+current, so a reconnect followed by a catch-up cannot hide behind two fresh delays. A shown notice
+stays at least 400 ms. A host whose connect attempt already failed, or that has nothing to connect
+to, shows Reconnecting at once; a dropped socket alone does not count, because the first retry
+usually succeeds. Timing is keyed per chat, so a pane switch never inherits another chat's timer.
 
 The draft-create handoff has the same lifetime: the viewed-timeline owner releases it when the sync
 stops owing that chat a catch-up, not when the first authoritative page lands. Releasing it at the
@@ -93,9 +108,15 @@ shows Updating messages for a conversation that cannot be out of date. Closing t
 obligation too, so a reopened chat starts from authoritative state instead of a stale optimistic
 one; disconnect and backgrounding keep it.
 
-Foregrounding probes a nominally connected session immediately. A healthy response preserves the
-socket; a failed three-second probe starts reconnecting without waiting for the background heartbeat
-or retry backoff. This cannot keep a mobile socket alive after the operating system suspends it.
+Foregrounding checks every host without waiting for the background heartbeat or retry backoff.
+After less than 10 seconds hidden, a nominally connected session gets a three-second probe: a healthy
+response keeps the socket and a failure reconnects. After 10 seconds or more the socket is replaced at
+once, because the operating system has usually suspended it and the probe would spend its full three
+seconds finding that out (measured on Android: 4.1 s to a synchronized chat through the probe, 1 s
+for a known disconnect). Web `visibilitychange` and native `AppState` reach this through the same
+react-native-web `AppState` path, so a hidden browser tab also reconnects after 10 seconds even though
+its socket usually survives. Hidden time uses the wall clock because a monotonic clock can stop while
+the device sleeps.
 
 - The same epoch and `window.maxSeq` is an exact display no-op. The app advances synchronization
   bookkeeping without replacing timeline arrays, preserving an upward-scrolled viewport.
