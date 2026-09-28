@@ -6,7 +6,11 @@ import { normalizeWorkspaceOpaqueId } from "@/utils/workspace-identity";
 export interface WorkspaceAgentVisibility {
   activeAgentIds: Set<string>;
   autoOpenAgentIds: Set<string>;
-  /** Agents the session store knows belong to a different workspace. */
+  /**
+   * Active agents the live agent directory places in a different workspace.
+   * Cached details and archived agents are excluded: their workspace can be
+   * stale, since a reimport keeps the agent id and moves it to a new workspace.
+   */
   foreignAgentIds: Set<string>;
 }
 
@@ -36,22 +40,20 @@ export function deriveWorkspaceAgentVisibility(input: {
     ...(agentDetails?.entries() ?? []),
     ...(sessionAgents?.entries() ?? []),
   ]);
-  for (const agent of agentsById.values()) {
-    const agentWorkspaceId = normalizeWorkspaceOpaqueId(agent.workspaceId);
-    if (agentWorkspaceId && agentWorkspaceId !== workspaceId) {
-      foreignAgentIds.add(agent.id);
-    }
-  }
   for (const agent of sessionAgents?.values() ?? []) {
-    if (!agentBelongsToWorkspace(agent, workspaceId)) {
+    if (agent.archivedAt) {
       continue;
     }
-    if (!agent.archivedAt) {
-      activeAgentIds.add(agent.id);
-      const parentAgent = agent.parentAgentId ? agentsById.get(agent.parentAgentId) : undefined;
-      if (isWorkspaceRootAgent(agent, parentAgent)) {
-        autoOpenAgentIds.add(agent.id);
+    if (!agentBelongsToWorkspace(agent, workspaceId)) {
+      if (normalizeWorkspaceOpaqueId(agent.workspaceId)) {
+        foreignAgentIds.add(agent.id);
       }
+      continue;
+    }
+    activeAgentIds.add(agent.id);
+    const parentAgent = agent.parentAgentId ? agentsById.get(agent.parentAgentId) : undefined;
+    if (isWorkspaceRootAgent(agent, parentAgent)) {
+      autoOpenAgentIds.add(agent.id);
     }
   }
   return { activeAgentIds, autoOpenAgentIds, foreignAgentIds };

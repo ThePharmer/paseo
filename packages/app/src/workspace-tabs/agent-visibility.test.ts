@@ -308,7 +308,7 @@ describe("workspace agent visibility", () => {
     expect(result.activeAgentIds).toEqual(new Set<string>());
   });
 
-  it("lists agents known in another workspace as foreign, including historical details", () => {
+  it("lists active directory agents owned by another workspace as foreign", () => {
     const own = makeAgent({ id: "own-agent", cwd: "/repo", workspaceId: WORKSPACE_ID });
     const ownArchived = makeAgent({
       id: "own-archived-agent",
@@ -317,12 +317,6 @@ describe("workspace agent visibility", () => {
       archivedAt: new Date("2026-03-04T00:01:00.000Z"),
     });
     const foreign = makeAgent({ id: "foreign-agent", cwd: "/repo", workspaceId: "ws-other" });
-    const foreignDetail = makeAgent({
-      id: "foreign-detail-agent",
-      cwd: "/repo",
-      workspaceId: "ws-other",
-      archivedAt: new Date("2026-03-04T00:01:00.000Z"),
-    });
     const ownerless = makeAgent({ id: "ownerless-agent", cwd: "/repo" });
 
     const result = deriveWorkspaceAgentVisibility({
@@ -332,11 +326,55 @@ describe("workspace agent visibility", () => {
         [foreign.id, foreign],
         [ownerless.id, ownerless],
       ]),
-      agentDetails: new Map<string, Agent>([[foreignDetail.id, foreignDetail]]),
       workspaceId: WORKSPACE_ID,
     });
 
-    expect(result.foreignAgentIds).toEqual(new Set(["foreign-agent", "foreign-detail-agent"]));
+    expect(result.foreignAgentIds).toEqual(new Set(["foreign-agent"]));
+  });
+
+  it("does not treat a cached detail from another workspace as foreign", () => {
+    // A detail-only record survives directory refetches, so its workspace can
+    // predate a reimport into this workspace.
+    const staleDetail = makeAgent({
+      id: "reimported-agent",
+      cwd: "/repo",
+      workspaceId: "ws-other",
+    });
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents: new Map<string, Agent>(),
+      agentDetails: new Map<string, Agent>([[staleDetail.id, staleDetail]]),
+      workspaceId: WORKSPACE_ID,
+    });
+
+    expect(result.foreignAgentIds).toEqual(new Set<string>());
+  });
+
+  it("keeps an archived agent opened from History out of the foreign set", () => {
+    const archivedAt = new Date("2026-03-04T00:01:00.000Z");
+    const archivedInDirectory = makeAgent({
+      id: "archived-directory-agent",
+      cwd: "/repo",
+      workspaceId: "ws-other",
+      archivedAt,
+    });
+    const archivedDetail = makeAgent({
+      id: "archived-detail-agent",
+      cwd: "/repo",
+      workspaceId: "ws-other",
+      archivedAt,
+    });
+
+    const result = deriveWorkspaceAgentVisibility({
+      sessionAgents: new Map<string, Agent>([[archivedInDirectory.id, archivedInDirectory]]),
+      agentDetails: new Map<string, Agent>([
+        [archivedDetail.id, archivedDetail],
+        [archivedInDirectory.id, archivedInDirectory],
+      ]),
+      workspaceId: WORKSPACE_ID,
+    });
+
+    expect(result.foreignAgentIds).toEqual(new Set<string>());
   });
 
   it("builds the tab reconciliation snapshot without callers unpacking agent visibility", () => {
