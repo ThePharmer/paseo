@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useNavigation } from "@react-navigation/native";
+import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { StyleSheet, View } from "react-native";
-import { useGlobalSearchParams, useLocalSearchParams, useRootNavigationState } from "expo-router";
+import { useLocalSearchParams, usePathname, useRootNavigationState } from "expo-router";
 import { HostRouteBootstrapBoundary } from "@/components/host-route-bootstrap-boundary";
 import { RetainedPanel } from "@/components/retained-panel";
 import {
@@ -34,6 +34,7 @@ import {
   stripHostWorkspaceRouteEchoSearchFromBrowserUrlAfterCommit,
 } from "@/utils/host-route-browser";
 import { prepareWorkspaceTab } from "@/utils/workspace-navigation";
+import { canRouteConsumeWorkspaceOpenIntent } from "@/navigation/workspace-open-intent";
 import { isNative, isWeb } from "@/constants/platform";
 import { RenderProfile } from "@/utils/render-profiler";
 
@@ -95,6 +96,8 @@ export default function HostWorkspaceIndexRoute() {
 
 function HostWorkspaceRouteContent() {
   const navigation = useNavigation();
+  const isRouteFocused = useIsFocused();
+  const pathname = usePathname();
   const rootNavigationState = useRootNavigationState();
   const hasHydratedWorkspaceLayoutStore = useWorkspaceLayoutStoreHydrated();
   const consumedIntentRef = useRef<string | null>(null);
@@ -102,8 +105,6 @@ function HostWorkspaceRouteContent() {
   const params = useLocalSearchParams<{
     serverId?: string | string[];
     workspaceId?: string | string[];
-  }>();
-  const globalParams = useGlobalSearchParams<{
     open?: string | string[];
   }>();
   const serverId = getParamValue(params.serverId);
@@ -111,7 +112,7 @@ function HostWorkspaceRouteContent() {
   const workspaceId = workspaceValue
     ? (decodeWorkspaceIdFromPathSegment(workspaceValue) ?? "")
     : "";
-  const openValue = getParamValue(globalParams.open);
+  const openValue = getParamValue(params.open);
   const hasHydratedWorkspaces = useHasHydratedWorkspaces(serverId);
   const workspaceExists = useWorkspaceExists(serverId, workspaceId);
   const openIntent = useMemo(() => parseWorkspaceOpenIntent(openValue), [openValue]);
@@ -119,6 +120,13 @@ function HostWorkspaceRouteContent() {
   const isOpenIntentWaitingForWorkspace = Boolean(
     isAgentOpenIntent && (!hasHydratedWorkspaces || !workspaceExists),
   );
+  const canConsumeOpenIntent = canRouteConsumeWorkspaceOpenIntent({
+    openValue,
+    isRouteFocused,
+    pathname,
+    serverId,
+    workspaceId,
+  });
   useEffect(() => {
     if (!serverId || !workspaceId) {
       return;
@@ -127,7 +135,7 @@ function HostWorkspaceRouteContent() {
   }, [serverId, workspaceId]);
 
   useEffect(() => {
-    if (!openValue) {
+    if (!canConsumeOpenIntent) {
       return;
     }
     if (!rootNavigationState?.key) {
@@ -172,6 +180,7 @@ function HostWorkspaceRouteContent() {
 
     setIntentConsumed(true);
   }, [
+    canConsumeOpenIntent,
     hasHydratedWorkspaceLayoutStore,
     isOpenIntentWaitingForWorkspace,
     navigation,
@@ -183,7 +192,7 @@ function HostWorkspaceRouteContent() {
   ]);
 
   if (
-    openValue &&
+    canConsumeOpenIntent &&
     !isOpenIntentWaitingForWorkspace &&
     (!intentConsumed || !hasHydratedWorkspaceLayoutStore)
   ) {
