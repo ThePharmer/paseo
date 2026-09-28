@@ -34,7 +34,7 @@ export const EMERGENCY_GROWTH_BYTES = 700 * MB;
 export const MAX_FALLBACK_DEFER_MS = 10_000;
 /** Enough history to read a streaming session from the diagnostics sheet. */
 export const EVENT_RING_SIZE = 50;
-/** An armed balloon carries a token amount so its NativeState exists before it is needed. */
+/** An armed balloon carries a token amount so its pressure NativeState exists before it is needed. */
 const ARMED_PRESSURE_BYTES = 1;
 
 export interface HermesGcStats {
@@ -45,9 +45,11 @@ export interface HermesGcStats {
 }
 
 export interface GcBalloonPorts {
-  /** A fresh balloon: a plain object that holds a native token whose release reports `id`. */
+  /** A fresh balloon: a plain object whose native finalizer reports `id` when Hermes collects it. */
   create(id: number): object;
-  /** Ids of balloons whose token was finalized since the last call. */
+  /** Replaces the balloon's external memory pressure. */
+  setPressure(balloon: object, bytes: number): void;
+  /** Ids of balloons finalized since the last call. */
   takeFinalizedIds(): number[];
 }
 
@@ -55,10 +57,9 @@ export interface GcSafetyNetPorts {
   /** Monotonic milliseconds. */
   now(): number;
   readNativeHeapBytes(): number;
-  setPressure(target: object, bytes: number): void;
   /** Null when HermesInternal.getInstrumentedStats is missing or lacks js_numGCs or js_externalBytes. */
   readStats: (() => HermesGcStats) | null;
-  /** Null when the native module has no GcBalloonToken, on an APK that predates it. */
+  /** Null when the native balloon finalizer is not installed, e.g. on an APK that predates it. */
   balloons: GcBalloonPorts | null;
   /** Null when global.gc is missing. */
   collectGarbage: (() => void) | null;
@@ -153,7 +154,7 @@ function describeMissingCapabilities(ports: GcSafetyNetPorts): string[] {
     );
   }
   if (ports.balloons === null) {
-    notes.push("PaseoGcPressure has no GcBalloonToken: balloon disabled");
+    notes.push("PaseoGcPressure balloon finalizer unavailable: balloon disabled");
   }
   if (ports.collectGarbage === null) {
     notes.push("global.gc unavailable: fallback disabled");
@@ -173,7 +174,7 @@ function formatMb(bytes: number): string {
 }
 
 export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
-  // Ripeness reads js_numGCs; collection is the balloon token's release.
+  // Ripeness reads js_numGCs; collection is the balloon's own finalizer.
   const balloons = ports.readStats === null ? null : ports.balloons;
   const mode = resolveMode({
     hasBalloon: balloons !== null,
@@ -204,7 +205,7 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     const id = nextBalloonId;
     nextBalloonId += 1;
     const target = balloonPorts.create(id);
-    ports.setPressure(target, ARMED_PRESSURE_BYTES);
+    balloonPorts.setPressure(target, ARMED_PRESSURE_BYTES);
     return { id, target, armedAtNumGCs: stats.numGCs };
   }
 
@@ -217,16 +218,16 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     return isSettled && isSpaced;
   }
 
-  // Each balloon holds a GcBalloonToken, an Expo SharedObject whose native
-  // release runs when Hermes finalizes the token, which it can do only once
-  // the balloon that holds it is gone. The token signals per balloon and
-  // references nothing, so neither unrelated external memory (ArrayBuffers
-  // share js_externalBytes) nor the check itself can fake or delay a
-  // collection. A WeakRef would root the balloon: construction and deref()
-  // keep it until the task drains its microtasks (lib/VM/JSLib/WeakRef.cpp:78,
-  // :104), and deref() during old-gen marking marks it live
-  // (include/hermes/VM/WeakRoot-inline.h:25). Ids are drained every tick, so a
-  // late signal from a balloon cleared by a forced collection is dropped.
+  // Each balloon carries a C++ jsi::NativeState whose destructor queues the
+  // balloon's id when Hermes finalizes the balloon, in the same collection
+  // that debits its pressure. The signal is per balloon and references
+  // nothing, so neither unrelated external memory (ArrayBuffers share
+  // js_externalBytes) nor the check itself can fake or delay a collection. A
+  // WeakRef would root the balloon: construction and deref() keep it until
+  // the task drains its microtasks (lib/VM/JSLib/WeakRef.cpp:78, :104), and
+  // deref() during old-gen marking marks it live
+  // (include/hermes/VM/WeakRoot-inline.h:25). Ids are drained every tick, so
+  // the signal of a balloon cleared by a forced collection is dropped.
   function observeCollection(
     balloonPorts: GcBalloonPorts,
     at: number,
@@ -293,7 +294,7 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     // new balloon, the event, the log line) happens above, and
     // the callers return without allocating, so the only strong references
     // left are this frame's, gone when the tick returns.
-    ports.setPressure(balloon.target, pressureBytes);
+    balloonPorts.setPressure(balloon.target, pressureBytes);
   }
 
   function tickBalloon(input: {
@@ -365,10 +366,11 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     highGrowthSince = null;
     lastFallbackAt = at;
     fallbackDeferredSince = null;
-    // A full collection frees any balloon nothing roots, so the dropped one is
-    // gone even if its token's signal is late (Expo's construction wrapper can
-    // root the token until Java finalizes it). Clear it, or later triggers stay
-    // blocked. The baseline above is already the post-collection heap; a
+    // A full collection frees any balloon nothing roots, and its finalizer
+    // queues the id before global.gc() returns; the next tick drains and
+    // ignores it. A balloon that survived is held by something the net cannot
+    // release, and waiting for it would block triggers forever. Clear it
+    // either way. The baseline above is already the post-collection heap; a
     // delayed rebaseline would hide growth that starts right after the pause.
     released = null;
     rebaselineAt = null;

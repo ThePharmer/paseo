@@ -16,9 +16,9 @@ interface PressureCall {
 
 const ARMED_PRESSURE_BYTES = 1;
 
-// Simulates the pieces of Hermes, Expo, and Android the monitor reads: a
-// clock, the native heap, instrumented GC stats, balloons with a native
-// finalization signal, old-generation collections, and global.gc().
+// Simulates the pieces of Hermes and Android the monitor reads: a clock, the
+// native heap, instrumented GC stats, balloons with a native finalization
+// signal, old-generation collections, and global.gc().
 //
 // External bytes follow Hermes: setPressure credits the difference from the
 // object's previous amount, and a collected balloon debits its whole amount.
@@ -26,22 +26,22 @@ const ARMED_PRESSURE_BYTES = 1;
 // Only balloons the monitor has inflated and dropped are collectible; an
 // armed balloon is still strongly held. A balloon inflated in the current task
 // is still on the monitor's stack, so the collection that frees it comes in a
-// later task. A collected balloon's token reports its id, unless Expo's
-// construction wrapper still roots the token, in which case the id arrives
-// only after Java finalizes the wrapper and a later collection runs.
+// later task. The collection that frees a balloon also runs its finalizer,
+// which reports the balloon's id, unless something outside the net retains
+// the balloon.
 function createFakeRuntime(options: FakeRuntimeOptions = {}) {
   const { hasStats = true, hasBalloons = true, hasGc = true } = options;
   let now = 0;
   let nativeHeapBytes = 200 * MB;
   let lastInteractionAt = Number.NEGATIVE_INFINITY;
   let otherExternalBytes = 0;
-  let tokensHeldByWrapper = false;
+  let retainDropped = false;
   const stats = { numGCs: 0, heapSizeBytes: 30 * MB, gcTimeMs: 0 };
   const pressureCalls: PressureCall[] = [];
   const pressureByTarget = new Map<object, number>();
   const balloonIds = new Map<object, number>();
   const inflatedThisTask = new Set<object>();
-  const wrapperHeldIds: number[] = [];
+  const retained = new Set<object>();
   let finalizedIds: number[] = [];
   const callLog: string[] = [];
   const gcCalls: number[] = [];
@@ -60,18 +60,21 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
     return total;
   }
 
+  // Hermes debits the pressure and runs the balloon's finalizer in the same
+  // collection.
+  function finalize(target: object): void {
+    pressureByTarget.delete(target);
+    retained.delete(target);
+    finalizedIds.push(balloonIds.get(target) ?? -1);
+  }
+
   function collectOldGeneration(): void {
-    if (!tokensHeldByWrapper) {
-      finalizedIds.push(...wrapperHeldIds.splice(0));
-    }
     for (const [target, bytes] of pressureByTarget) {
       if (bytes > ARMED_PRESSURE_BYTES && !inflatedThisTask.has(target)) {
-        pressureByTarget.delete(target);
-        const id = balloonIds.get(target) ?? -1;
-        if (tokensHeldByWrapper) {
-          wrapperHeldIds.push(id);
+        if (retainDropped) {
+          retained.add(target);
         } else {
-          finalizedIds.push(id);
+          finalize(target);
         }
       }
     }
@@ -81,14 +84,6 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
   const ports: GcSafetyNetPorts = {
     now: () => now,
     readNativeHeapBytes: () => nativeHeapBytes,
-    setPressure: (target, bytes) => {
-      callLog.push(`pressure ${nameOf(target)} ${bytes}`);
-      pressureCalls.push({ target, bytes });
-      pressureByTarget.set(target, bytes);
-      if (bytes > ARMED_PRESSURE_BYTES) {
-        inflatedThisTask.add(target);
-      }
-    },
     readStats: hasStats
       ? () => {
           callLog.push("stats");
@@ -102,6 +97,14 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
             balloonIds.set(target, id);
             callLog.push(`create ${nameOf(target)}`);
             return target;
+          },
+          setPressure: (target, bytes) => {
+            callLog.push(`pressure ${nameOf(target)} ${bytes}`);
+            pressureCalls.push({ target, bytes });
+            pressureByTarget.set(target, bytes);
+            if (bytes > ARMED_PRESSURE_BYTES) {
+              inflatedThisTask.add(target);
+            }
           },
           takeFinalizedIds: () => {
             callLog.push("take finalized");
@@ -154,13 +157,16 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
     setOtherExternalMb(mb: number) {
       otherExternalBytes = mb * MB;
     },
-    // Expo's construction wrapper roots each token until Java finalizes it.
-    holdTokensInWrappers(held: boolean) {
-      tokensHeldByWrapper = held;
+    // Something outside the net, such as a debugger handle, keeps dropped
+    // balloons alive through collections.
+    retainDroppedBalloons(held: boolean) {
+      retainDropped = held;
     },
-    // Java finalizes the wrappers and a collection sweeps the held tokens.
-    finalizeHeldTokens() {
-      finalizedIds.push(...wrapperHeldIds.splice(0));
+    // Whatever held them lets go, and a collection frees only those.
+    sweepRetainedBalloons() {
+      for (const target of retained) {
+        finalize(target);
+      }
     },
     runYoungGc() {
       stats.numGCs += 1;
@@ -360,7 +366,7 @@ describe("gc safety net collection", () => {
 
   test("a completed forced collection clears a balloon whose signal never came, so triggers resume", () => {
     const runtime = createFakeRuntime();
-    runtime.holdTokensInWrappers(true);
+    runtime.retainDroppedBalloons(true);
     const net = triggeredNet(runtime);
     runtime.setNativeHeapMb(200 + 450);
     runtime.gcFreesToMb(260);
@@ -378,7 +384,7 @@ describe("gc safety net collection", () => {
 
   test("a late signal from an earlier balloon does not confirm the current one", () => {
     const runtime = createFakeRuntime();
-    runtime.holdTokensInWrappers(true);
+    runtime.retainDroppedBalloons(true);
     const net = triggeredNet(runtime);
     runtime.setNativeHeapMb(200 + 450);
     runtime.gcFreesToMb(260);
@@ -386,7 +392,7 @@ describe("gc safety net collection", () => {
     runtime.runYoungGc();
     runtime.setNativeHeapMb(260 + 150);
     runSeconds(runtime, net, 1);
-    runtime.finalizeHeldTokens();
+    runtime.sweepRetainedBalloons();
     runSeconds(runtime, net, 5);
 
     expect(net.readDiagnostics().events.map((event) => event.kind)).toEqual([
@@ -706,14 +712,14 @@ describe("gc safety net degradation", () => {
     });
   });
 
-  test("without the native balloon token it runs fallback-only and says why", () => {
+  test("without the native balloon finalizer it runs fallback-only and says why", () => {
     const runtime = createFakeRuntime({ hasBalloons: false });
     const net = startedNet(runtime);
 
     expect(runtime.pressureCalls).toEqual([]);
     expect(net.readDiagnostics()).toMatchObject({
       mode: "fallback-only",
-      notes: ["PaseoGcPressure has no GcBalloonToken: balloon disabled"],
+      notes: ["PaseoGcPressure balloon finalizer unavailable: balloon disabled"],
     });
   });
 

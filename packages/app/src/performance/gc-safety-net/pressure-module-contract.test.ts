@@ -1,53 +1,55 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, test } from "vitest";
+import { BALLOON_FUNCTION_NAMES, BALLOON_GLOBAL_NAME } from "./balloon-finalizer";
 
-// The native module has no Kotlin test harness in this repo, and JS cannot
-// observe whether Expo's JavaScriptObject wrapper still roots the balloon. This
-// guards the one line that decides it: setPressure must release the wrapper
-// on every call, or the balloon stays strongly reachable until Java finalizes
-// it and no Hermes collection can free it.
-const MODULE_SOURCE_PATH = path.resolve(
-  __dirname,
-  "../../../modules/paseo-gc-pressure/android/src/main/java/sh/paseo/gcpressure/PaseoGcPressureModule.kt",
-);
+// The native side has no test harness in this repo and first compiles in the
+// APK build. These checks keep the names JS calls in step with the names the
+// Kotlin module declares, the JNI symbol it binds, and the JSI global the C++
+// installs.
+const MODULE_DIR = path.resolve(__dirname, "../../../modules/paseo-gc-pressure");
 
-function readSetPressureBody(source: string): string {
-  const start = source.indexOf('Function("setPressure")');
-  if (start === -1) {
-    throw new Error("setPressure is not declared in PaseoGcPressureModule.kt");
-  }
-  const open = source.indexOf("{", start);
-  let depth = 0;
-  for (let index = open; index < source.length; index += 1) {
-    const char = source[index];
-    if (char === "{") {
-      depth += 1;
-    } else if (char === "}") {
-      depth -= 1;
-      if (depth === 0) {
-        return source.slice(open, index + 1);
-      }
-    }
-  }
-  throw new Error("setPressure body is not closed");
+function readModuleFile(relativePath: string): string {
+  return readFileSync(path.join(MODULE_DIR, relativePath), "utf8");
 }
 
-describe("PaseoGcPressure.setPressure native contract", () => {
-  test("releases the JavaScriptObject wrapper in a finally block", () => {
-    const body = readSetPressureBody(readFileSync(MODULE_SOURCE_PATH, "utf8"));
-    const finallyBlock = body.slice(body.indexOf("finally"));
+const KOTLIN_SOURCE = readModuleFile(
+  "android/src/main/java/sh/paseo/gcpressure/PaseoGcPressureModule.kt",
+);
+const CPP_SOURCE = readModuleFile("cpp/balloon-finalizer.cpp");
+const CMAKE_SOURCE = readModuleFile("android/CMakeLists.txt");
 
-    expect(body).toMatch(/target: JavaScriptObject/);
-    expect(body.indexOf("finally")).toBeGreaterThan(body.indexOf("setExternalMemoryPressure"));
-    expect(finallyBlock).toMatch(/^finally \{\s*target\.deallocate\(\)\s*\}/);
+describe("PaseoGcPressure native contract", () => {
+  test("the Kotlin module declares the functions index.android.ts calls", () => {
+    expect(KOTLIN_SOURCE).toContain('Name("PaseoGcPressure")');
+    expect(KOTLIN_SOURCE).toContain('Function("nativeHeapBytes")');
+    expect(KOTLIN_SOURCE).toContain('Function("installBalloonFinalizer")');
   });
 
-  test("declares the balloon token names index.android.ts calls", () => {
-    const source = readFileSync(MODULE_SOURCE_PATH, "utf8");
+  test("the Kotlin external function binds the JNI symbol the C++ exports", () => {
+    expect(KOTLIN_SOURCE).toContain(
+      "private external fun nativeInstallBalloonFinalizer(runtimePointer: Long): Boolean",
+    );
+    expect(CPP_SOURCE).toMatch(
+      /extern "C" JNIEXPORT jboolean JNICALL\s+Java_sh_paseo_gcpressure_PaseoGcPressureModule_nativeInstallBalloonFinalizer\(\s*JNIEnv\*, jobject, jlong runtimePointer\)/,
+    );
+  });
 
-    expect(source).toContain("Class(GcBalloonToken::class)");
-    expect(source).toMatch(/Constructor \{ balloonId: Int ->/);
-    expect(source).toContain('Function("takeFinalizedBalloonTokenIds")');
+  test("Kotlin loads the library CMake builds", () => {
+    expect(CMAKE_SOURCE).toContain(
+      "add_library(paseo_gc_pressure SHARED ../cpp/balloon-finalizer.cpp)",
+    );
+    expect(KOTLIN_SOURCE).toContain('System.loadLibrary("paseo_gc_pressure")');
+  });
+
+  test("the C++ installs the global and functions the JS side reads", () => {
+    expect(CPP_SOURCE).toContain(`constexpr const char* kGlobalName = "${BALLOON_GLOBAL_NAME}";`);
+    for (const name of BALLOON_FUNCTION_NAMES) {
+      expect(CPP_SOURCE).toMatch(
+        new RegExp(
+          `api\\.setProperty\\(\\s*runtime,\\s*"${name}",\\s*makeFunction\\(\\s*runtime,\\s*"${name}",`,
+        ),
+      );
+    }
   });
 });
