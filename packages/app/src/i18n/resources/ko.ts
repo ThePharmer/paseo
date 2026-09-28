@@ -1662,6 +1662,24 @@ export const ko: TranslationResources = {
         show: "고급 표시",
         hide: "고급 숨기기",
       },
+      headers: {
+        title: "사용자 지정 헤더",
+        helper: "연결 핸드셰이크마다 전송됩니다. 예: Cloudflare Access 서비스 토큰.",
+        add: "헤더 추가",
+        name: "이름",
+        value: "값",
+        remove: "헤더 삭제",
+        errors: {
+          missingName: "각 헤더의 이름을 입력하세요",
+          invalidName: "{{name}}은(는) 올바른 헤더 이름이 아닙니다",
+          invalidValue: "{{name}}에 잘못된 줄바꿈이 있습니다",
+          duplicateName: "{{name}}이(가) 두 번 이상 입력되었습니다",
+          targetChanged:
+            "이 헤더는 다른 호스트, 포트 또는 SSL 설정용으로 입력되어 삭제되었습니다. 이 호스트용으로 다시 추가하세요.",
+          applyAdvanced:
+            "연결 URI가 위 필드와 다른 호스트를 가리킵니다. 고급 설정을 숨겨 적용한 다음 연결하세요.",
+        },
+      },
       passwordVisibility: {
         show: "비밀번호 표시",
         hide: "비밀번호 숨기기",
