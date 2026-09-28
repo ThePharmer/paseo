@@ -4013,6 +4013,129 @@ describe("workspace-layout-store actions", () => {
     );
   });
 
+  describe("pinned agents owned by another workspace", () => {
+    function contentTabIds(workspaceKey: string): string[] {
+      const tabs = contentTabs(workspaceLayoutStore.getState().getWorkspaceTabs(workspaceKey));
+      return tabs.map((tab) => tab.tabId);
+    }
+
+    function pinForeignAgentBesideOwnAgent(workspaceKey: string): string | null {
+      const store = workspaceLayoutStore.getState();
+      store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "own-agent" },
+        intent: "reveal",
+      });
+      return store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "foreign-agent" },
+        intent: "reveal",
+        pin: true,
+      });
+    }
+
+    it("prunes the tab and pin once agents hydrate and the agent is known elsewhere", () => {
+      const workspaceKey = createWorkspaceKey();
+      pinForeignAgentBesideOwnAgent(workspaceKey);
+
+      workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
+        agentsHydrated: true,
+        terminalsHydrated: true,
+        activeAgentIds: ["own-agent"],
+        autoOpenAgentIds: ["own-agent"],
+        foreignAgentIds: ["foreign-agent"],
+        standaloneTerminalIds: [],
+      });
+
+      const state = workspaceLayoutStore.getState();
+      expect(contentTabIds(workspaceKey)).toEqual(["agent_own-agent"]);
+      expect(state.pinnedAgentIdsByWorkspace[workspaceKey]).toBeUndefined();
+    });
+
+    it("moves focus off the pruned tab the way closing it does", () => {
+      const workspaceKey = createWorkspaceKey();
+      const foreignTabId = pinForeignAgentBesideOwnAgent(workspaceKey);
+      const layoutBefore = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+      expect(findPaneById(layoutBefore.root, layoutBefore.focusedPaneId)?.focusedTabId).toBe(
+        foreignTabId,
+      );
+
+      workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
+        agentsHydrated: true,
+        terminalsHydrated: true,
+        activeAgentIds: ["own-agent"],
+        autoOpenAgentIds: ["own-agent"],
+        foreignAgentIds: ["foreign-agent"],
+        standaloneTerminalIds: [],
+      });
+
+      const layout = workspaceLayoutStore.getState().layoutByWorkspace[workspaceKey];
+      expect(findPaneById(layout.root, layout.focusedPaneId)?.focusedTabId).toBe("agent_own-agent");
+    });
+
+    it("keeps the tab while agents are not hydrated", () => {
+      const workspaceKey = createWorkspaceKey();
+      pinForeignAgentBesideOwnAgent(workspaceKey);
+
+      workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
+        agentsHydrated: false,
+        terminalsHydrated: true,
+        activeAgentIds: [],
+        autoOpenAgentIds: [],
+        foreignAgentIds: ["foreign-agent"],
+        standaloneTerminalIds: [],
+      });
+
+      const state = workspaceLayoutStore.getState();
+      expect(contentTabIds(workspaceKey)).toEqual(["agent_own-agent", "agent_foreign-agent"]);
+      expect(Array.from(state.pinnedAgentIdsByWorkspace[workspaceKey] ?? [])).toEqual([
+        "foreign-agent",
+      ]);
+    });
+
+    it("keeps a pinned agent the session store does not know", () => {
+      const workspaceKey = createWorkspaceKey();
+      pinForeignAgentBesideOwnAgent(workspaceKey);
+
+      workspaceLayoutStore.getState().reconcileTabs(workspaceKey, {
+        agentsHydrated: true,
+        terminalsHydrated: true,
+        activeAgentIds: ["own-agent"],
+        autoOpenAgentIds: ["own-agent"],
+        foreignAgentIds: ["some-other-agent"],
+        standaloneTerminalIds: [],
+      });
+
+      const state = workspaceLayoutStore.getState();
+      expect(contentTabIds(workspaceKey)).toEqual(["agent_own-agent", "agent_foreign-agent"]);
+      expect(Array.from(state.pinnedAgentIdsByWorkspace[workspaceKey] ?? [])).toEqual([
+        "foreign-agent",
+      ]);
+    });
+
+    it("leaves a pinned agent that belongs to this workspace open", () => {
+      const workspaceKey = createWorkspaceKey();
+      const store = workspaceLayoutStore.getState();
+      store.openTab({
+        workspaceKey,
+        target: { kind: "agent", agentId: "own-agent" },
+        intent: "reveal",
+        pin: true,
+      });
+
+      store.reconcileTabs(workspaceKey, {
+        agentsHydrated: true,
+        terminalsHydrated: true,
+        activeAgentIds: ["own-agent"],
+        autoOpenAgentIds: ["own-agent"],
+        foreignAgentIds: ["foreign-agent"],
+        standaloneTerminalIds: [],
+      });
+
+      expect(contentTabIds(workspaceKey)).toEqual(["agent_own-agent"]);
+    });
+  });
+
   it("atomically reveals, focuses, and pins an archived agent against reconciliation", () => {
     const workspaceKey = createWorkspaceKey();
     const store = workspaceLayoutStore.getState();
