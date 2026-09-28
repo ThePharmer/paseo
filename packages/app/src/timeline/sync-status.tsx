@@ -7,22 +7,14 @@ import { ToastViewport, type ToastState } from "@/components/toast-host";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import {
   createDelayedSyncNotice,
+  monotonicNoticeTimers,
   type SyncNotice,
   type SyncNoticeSignal,
-  type SyncNoticeTimerPorts,
 } from "@/timeline/sync-status-timing";
 
 const spinnerColor = (theme: Theme) => ({ color: theme.colors.foreground });
 const ThemedLoadingSpinner = withUnistyles(LoadingSpinner);
 const keepUntilSynchronized = () => {};
-
-const noticeTimers: SyncNoticeTimerPorts = {
-  now: () => Date.now(),
-  schedule: (task, delayMs) => {
-    const timeout = setTimeout(task, delayMs);
-    return () => clearTimeout(timeout);
-  },
-};
 
 function toSyncNoticeSignal(sync: AgentScreenReadySyncState | null): SyncNoticeSignal | null {
   if (sync?.status === "reconnecting") {
@@ -37,7 +29,7 @@ function toSyncNoticeSignal(sync: AgentScreenReadySyncState | null): SyncNoticeS
 function useDelayedSyncNotice(key: string, signal: SyncNoticeSignal | null): SyncNotice | null {
   const [shown, setShown] = useState<SyncNotice | null>(null);
   const [delayedNotice] = useState(() =>
-    createDelayedSyncNotice({ ports: noticeTimers, onChange: setShown }),
+    createDelayedSyncNotice({ ports: monotonicNoticeTimers, onChange: setShown }),
   );
   const notice = signal?.notice ?? null;
   const immediate = signal?.immediate ?? false;

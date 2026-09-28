@@ -19,21 +19,34 @@ const SHOW_DELAY_MS: Record<SyncNotice, number> = {
 };
 
 export interface SyncNoticeTimerPorts {
+  /** A monotonic clock. Only the show delay reads it; the minimum visible time is a timer. */
   now(): number;
   schedule(task: () => void, delayMs: number): () => void;
 }
 
+// performance.now() is monotonic on Hermes and web. Date.now() follows wall-clock changes, so
+// setting the clock back would delay a pending notice or pin a shown one by the same amount.
+export const monotonicNoticeTimers: SyncNoticeTimerPorts = {
+  now: () => performance.now(),
+  schedule: (task, delayMs) => {
+    const timeout = setTimeout(task, delayMs);
+    return () => clearTimeout(timeout);
+  },
+};
+
 export interface DelayedSyncNotice {
   /** Reports the real status for `key`, the pane's chat. A new key drops the shown notice. */
   update(key: string, signal: SyncNoticeSignal | null): void;
-  /** Cancels the pending timer. A later `update` resumes from the real status. */
+  /** Cancels the pending timers. A later `update` resumes from the real status. */
   dispose(): void;
 }
 
 /**
  * Turns the real sync status into the notice the chat shows. The show delay counts from
  * when the chat stopped being current, not from the latest label, so a reconnect followed
- * by a catch-up cannot hide behind two fresh delays.
+ * by a catch-up cannot hide behind two fresh delays. An immediate signal and the minimum
+ * visible time never read the clock, and a scheduled show is never recomputed, so a clock
+ * change cannot hold back a known outage or keep a notice up after the chat recovers.
  */
 export function createDelayedSyncNotice(input: {
   ports: SyncNoticeTimerPorts;
@@ -43,69 +56,90 @@ export function createDelayedSyncNotice(input: {
   let key: string | null = null;
   let latest: SyncNoticeSignal | null = null;
   let shown: SyncNotice | null = null;
-  let shownAt = 0;
   let staleSince: number | null = null;
-  let cancelTimer: (() => void) | null = null;
+  let pendingShow: { notice: SyncNotice; cancel: () => void } | null = null;
+  let cancelMinVisible: (() => void) | null = null;
 
-  const clearTimer = () => {
-    cancelTimer?.();
-    cancelTimer = null;
+  const cancelPendingShow = () => {
+    pendingShow?.cancel();
+    pendingShow = null;
   };
 
-  const wait = (delayMs: number) => {
-    cancelTimer = ports.schedule(() => {
-      cancelTimer = null;
-      evaluate();
-    }, delayMs);
+  const endMinVisible = () => {
+    cancelMinVisible?.();
+    cancelMinVisible = null;
   };
 
   const show = (notice: SyncNotice) => {
+    cancelPendingShow();
+    endMinVisible();
     shown = notice;
-    shownAt = ports.now();
+    cancelMinVisible = ports.schedule(() => {
+      cancelMinVisible = null;
+      evaluate();
+    }, NOTICE_MIN_VISIBLE_MS);
     onChange(notice);
   };
 
   const hide = () => {
+    endMinVisible();
     shown = null;
     staleSince = null;
     onChange(null);
   };
 
   function evaluate(): void {
-    clearTimer();
-    const now = ports.now();
     if (shown !== null) {
-      if (latest !== null) {
-        if (latest.notice !== shown) show(latest.notice);
-        return;
+      if (latest === null) {
+        if (cancelMinVisible === null) hide();
+      } else if (latest.notice !== shown) {
+        show(latest.notice);
       }
-      const remainingMs = shownAt + NOTICE_MIN_VISIBLE_MS - now;
-      if (remainingMs > 0) wait(remainingMs);
-      else hide();
       return;
     }
     if (latest === null) {
+      cancelPendingShow();
       staleSince = null;
       return;
     }
+    if (latest.immediate) {
+      show(latest.notice);
+      return;
+    }
+    if (pendingShow?.notice === latest.notice) return;
+    cancelPendingShow();
+    const now = ports.now();
     staleSince ??= now;
-    const delayMs = latest.immediate ? 0 : SHOW_DELAY_MS[latest.notice];
-    const remainingMs = staleSince + delayMs - now;
-    if (remainingMs > 0) wait(remainingMs);
-    else show(latest.notice);
+    const delayMs = SHOW_DELAY_MS[latest.notice];
+    const remainingMs = Math.min(delayMs, staleSince + delayMs - now);
+    if (remainingMs <= 0) {
+      show(latest.notice);
+      return;
+    }
+    const notice = latest.notice;
+    pendingShow = {
+      notice,
+      cancel: ports.schedule(() => {
+        pendingShow = null;
+        show(notice);
+      }, remainingMs),
+    };
   }
 
   return {
     update(nextKey, signal) {
       if (nextKey !== key) {
         key = nextKey;
-        clearTimer();
+        cancelPendingShow();
         staleSince = null;
         if (shown !== null) hide();
       }
       latest = signal;
       evaluate();
     },
-    dispose: clearTimer,
+    dispose() {
+      cancelPendingShow();
+      endMinVisible();
+    },
   };
 }
