@@ -7,6 +7,8 @@ export interface MarkdownFence {
   marker: "`" | "~";
   length: number;
   indent: number;
+  /** Blockquote markers before the opener. Its closer sits at the same depth. */
+  quoteDepth: number;
 }
 
 export interface MarkdownParagraphBoundary {
@@ -22,16 +24,96 @@ export interface MarkdownParagraphBoundary {
   openFenceAtLastLineEnd: MarkdownFence | null;
 }
 
-// A fence may follow container markers: blockquote `>` markers and list-item
-// markers (`-`, `*`, `+`, `1.`, `1)`), as in "- ```ts" or "> ~~~". The prefix
-// group captures them together with any indentation, and the fence's indent is
-// the column where its run starts, so a closing fence indented to the list
-// item's content column matches its opener. Any indentation is accepted: this
-// scanner does not track container nesting, and reading a four-space indented
-// line as a fence only holds text longer, which the size cap bounds, whereas
-// missing a real fence would release a code block that is still growing. A
-// closing fence may be indented at most three columns past its opener.
-const FENCE_PATTERN = /^((?:[ ]*(?:>[ ]?|(?:[-*+]|\d{1,9}[.)])[ ]+))*[ ]*)(`{3,}|~{3,})(.*)$/;
+// A fence may open after container markers: blockquote `>` markers and
+// list-item markers (`-`, `*`, `+`, `1.`, `1)`), as in "- ```ts" or "> ~~~".
+// Its indent is the column where the run starts, so a closer indented to the
+// list item's content column matches it. A closer only strips the blockquote
+// depth its opener had, never list markers: inside a code block, "- ```" is
+// code. The scanner does not track container nesting, so it can read a
+// four-space indented line as a fence; that only holds text longer, which the
+// size cap bounds, whereas missing a real fence would release a code block
+// that is still growing. A closer may be indented at most three columns past
+// its opener. Parsing is a single cursor pass: a backtracking regex over
+// repeated prefixes is exponential on lines like "> > > ... x".
+interface FenceLine {
+  marker: "`" | "~";
+  length: number;
+  indent: number;
+  quoteDepth: number;
+  info: string;
+}
+
+function skipSpaces(line: string, from: number): number {
+  let cursor = from;
+  while (line[cursor] === " ") {
+    cursor += 1;
+  }
+  return cursor;
+}
+
+function isDigit(code: number): boolean {
+  return code >= 48 && code <= 57;
+}
+
+function skipListMarker(line: string, from: number): number {
+  const char = line[from];
+  let cursor = from;
+  if (char === "-" || char === "*" || char === "+") {
+    cursor += 1;
+  } else {
+    while (cursor - from < 9 && isDigit(line.charCodeAt(cursor))) {
+      cursor += 1;
+    }
+    if (cursor === from || (line[cursor] !== "." && line[cursor] !== ")")) {
+      return from;
+    }
+    cursor += 1;
+  }
+  return line[cursor] === " " ? skipSpaces(line, cursor) : from;
+}
+
+function parseFenceLine(line: string, container: { quoteDepth: number } | null): FenceLine | null {
+  let cursor = skipSpaces(line, 0);
+  let quoteDepth = 0;
+  if (container === null) {
+    // Opener: any mix of blockquote and list-item markers.
+    for (;;) {
+      if (line[cursor] === ">") {
+        quoteDepth += 1;
+        cursor = skipSpaces(line, cursor + 1);
+        continue;
+      }
+      const afterMarker = skipListMarker(line, cursor);
+      if (afterMarker === cursor) {
+        break;
+      }
+      cursor = afterMarker;
+    }
+  } else {
+    // Closer: exactly the opener's blockquote depth, then spaces.
+    while (quoteDepth < container.quoteDepth && line[cursor] === ">") {
+      quoteDepth += 1;
+      cursor = skipSpaces(line, cursor + 1);
+    }
+    if (quoteDepth !== container.quoteDepth) {
+      return null;
+    }
+  }
+  const marker = line[cursor];
+  if (marker !== "`" && marker !== "~") {
+    return null;
+  }
+  const indent = cursor;
+  while (line[cursor] === marker) {
+    cursor += 1;
+  }
+  const length = cursor - indent;
+  if (length < 3) {
+    return null;
+  }
+  return { marker, length, indent, quoteDepth, info: line.slice(cursor) };
+}
+
 // CommonMark blank lines hold only spaces and tabs. Other whitespace, such as a
 // no-break space, is paragraph content.
 const BLANK_LINE_PATTERN = /^[ \t]*$/;
@@ -57,20 +139,21 @@ export function findMarkdownParagraphBoundary(
     }
     const line = text.slice(lineStart, newline).replace(/[ \t\r]+$/, "");
     const lineEnd = newline + 1;
-    const fenceMatch = FENCE_PATTERN.exec(line);
+    const fenceLine = parseFenceLine(line, fence);
 
-    if (fenceMatch) {
-      const indent = fenceMatch[1]?.length ?? 0;
-      const run = fenceMatch[2] ?? "";
-      const info = fenceMatch[3] ?? "";
-      const marker = run[0] === "~" ? "~" : "`";
+    if (fenceLine) {
       if (fence === null) {
-        fence = { marker, length: run.length, indent };
+        fence = {
+          marker: fenceLine.marker,
+          length: fenceLine.length,
+          indent: fenceLine.indent,
+          quoteDepth: fenceLine.quoteDepth,
+        };
       } else if (
-        marker === fence.marker &&
-        run.length >= fence.length &&
-        indent <= fence.indent + 3 &&
-        info === ""
+        fenceLine.marker === fence.marker &&
+        fenceLine.length >= fence.length &&
+        fenceLine.indent <= fence.indent + 3 &&
+        fenceLine.info === ""
       ) {
         // CommonMark: a closing fence carries no info string.
         fence = null;

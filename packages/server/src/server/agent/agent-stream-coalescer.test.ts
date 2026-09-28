@@ -852,6 +852,26 @@ describe("AgentStreamCoalescer paragraph delivery", () => {
     );
   });
 
+  test("does not read a list-marker fence line inside a code block as its closing fence", async () => {
+    const { coalescer, flushes } = createParagraphHarness();
+
+    coalescer.handle("agent-1", assistant("```markdown\n- ```\n\nstill code\n"));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(flushes).toEqual([]);
+  });
+
+  test("scans a line of many blockquote markers in linear time", async () => {
+    const { coalescer } = createParagraphHarness();
+    const pathological = `${"> ".repeat(20_000)}x\n`;
+
+    const started = performance.now();
+    coalescer.handle("agent-1", assistant(pathological));
+    coalescer.handle("agent-1", assistant(pathological));
+
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   test("does not treat a fence line with an info string as a closing fence", async () => {
     const { coalescer, flushes } = createParagraphHarness();
 
