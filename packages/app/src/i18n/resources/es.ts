@@ -1698,6 +1698,25 @@ export const es: TranslationResources = {
         show: "Mostrar avanzado",
         hide: "Ocultar avanzado",
       },
+      headers: {
+        title: "Encabezados personalizados",
+        helper:
+          "Se envían con cada negociación de conexión, por ejemplo un token de servicio de Cloudflare Access.",
+        add: "Añadir encabezado",
+        name: "Nombre",
+        value: "Valor",
+        remove: "Eliminar encabezado",
+        errors: {
+          missingName: "Introduce un nombre para cada encabezado",
+          invalidName: "{{name}} no es un nombre de encabezado válido",
+          invalidValue: "{{name}} contiene un salto de línea no válido",
+          duplicateName: "{{name}} se ha introducido más de una vez",
+          targetChanged:
+            "Estos encabezados se introdujeron para otro host, puerto o ajuste SSL, así que se borraron. Vuelve a añadirlos para este host.",
+          applyAdvanced:
+            "La URI de conexión apunta a un host distinto del de los campos de arriba. Oculta las opciones avanzadas para aplicarla y luego conéctate.",
+        },
+      },
       passwordVisibility: {
         show: "Mostrar contraseña",
         hide: "Ocultar contraseña",

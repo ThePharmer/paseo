@@ -1702,6 +1702,25 @@ export const fr: TranslationResources = {
         show: "Afficher avancé",
         hide: "Masquer avancé",
       },
+      headers: {
+        title: "En-têtes personnalisés",
+        helper:
+          "Envoyés avec chaque négociation de connexion, par exemple un jeton de service Cloudflare Access.",
+        add: "Ajouter un en-tête",
+        name: "Nom",
+        value: "Valeur",
+        remove: "Supprimer l'en-tête",
+        errors: {
+          missingName: "Saisissez un nom pour chaque en-tête",
+          invalidName: "{{name}} n'est pas un nom d'en-tête valide",
+          invalidValue: "{{name}} contient un saut de ligne non valide",
+          duplicateName: "{{name}} est saisi plusieurs fois",
+          targetChanged:
+            "Ces en-têtes ont été saisis pour un autre hôte, port ou réglage SSL, ils ont donc été effacés. Ajoutez-les de nouveau pour cet hôte.",
+          applyAdvanced:
+            "L'URI de connexion pointe vers un autre hôte que les champs ci-dessus. Masquez les options avancées pour l'appliquer, puis connectez-vous.",
+        },
+      },
       passwordVisibility: {
         show: "Afficher le mot de passe",
         hide: "Masquer le mot de passe",

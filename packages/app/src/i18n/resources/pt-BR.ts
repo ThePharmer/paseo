@@ -1683,6 +1683,25 @@ export const ptBR: TranslationResources = {
         show: "Mostrar avançado",
         hide: "Ocultar avançado",
       },
+      headers: {
+        title: "Cabeçalhos personalizados",
+        helper:
+          "Enviados em cada handshake de conexão, por exemplo um token de serviço do Cloudflare Access.",
+        add: "Adicionar cabeçalho",
+        name: "Nome",
+        value: "Valor",
+        remove: "Remover cabeçalho",
+        errors: {
+          missingName: "Digite um nome para cada cabeçalho",
+          invalidName: "{{name}} não é um nome de cabeçalho válido",
+          invalidValue: "{{name}} contém uma quebra de linha inválida",
+          duplicateName: "{{name}} foi inserido mais de uma vez",
+          targetChanged:
+            "Esses cabeçalhos foram inseridos para outro host, porta ou configuração SSL, então foram apagados. Adicione-os novamente para este host.",
+          applyAdvanced:
+            "A URI de conexão aponta para um host diferente dos campos acima. Oculte as opções avançadas para aplicá-la e depois conecte.",
+        },
+      },
       passwordVisibility: {
         show: "Mostrar senha",
         hide: "Ocultar senha",

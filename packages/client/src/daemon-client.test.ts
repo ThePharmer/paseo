@@ -1,4 +1,4 @@
-import { afterEach, expect, expectTypeOf, test, vi } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, test, vi } from "vitest";
 import { z } from "zod";
 import {
   DaemonClient,
@@ -988,6 +988,288 @@ test("uses the saved host password when the desktop bridge has no credential for
     type: "hello",
     auth: { kind: "password", password: "saved-password" },
   });
+});
+
+test("passes custom handshake headers and keeps password authorization authoritative", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+  const transportFactory = vi.fn(() => mock.transport);
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    password: "shared-secret",
+    headers: {
+      "CF-Access-Client-Id": "token-id.access",
+      "CF-Access-Client-Secret": "token-secret",
+      Authorization: "Bearer ignored",
+    },
+    logger,
+    reconnect: { enabled: false },
+    transportFactory,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen({ preserveSent: true });
+  await connectPromise;
+
+  expect(transportFactory).toHaveBeenCalledWith({
+    url: "ws://test",
+    headers: {
+      "CF-Access-Client-Id": "token-id.access",
+      "CF-Access-Client-Secret": "token-secret",
+      Authorization: "Bearer shared-secret",
+    },
+    protocols: ["paseo.bearer.shared-secret"],
+  });
+  expect(JSON.parse(assertStr(mock.sent[0]))).toMatchObject({
+    type: "hello",
+    auth: { kind: "password", password: "shared-secret" },
+  });
+});
+
+test("password authorization replaces a custom Authorization header under any casing", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+  const transportFactory = vi.fn(() => mock.transport);
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    password: "shared-secret",
+    headers: {
+      authorization: "Bearer ignored-lowercase",
+      AUTHORIZATION: "Bearer ignored-uppercase",
+      "X-Tenant": "acme",
+    },
+    logger,
+    reconnect: { enabled: false },
+    transportFactory,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  expect(transportFactory).toHaveBeenCalledWith({
+    url: "ws://test",
+    headers: {
+      "X-Tenant": "acme",
+      Authorization: "Bearer shared-secret",
+    },
+    protocols: ["paseo.bearer.shared-secret"],
+  });
+});
+
+test("authHeader replaces a custom authorization header when no password is set", async () => {
+  const logger = createMockLogger();
+  const mock = createMockTransport();
+  const transportFactory = vi.fn(() => mock.transport);
+
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    authHeader: "Bearer from-auth-header",
+    headers: { authorization: "Bearer ignored" },
+    logger,
+    reconnect: { enabled: false },
+    transportFactory,
+  });
+  clients.push(client);
+
+  const connectPromise = client.connect();
+  mock.triggerOpen();
+  await connectPromise;
+
+  expect(transportFactory).toHaveBeenCalledWith({
+    url: "ws://test",
+    headers: { Authorization: "Bearer from-auth-header" },
+  });
+});
+
+test("keeps custom headers but drops a custom Bearer Authorization when the password only travels in hello", async () => {
+  const mock = createMockTransport();
+  const transportFactory = vi.fn(() => mock.transport);
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    password: "two words",
+    headers: {
+      "CF-Access-Client-Secret": "token-secret",
+      Authorization: "Bearer stray-custom-value",
+    },
+    logger: createMockLogger(),
+    reconnect: { enabled: false },
+    transportFactory,
+  });
+  clients.push(client);
+  const connected = client.connect();
+  mock.triggerOpen({ preserveSent: true });
+  await connected;
+  expect(transportFactory).toHaveBeenCalledWith({
+    url: "ws://test",
+    headers: { "CF-Access-Client-Secret": "token-secret" },
+  });
+  expect(JSON.parse(assertStr(mock.sent[0]))).toMatchObject({
+    type: "hello",
+    auth: { kind: "password", password: "two words" },
+  });
+});
+
+test("keeps custom headers but drops a custom Bearer Authorization when a local credential authenticates", async () => {
+  const mock = createMockTransport();
+  const transportFactory = vi.fn(() => mock.transport);
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "desktop-managed",
+    localCredential: async () => "current-local-token",
+    headers: { "X-Tenant": "acme", authorization: "Bearer stray-custom-value" },
+    reconnect: { enabled: false },
+    transportFactory,
+  });
+  clients.push(client);
+  const connected = client.connect();
+  await vi.waitFor(() => expect(transportFactory).toHaveBeenCalled());
+  mock.triggerOpen({ preserveSent: true });
+  await connected;
+  expect(transportFactory).toHaveBeenCalledWith({
+    url: "ws://test",
+    headers: { "X-Tenant": "acme" },
+  });
+  expect(JSON.parse(assertStr(mock.sent[0]))).toMatchObject({
+    type: "hello",
+    auth: { kind: "localCredential", token: "current-local-token" },
+  });
+});
+
+describe("custom Authorization header next to daemon credentials", () => {
+  async function handshakeFor(config: {
+    password?: string;
+    authHeader?: string;
+    localCredential?: () => Promise<string | undefined>;
+    headers: Record<string, string>;
+  }): Promise<{ headers?: Record<string, string>; protocols?: string[] }> {
+    const mock = createMockTransport();
+    const requests: Array<{
+      url: string;
+      headers?: Record<string, string>;
+      protocols?: string[];
+    }> = [];
+    const client = new DaemonClient({
+      url: "ws://test",
+      clientId: "clsk_custom_authorization_test",
+      ...config,
+      reconnect: { enabled: false },
+      transportFactory: (request) => {
+        requests.push(request);
+        return mock.transport;
+      },
+    });
+    clients.push(client);
+    const connected = client.connect();
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+    mock.triggerOpen();
+    await connected;
+    const { headers, protocols } = requests[0] ?? {};
+    return { headers, ...(protocols ? { protocols } : {}) };
+  }
+
+  test("keeps a non-Bearer custom Authorization when the password only travels in hello", async () => {
+    await expect(
+      handshakeFor({ password: "two words", headers: { Authorization: "Basic cHJveHk6cGFzcw==" } }),
+    ).resolves.toEqual({ headers: { Authorization: "Basic cHJveHk6cGFzcw==" } });
+  });
+
+  test("drops a custom Bearer Authorization under any scheme casing when the password only travels in hello", async () => {
+    await expect(
+      handshakeFor({
+        password: "two words",
+        headers: { authorization: "bearer stray-custom-value", "X-Tenant": "acme" },
+      }),
+    ).resolves.toEqual({ headers: { "X-Tenant": "acme" } });
+  });
+
+  test("keeps a non-Bearer custom Authorization over the derived one when the subprotocol carries the password", async () => {
+    await expect(
+      handshakeFor({
+        password: "shared-secret",
+        headers: { Authorization: "Basic cHJveHk6cGFzcw==" },
+      }),
+    ).resolves.toEqual({
+      headers: { Authorization: "Basic cHJveHk6cGFzcw==" },
+      protocols: ["paseo.bearer.shared-secret"],
+    });
+  });
+
+  test("replaces a custom Bearer Authorization with the derived one when the password is bearer-compatible", async () => {
+    await expect(
+      handshakeFor({ password: "shared-secret", headers: { Authorization: "Bearer stray" } }),
+    ).resolves.toEqual({
+      headers: { Authorization: "Bearer shared-secret" },
+      protocols: ["paseo.bearer.shared-secret"],
+    });
+  });
+
+  test("keeps a non-Bearer custom Authorization when a local credential authenticates", async () => {
+    await expect(
+      handshakeFor({
+        localCredential: async () => "current-local-token",
+        headers: { Authorization: "Basic cHJveHk6cGFzcw==" },
+      }),
+    ).resolves.toEqual({ headers: { Authorization: "Basic cHJveHk6cGFzcw==" } });
+  });
+
+  test("lets authHeader replace a non-Bearer custom Authorization because it is the only daemon credential", async () => {
+    await expect(
+      handshakeFor({
+        authHeader: "Bearer from-auth-header",
+        headers: { Authorization: "Basic cHJveHk6cGFzcw==" },
+      }),
+    ).resolves.toEqual({ headers: { Authorization: "Bearer from-auth-header" } });
+  });
+});
+
+test("passes a custom Authorization header through when the client carries no daemon credential", async () => {
+  const mock = createMockTransport();
+  const transportFactory = vi.fn(() => mock.transport);
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "clsk_unit_test",
+    headers: { Authorization: "Bearer proxy-token" },
+    reconnect: { enabled: false },
+    transportFactory,
+  });
+  clients.push(client);
+  const connected = client.connect();
+  mock.triggerOpen();
+  await connected;
+  expect(transportFactory).toHaveBeenCalledWith({
+    url: "ws://test",
+    headers: { Authorization: "Bearer proxy-token" },
+  });
+});
+
+test("keeps custom headers out of the relay socket request", async () => {
+  const mock = createMockTransport();
+  const requests: Array<{ url: string; headers?: Record<string, string>; protocols?: string[] }> =
+    [];
+  const client = new DaemonClient({
+    url: "ws://relay.test/ws?role=client&serverId=srv_test&v=2",
+    clientId: "clsk_relay_headers_test",
+    headers: { "CF-Access-Client-Secret": "token-secret" },
+    e2ee: { enabled: true, daemonPublicKeyB64: "daemon-public-key" },
+    reconnect: { enabled: false },
+    transportFactory: (request) => {
+      requests.push(request);
+      return mock.transport;
+    },
+  });
+  clients.push(client);
+  void client.connect();
+  await vi.waitFor(() => expect(requests).toHaveLength(1));
+  expect(requests[0]).toEqual({ url: "ws://relay.test/ws?role=client&serverId=srv_test&v=2" });
 });
 
 test("advertises client capabilities in hello", async () => {
