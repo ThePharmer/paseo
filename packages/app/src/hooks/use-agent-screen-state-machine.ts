@@ -45,6 +45,7 @@ export interface AgentScreenMachineInput {
   isArchived: boolean;
   missingAgentState: AgentScreenMissingState;
   isConnected: boolean;
+  hasFailedConnectAttempt: boolean;
   isArchivingCurrentAgent: boolean;
   isHistorySyncing: boolean;
   needsAuthoritativeSync: boolean;
@@ -79,7 +80,7 @@ export interface AgentScreenMachineMemory {
 
 export type AgentScreenReadySyncState =
   | { status: "idle" }
-  | { status: "reconnecting" }
+  | { status: "reconnecting"; hasFailedAttempt: boolean }
   | {
       status: "catching_up";
       ui: "overlay" | "status" | "silent";
@@ -179,7 +180,7 @@ function resolveAgentScreenSync(args: {
     return { status: "idle" };
   }
   if (!input.isConnected) {
-    return { status: "reconnecting" };
+    return { status: "reconnecting", hasFailedAttempt: input.hasFailedConnectAttempt };
   }
   if (input.missingAgentState.kind === "error") {
     return { status: "sync_error", isRetrying: input.visibilityCatchUpStatus === "retrying" };

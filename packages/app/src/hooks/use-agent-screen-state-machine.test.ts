@@ -62,6 +62,7 @@ function createBaseInput(): AgentScreenMachineInput {
     continuity: { kind: "none" },
     missingAgentState: { kind: "idle" },
     isConnected: true,
+    hasFailedConnectAttempt: false,
     isArchivingCurrentAgent: false,
     isHistorySyncing: false,
     needsAuthoritativeSync: false,
@@ -155,7 +156,24 @@ describe("deriveAgentScreenViewState", () => {
     const result = deriveAgentScreenViewState({ input, memory });
     const ready = expectReadyState(result.state);
 
-    expect(ready.sync.status).toBe("reconnecting");
+    expect(ready.sync).toEqual({ status: "reconnecting", hasFailedAttempt: false });
+  });
+
+  it("marks reconnecting once a connect attempt has failed", () => {
+    const memory = createBaseMemory({
+      hasRenderedReady: true,
+      lastReadyAgent: createAgent("agent-1"),
+    });
+    const input: AgentScreenMachineInput = {
+      ...createBaseInput(),
+      isConnected: false,
+      hasFailedConnectAttempt: true,
+    };
+
+    const result = deriveAgentScreenViewState({ input, memory });
+    const ready = expectReadyState(result.state);
+
+    expect(ready.sync).toEqual({ status: "reconnecting", hasFailedAttempt: true });
   });
 
   it("shows overlay catching-up state for first open while loading history", () => {
