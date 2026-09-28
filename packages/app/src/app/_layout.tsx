@@ -113,6 +113,7 @@ import {
 import { getDaemonStartService } from "@/runtime/daemon-start-service";
 import { usePanelStore } from "@/stores/panel-store";
 import { flushDraftPersistStorage } from "@/stores/draft-store";
+import { markInteraction, startGcSafetyNet } from "@/performance/gc-safety-net";
 import { getNextThemePreference } from "@/styles/theme";
 import { useSessionStore } from "@/stores/session-store";
 import { installWebScrollbarStyles } from "@/styles/install-web-scrollbar-styles";
@@ -985,7 +986,11 @@ function RootProviders({ children }: { children: ReactNode }) {
 function RootAppTree() {
   return (
     <GestureHandlerRootView style={flexStyle}>
-      <View style={layoutStyles.surfaceFill}>
+      <View
+        style={layoutStyles.surfaceFill}
+        onTouchStart={markInteraction}
+        onTouchEnd={markInteraction}
+      >
         <RootProviders>
           <RuntimeProviders>
             <AppShell />
@@ -998,6 +1003,7 @@ function RootAppTree() {
 
 export default function RootLayout() {
   useEffect(() => installWebScrollbarStyles(), []);
+  useEffect(() => startGcSafetyNet(), []);
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
       if (nextState !== "active") {
