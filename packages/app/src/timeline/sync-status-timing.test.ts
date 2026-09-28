@@ -1,6 +1,7 @@
-import { expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
   createDelayedSyncNotice,
+  monotonicNoticeTimers,
   NOTICE_MIN_VISIBLE_MS,
   RECONNECTING_SHOW_DELAY_MS,
   UPDATING_SHOW_DELAY_MS,
@@ -12,13 +13,26 @@ const updating: SyncNoticeSignal = { notice: "updating", immediate: false };
 const reconnecting: SyncNoticeSignal = { notice: "reconnecting", immediate: false };
 const hostUnreachable: SyncNoticeSignal = { notice: "reconnecting", immediate: true };
 
+const ONE_HOUR_MS = 60 * 60 * 1_000;
+const clockJumps = [
+  { direction: "back", jumpMs: -ONE_HOUR_MS },
+  { direction: "forward", jumpMs: ONE_HOUR_MS },
+];
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+// Timers run on elapsed time; `jumpClock` moves only what `now()` reports, the way a
+// wall-clock change moves Date.now() without moving pending timeouts.
 class NoticeClock {
   private nowMs = 0;
+  private clockOffsetMs = 0;
   private timers: Array<{ dueAt: number; task: () => void }> = [];
   readonly shown: Array<SyncNotice | null> = [];
   readonly notice = createDelayedSyncNotice({
     ports: {
-      now: () => this.nowMs,
+      now: () => this.nowMs + this.clockOffsetMs,
       schedule: (task, delayMs) => {
         const timer = { dueAt: this.nowMs + delayMs, task };
         this.timers.push(timer);
@@ -42,6 +56,10 @@ class NoticeClock {
       next.task();
     }
     this.nowMs = target;
+  }
+
+  jumpClock(offsetMs: number): void {
+    this.clockOffsetMs += offsetMs;
   }
 
   current(): SyncNotice | null {
@@ -161,3 +179,76 @@ test("switching panes cancels a pending show for the previous pane", () => {
 
   expect(clock.shown).toEqual([]);
 });
+
+test.each(clockJumps)(
+  "a known unreachable host shows at once after the clock moves $direction",
+  ({ jumpMs }) => {
+    const clock = new NoticeClock();
+    clock.notice.update("agent-a", updating);
+    clock.advance(200);
+    clock.jumpClock(jumpMs);
+    clock.notice.update("agent-a", hostUnreachable);
+
+    expect(clock.shown).toEqual(["reconnecting"]);
+  },
+);
+
+test.each(clockJumps)(
+  "a pending notice shows on time after the clock moves $direction",
+  ({ jumpMs }) => {
+    const clock = new NoticeClock();
+    clock.notice.update("agent-a", updating);
+    clock.advance(100);
+    clock.jumpClock(jumpMs);
+    clock.notice.update("agent-a", updating);
+    clock.advance(UPDATING_SHOW_DELAY_MS - 101);
+    expect(clock.shown).toEqual([]);
+    clock.advance(1);
+
+    expect(clock.shown).toEqual(["updating"]);
+  },
+);
+
+test.each(clockJumps)(
+  "a recovered chat hides after the minimum time when the clock moves $direction",
+  ({ jumpMs }) => {
+    const clock = new NoticeClock();
+    clock.notice.update("agent-a", updating);
+    clock.advance(UPDATING_SHOW_DELAY_MS);
+    clock.jumpClock(jumpMs);
+    clock.notice.update("agent-a", null);
+    clock.advance(NOTICE_MIN_VISIBLE_MS - 1);
+    expect(clock.current()).toBe("updating");
+    clock.advance(1);
+
+    expect(clock.shown).toEqual(["updating", null]);
+  },
+);
+
+test.each(clockJumps)(
+  "the app's notice timers ignore a system clock moved $direction",
+  ({ jumpMs }) => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "performance"] });
+    const shown: Array<SyncNotice | null> = [];
+    const notice = createDelayedSyncNotice({
+      ports: monotonicNoticeTimers,
+      onChange: (next) => shown.push(next),
+    });
+    notice.update("agent-a", updating);
+    vi.advanceTimersByTime(100);
+    vi.setSystemTime(Date.now() + jumpMs);
+    notice.update("agent-a", reconnecting);
+    vi.advanceTimersByTime(RECONNECTING_SHOW_DELAY_MS - 101);
+    expect(shown).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(shown).toEqual(["reconnecting"]);
+
+    vi.setSystemTime(Date.now() + jumpMs);
+    notice.update("agent-a", null);
+    vi.advanceTimersByTime(NOTICE_MIN_VISIBLE_MS - 1);
+    expect(shown).toEqual(["reconnecting"]);
+    vi.advanceTimersByTime(1);
+
+    expect(shown).toEqual(["reconnecting", null]);
+  },
+);
