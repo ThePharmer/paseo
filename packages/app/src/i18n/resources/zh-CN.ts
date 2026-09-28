@@ -1711,6 +1711,23 @@ export const zhCN: TranslationResources = {
         show: "显示高级选项",
         hide: "隐藏高级选项",
       },
+      headers: {
+        title: "自定义请求头",
+        helper: "随每次连接握手一起发送，例如 Cloudflare Access 服务令牌。",
+        add: "添加请求头",
+        name: "名称",
+        value: "值",
+        remove: "删除请求头",
+        errors: {
+          missingName: "请为每个请求头输入名称",
+          invalidName: "{{name}} 不是有效的请求头名称",
+          invalidValue: "{{name}} 包含无效换行符",
+          duplicateName: "{{name}} 输入了多次",
+          targetChanged:
+            "这些请求头是为其他主机、端口或 SSL 设置输入的，因此已被清除。请为此主机重新添加。",
+          applyAdvanced: "连接 URI 指向的主机与上方字段不同。请隐藏高级选项以应用它，然后再连接。",
+        },
+      },
       passwordVisibility: {
         show: "显示密码",
         hide: "隐藏密码",

@@ -1746,6 +1746,24 @@ export const ja: TranslationResources = {
         show: "詳細設定を表示",
         hide: "詳細設定を非表示",
       },
+      headers: {
+        title: "カスタムヘッダー",
+        helper: "接続ハンドシェイクごとに送信されます。例: Cloudflare Access のサービストークン。",
+        add: "ヘッダーを追加",
+        name: "名前",
+        value: "値",
+        remove: "ヘッダーを削除",
+        errors: {
+          missingName: "各ヘッダーの名前を入力してください",
+          invalidName: "{{name}} は有効なヘッダー名ではありません",
+          invalidValue: "{{name}} に無効な改行が含まれています",
+          duplicateName: "{{name}} が複数回入力されています",
+          targetChanged:
+            "これらのヘッダーは別のホスト、ポート、または SSL 設定用に入力されたため、消去されました。このホスト用にもう一度追加してください。",
+          applyAdvanced:
+            "接続 URI が上のフィールドとは別のホストを指しています。詳細設定を非表示にして適用してから接続してください。",
+        },
+      },
       passwordVisibility: {
         show: "パスワードを表示",
         hide: "パスワードを非表示",
