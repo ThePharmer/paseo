@@ -51,6 +51,20 @@ function skipSpaces(line: string, from: number): number {
   return cursor;
 }
 
+// Walks back over trailing spaces, tabs and carriage returns. An unanchored
+// /[ \t\r]+$/ is quadratic on a long whitespace run followed by a character.
+function trimLineEnd(text: string, lineStart: number, lineEnd: number): number {
+  let end = lineEnd;
+  while (end > lineStart) {
+    const char = text[end - 1];
+    if (char !== " " && char !== "\t" && char !== "\r") {
+      break;
+    }
+    end -= 1;
+  }
+  return end;
+}
+
 function isDigit(code: number): boolean {
   return code >= 48 && code <= 57;
 }
@@ -137,7 +151,7 @@ export function findMarkdownParagraphBoundary(
     if (newline === -1) {
       break;
     }
-    const line = text.slice(lineStart, newline).replace(/[ \t\r]+$/, "");
+    const line = text.slice(lineStart, trimLineEnd(text, lineStart, newline));
     const lineEnd = newline + 1;
     const fenceLine = parseFenceLine(line, fence);
 

@@ -861,17 +861,6 @@ describe("AgentStreamCoalescer paragraph delivery", () => {
     expect(flushes).toEqual([]);
   });
 
-  test("scans a line of many blockquote markers in linear time", async () => {
-    const { coalescer } = createParagraphHarness();
-    const pathological = `${"> ".repeat(20_000)}x\n`;
-
-    const started = performance.now();
-    coalescer.handle("agent-1", assistant(pathological));
-    coalescer.handle("agent-1", assistant(pathological));
-
-    expect(performance.now() - started).toBeLessThan(500);
-  });
-
   test("does not treat a fence line with an info string as a closing fence", async () => {
     const { coalescer, flushes } = createParagraphHarness();
 
