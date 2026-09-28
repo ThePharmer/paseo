@@ -1960,6 +1960,66 @@ test("foreground verification preserves a healthy socket and deduplicates simult
   expect(daemon.closesFromClient()).toEqual([]);
 });
 
+test("replacing a nominally connected session reconnects at once without a probe", async () => {
+  useHeartbeatClock();
+  const first = new FakeDaemon();
+  const second = new FakeDaemon();
+  first.daemonGoesSilent();
+  let attempts = 0;
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "long-background-resume",
+    logger: noopLogger,
+    transportFactory: () => (++attempts === 1 ? first : second).transport,
+  });
+  clients.push(client);
+  const connection = client.connect();
+  first.openConnection();
+  await connection;
+  const pending = client.ping({ timeoutMs: 60_000 }).then(
+    () => "resolved",
+    (error: unknown) => (error instanceof Error ? error.message : String(error)),
+  );
+
+  client.replaceConnection("App resumed after a long background");
+
+  expect(attempts).toBe(2);
+  expect(first.pingTimestamps()).toEqual(["0s"]);
+  expect(first.closesFromClient()).toEqual([
+    { code: 1001, reason: "App resumed after a long background" },
+  ]);
+  await expect(pending).resolves.toBe("App resumed after a long background");
+  second.openConnection();
+  expect(client.getConnectionState()).toEqual({ status: "connected" });
+  await vi.advanceTimersByTimeAsync(3_000);
+  expect(attempts).toBe(2);
+  expect(second.closesFromClient()).toEqual([]);
+});
+
+test("replacing a disconnected session connects like ensureConnected", async () => {
+  useHeartbeatClock();
+  const first = new FakeDaemon();
+  const second = new FakeDaemon();
+  let attempts = 0;
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: "known-disconnect-resume",
+    logger: noopLogger,
+    transportFactory: () => (++attempts === 1 ? first : second).transport,
+  });
+  clients.push(client);
+  const connection = client.connect();
+  first.openConnection();
+  await connection;
+  first.daemonClosesWith("network changed");
+
+  client.replaceConnection("App resumed after a long background");
+
+  expect(attempts).toBe(2);
+  second.openConnection();
+  expect(client.getConnectionState()).toEqual({ status: "connected" });
+});
+
 test("an obsolete foreground probe cannot close a replacement connection", async () => {
   useHeartbeatClock();
   const first = new FakeDaemon();
