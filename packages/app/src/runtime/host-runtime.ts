@@ -114,6 +114,11 @@ export interface HostRuntimeSnapshot {
   connectionStatus: HostRuntimeConnectionStatus;
   client: DaemonClient | null;
   lastError: string | null;
+  /**
+   * A connect attempt has ended without reaching online since the host was last online,
+   * or the host has no connection to try. A dropped socket alone does not set it.
+   */
+  hasFailedConnectAttempt: boolean;
   authFailureReason?: "password_required" | "incorrect_password" | null;
   lastOnlineAt: string | null;
   agentDirectoryStatus: HostRuntimeAgentDirectoryStatus;
@@ -403,15 +408,30 @@ function nextConnectionMachineState(input: {
   return resolveConnectionStateResult(previous.id, previous.connection, event);
 }
 
+function hasConnectAttemptFailed(input: {
+  previous: HostRuntimeConnectionMachineState;
+  next: HostRuntimeConnectionMachineState;
+  event: HostRuntimeConnectionMachineEvent;
+  failedBefore: boolean;
+}): boolean {
+  if (input.next.tag === "online") return false;
+  if (input.failedBefore) return true;
+  if (input.event.type !== "client_state") return input.event.type !== "select_connection";
+  const isDown = input.next.tag === "offline" || input.next.tag === "error";
+  return input.previous.tag === "connecting" && isDown;
+}
+
 function toSnapshotConnectionPatch(
   state: HostRuntimeConnectionMachineState,
   connectionEpoch: number,
+  hasFailedConnectAttempt: boolean,
 ): Pick<
   HostRuntimeSnapshot,
   | "activeConnectionId"
   | "activeConnection"
   | "connectionStatus"
   | "lastError"
+  | "hasFailedConnectAttempt"
   | "lastOnlineAt"
   | "connectionEpoch"
 > {
@@ -423,6 +443,7 @@ function toSnapshotConnectionPatch(
       lastError: null,
       lastOnlineAt: null,
       connectionEpoch,
+      hasFailedConnectAttempt,
     };
   }
   if (state.tag === "connecting") {
@@ -433,6 +454,7 @@ function toSnapshotConnectionPatch(
       lastError: null,
       lastOnlineAt: null,
       connectionEpoch,
+      hasFailedConnectAttempt,
     };
   }
   if (state.tag === "online") {
@@ -443,6 +465,7 @@ function toSnapshotConnectionPatch(
       lastError: null,
       lastOnlineAt: state.lastOnlineAt,
       connectionEpoch,
+      hasFailedConnectAttempt,
     };
   }
   if (state.tag === "offline") {
@@ -453,6 +476,7 @@ function toSnapshotConnectionPatch(
       lastError: null,
       lastOnlineAt: null,
       connectionEpoch,
+      hasFailedConnectAttempt,
     };
   }
   return {
@@ -462,6 +486,7 @@ function toSnapshotConnectionPatch(
     lastError: state.message,
     lastOnlineAt: null,
     connectionEpoch,
+    hasFailedConnectAttempt,
   };
 }
 
@@ -614,6 +639,7 @@ export class HostRuntimeController {
   private onReconcileServerId: ((oldId: string, newId: string) => void) | null;
   private connectionMachineState: HostRuntimeConnectionMachineState;
   private connectionEpoch = 0;
+  private hasFailedConnectAttempt = false;
   private snapshot: HostRuntimeSnapshot;
   private listeners = new Set<() => void>();
   private activeClient: DaemonClient | null = null;
@@ -645,7 +671,11 @@ export class HostRuntimeController {
     };
     this.snapshot = {
       serverId: this.host.serverId,
-      ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+      ...toSnapshotConnectionPatch(
+        this.connectionMachineState,
+        this.connectionEpoch,
+        this.hasFailedConnectAttempt,
+      ),
       client: null,
       agentDirectoryStatus: "idle",
       agentDirectoryError: null,
@@ -713,7 +743,11 @@ export class HostRuntimeController {
     }
     this.applyConnectionEvent({ type: "stopped" });
     this.updateSnapshot({
-      ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+      ...toSnapshotConnectionPatch(
+        this.connectionMachineState,
+        this.connectionEpoch,
+        this.hasFailedConnectAttempt,
+      ),
       client: null,
     });
   }
@@ -789,7 +823,11 @@ export class HostRuntimeController {
   markStartupError(message: string): void {
     this.applyConnectionEvent({ type: "connect_failed", message });
     this.updateSnapshot({
-      ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+      ...toSnapshotConnectionPatch(
+        this.connectionMachineState,
+        this.connectionEpoch,
+        this.hasFailedConnectAttempt,
+      ),
     });
   }
 
@@ -822,7 +860,11 @@ export class HostRuntimeController {
       }
       this.applyConnectionEvent({ type: "no_connections" });
       this.updateSnapshot({
-        ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+        ...toSnapshotConnectionPatch(
+          this.connectionMachineState,
+          this.connectionEpoch,
+          this.hasFailedConnectAttempt,
+        ),
         probeByConnectionId: new Map(),
       });
       return;
@@ -925,7 +967,11 @@ export class HostRuntimeController {
           const message = new DaemonAuthenticationError(probeAuthFailure).message;
           this.applyConnectionEvent({ type: "connect_failed", message });
           this.updateSnapshot({
-            ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+            ...toSnapshotConnectionPatch(
+              this.connectionMachineState,
+              this.connectionEpoch,
+              this.hasFailedConnectAttempt,
+            ),
             authFailureReason: probeAuthFailure,
           });
         }
@@ -1129,6 +1175,12 @@ export class HostRuntimeController {
     if (previousState.tag !== "online" && nextState.tag === "online") {
       this.connectionEpoch += 1;
     }
+    this.hasFailedConnectAttempt = hasConnectAttemptFailed({
+      previous: previousState,
+      next: nextState,
+      event,
+      failedBefore: this.hasFailedConnectAttempt,
+    });
     this.connectionMachineState = nextState;
     this.logConnectionTransition({
       from: previousState.tag,
@@ -1205,7 +1257,11 @@ export class HostRuntimeController {
         message: `Failed to resolve client id: ${message}`,
       });
       this.updateSnapshot({
-        ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+        ...toSnapshotConnectionPatch(
+          this.connectionMachineState,
+          this.connectionEpoch,
+          this.hasFailedConnectAttempt,
+        ),
       });
       return null;
     }
@@ -1298,7 +1354,11 @@ export class HostRuntimeController {
     });
     this.snapshot = { ...this.snapshot, clientGeneration: nextGeneration };
     this.updateSnapshot({
-      ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+      ...toSnapshotConnectionPatch(
+        this.connectionMachineState,
+        this.connectionEpoch,
+        this.hasFailedConnectAttempt,
+      ),
       client: null,
     });
 
@@ -1313,7 +1373,11 @@ export class HostRuntimeController {
       client.setReconnectEnabled(false);
       this.applyConnectionEvent({ type: "connect_failed", message: toErrorMessage(error) });
       this.updateSnapshot({
-        ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+        ...toSnapshotConnectionPatch(
+          this.connectionMachineState,
+          this.connectionEpoch,
+          this.hasFailedConnectAttempt,
+        ),
         client: null,
         authFailureReason: authFailure,
       });
@@ -1352,7 +1416,11 @@ export class HostRuntimeController {
         }
         this.applyConnectionEvent({ type: "client_state", state, lastError: client.lastError });
         this.updateSnapshot({
-          ...toSnapshotConnectionPatch(this.connectionMachineState, this.connectionEpoch),
+          ...toSnapshotConnectionPatch(
+            this.connectionMachineState,
+            this.connectionEpoch,
+            this.hasFailedConnectAttempt,
+          ),
           ...this.buildAgentDirectoryStatusPatch(),
           client,
           authFailureReason: null,
@@ -2673,6 +2741,15 @@ export function useHostRuntimeConnectionStatus(serverId: string): HostRuntimeCon
     (onStoreChange) => store.subscribe(serverId, onStoreChange),
     () => store.getSnapshot(serverId)?.connectionStatus ?? "connecting",
     () => store.getSnapshot(serverId)?.connectionStatus ?? "connecting",
+  );
+}
+
+export function useHostRuntimeHasFailedConnectAttempt(serverId: string): boolean {
+  const store = getHostRuntimeStore();
+  return useSyncExternalStore(
+    (onStoreChange) => store.subscribe(serverId, onStoreChange),
+    () => store.getSnapshot(serverId)?.hasFailedConnectAttempt ?? false,
+    () => store.getSnapshot(serverId)?.hasFailedConnectAttempt ?? false,
   );
 }
 
