@@ -61,6 +61,7 @@ class FakeDaemonClient {
   public connectCalls = 0;
   public ensureConnectedCalls = 0;
   public connectionVerifications = 0;
+  public connectionReplacements: string[] = [];
   public reconnectEnabledChanges: boolean[] = [];
   public fetchAgentsCalls: FetchAgentsOptions[] = [];
   public fetchAgentsResponses: Array<
@@ -143,6 +144,11 @@ class FakeDaemonClient {
       };
       this.sentMessageWaiters.add(waiter);
     });
+  }
+
+  replaceConnection(reason: string): void {
+    this.connectionReplacements.push(reason);
+    this.setConnectionState({ status: "connected" });
   }
 
   ensureConnected(options?: { verify?: boolean }): void {
@@ -1683,6 +1689,73 @@ describe("HostRuntimeStore", () => {
       store.syncHosts([]);
     },
   );
+
+  it("replaces sockets after a long background and probes them after a short one", async () => {
+    const connection: HostConnection = {
+      id: "relay:relay-a.paseo.sh:443",
+      type: "relay",
+      relayEndpoint: "relay-a.paseo.sh:443",
+      daemonPublicKeyB64: "pk_a",
+    };
+    const host = makeHost({
+      serverId: "srv_a",
+      connections: [connection],
+      preferredConnectionId: connection.id,
+    });
+    const client = new FakeDaemonClient();
+    client.setConnectionState({ status: "connected" });
+    let nowMs = 0;
+    const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage(),
+      now: () => nowMs,
+      deps: {
+        createClient: () => {
+          throw new Error("initial clients are supplied");
+        },
+        connectToDaemon: async () => {
+          throw new Error("single-connection hosts reuse their active clients");
+        },
+        getClientId: async () => "cid_test_runtime",
+      },
+    });
+    let changeAppState: (state: AppStateStatus) => void = () => {
+      throw new Error("AppState listener not registered");
+    };
+    const unbind = bindHostRuntimeAppState(store, {
+      currentState: "active",
+      addEventListener: (_event, listener) => {
+        changeAppState = listener;
+        return { remove: () => {} };
+      },
+    });
+    store.syncHosts([host], {
+      initialConnectionByServerId: new Map([
+        [
+          host.serverId,
+          { connectionId: connection.id, existingClient: client as unknown as DaemonClient },
+        ],
+      ]),
+    });
+    await waitForHostOnline(store, host.serverId);
+    const verificationsAtStart = client.connectionVerifications;
+
+    changeAppState("inactive");
+    nowMs += 4_000;
+    changeAppState("background");
+    nowMs += 5_999;
+    changeAppState("active");
+    expect(client.connectionVerifications).toBe(verificationsAtStart + 1);
+    expect(client.connectionReplacements).toEqual([]);
+
+    changeAppState("background");
+    nowMs += 10_000;
+    changeAppState("active");
+    expect(client.connectionVerifications).toBe(verificationsAtStart + 1);
+    expect(client.connectionReplacements).toEqual(["App resumed after a long background"]);
+
+    unbind();
+    store.syncHosts([]);
+  });
 
   it("revokes push notifications before removing a host", async () => {
     const host = makeHost({ connections: [makeHost().connections[0]!] });
