@@ -81,6 +81,10 @@ import { nativePerformanceTrace } from "@/performance/native-trace";
 import { revokePushNotifications } from "@/push-notifications";
 import { createAppWebSocketFactory } from "./websocket-factory";
 
+// A mobile OS suspends sockets well before this, so after a longer background the old
+// socket is replaced at once instead of spending the three-second probe to find it dead.
+const BACKGROUND_RECONNECT_AFTER_MS = 10_000;
+
 export type HostRuntimeConnectionStatus = "idle" | "connecting" | "online" | "offline" | "error";
 export type HostRegistryStatus = "loading" | "ready";
 
@@ -726,6 +730,10 @@ export class HostRuntimeController {
 
   ensureConnected(options?: { verify?: boolean }): void {
     this.activeClient?.ensureConnected(options);
+  }
+
+  replaceConnection(reason: string): void {
+    this.activeClient?.replaceConnection(reason);
   }
 
   markAgentDirectorySyncLoading(): void {
@@ -1398,14 +1406,19 @@ export class HostRuntimeStore {
   private storage: HostRuntimeStorage;
   private replicaCache: ReplicaCache;
   private readonly revokePushNotifications: typeof revokePushNotifications;
+  // Wall clock on purpose: a monotonic clock can stop while the device sleeps.
+  private readonly now: () => number;
+  private hiddenAtMs: number | null = null;
 
   constructor(input?: {
     deps?: HostRuntimeControllerDeps;
     storage?: HostRuntimeStorage;
     replicaRowStore?: ReplicaRowStore;
     revokePushNotifications?: typeof revokePushNotifications;
+    now?: () => number;
   }) {
     this.deps = input?.deps ?? createDefaultDeps();
+    this.now = input?.now ?? Date.now;
     this.storage = input?.storage ?? AsyncStorage;
     this.replicaCache = new ReplicaCache(input?.replicaRowStore ?? createReplicaRowStore());
     this.revokePushNotifications = input?.revokePushNotifications ?? revokePushNotifications;
@@ -2330,13 +2343,22 @@ export class HostRuntimeStore {
 
   setAppVisible(visible: boolean): void {
     // Keep normal reconnect backoff running while hidden, for as long as the OS
-    // lets us execute. Foregrounding bypasses that backoff without closing healthy sockets.
+    // lets us execute. Foregrounding bypasses that backoff.
     if (!visible) {
+      this.hiddenAtMs ??= this.now();
       void this.replicaCache.flush();
       return;
     }
 
-    this.ensureConnectedAll({ verify: true });
+    const hiddenForMs = this.hiddenAtMs === null ? 0 : this.now() - this.hiddenAtMs;
+    this.hiddenAtMs = null;
+    if (hiddenForMs < BACKGROUND_RECONNECT_AFTER_MS) {
+      this.ensureConnectedAll({ verify: true });
+      return;
+    }
+    for (const controller of this.controllers.values()) {
+      controller.replaceConnection("App resumed after a long background");
+    }
   }
 
   runProbeCycleNow(serverId?: string): Promise<void> {
