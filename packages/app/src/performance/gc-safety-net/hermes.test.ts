@@ -10,7 +10,6 @@ function createHermesGlobal(stats: Record<string, number>) {
     gc: () => {
       gcCalls.push("gc");
     },
-    WeakRef,
   };
   return { runtimeGlobal, gcCalls };
 }
@@ -36,26 +35,36 @@ describe("resolveHermesGcTools", () => {
     });
   });
 
-  test("calls global.gc and wraps WeakRef", () => {
+  test("calls global.gc", () => {
     const { runtimeGlobal, gcCalls } = createHermesGlobal(HERMES_STATS);
-    const tools = resolveHermesGcTools(runtimeGlobal);
-    const target = {};
-    tools.collectGarbage?.();
+    resolveHermesGcTools(runtimeGlobal).collectGarbage?.();
 
     expect(gcCalls).toEqual(["gc"]);
-    expect(tools.createWeakRef?.(target).deref()).toBe(target);
   });
 
-  test("reports each tool missing on a runtime without Hermes, gc, or WeakRef", () => {
+  test("offers no WeakRef tool even when the runtime has WeakRef", () => {
+    const { runtimeGlobal } = createHermesGlobal(HERMES_STATS);
+    const tools = resolveHermesGcTools({ ...runtimeGlobal, WeakRef });
+
+    expect(Object.keys(tools).sort()).toEqual(["collectGarbage", "readStats"]);
+  });
+
+  test("reports each tool missing on a runtime without Hermes or gc", () => {
     expect(resolveHermesGcTools({})).toEqual({
       readStats: null,
-      createWeakRef: null,
       collectGarbage: null,
     });
   });
 
   test("treats stats without the GC fields as missing", () => {
     const { runtimeGlobal } = createHermesGlobal({ js_heapSize: 1 });
+
+    expect(resolveHermesGcTools(runtimeGlobal).readStats).toBeNull();
+  });
+
+  test("treats stats without js_externalBytes as missing, since the balloon detects collection from it", () => {
+    const { js_externalBytes: _omitted, ...withoutExternal } = HERMES_STATS;
+    const { runtimeGlobal } = createHermesGlobal(withoutExternal);
 
     expect(resolveHermesGcTools(runtimeGlobal).readStats).toBeNull();
   });

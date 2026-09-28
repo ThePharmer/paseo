@@ -1,17 +1,15 @@
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+  COLLECTED_EXTERNAL_DROP_RATIO,
   createGcSafetyNet,
   runGcSafetyNet,
   type GcSafetyNetPorts,
-  type HermesGcStats,
-  type WeakTarget,
 } from "./monitor";
 
 const MB = 1024 * 1024;
 
 interface FakeRuntimeOptions {
   hasStats?: boolean;
-  hasWeakRef?: boolean;
   hasGc?: boolean;
 }
 
@@ -23,30 +21,26 @@ interface PressureCall {
 const ARMED_PRESSURE_BYTES = 1;
 
 // Simulates the pieces of Hermes and Android the monitor reads: a clock, the
-// native heap, instrumented GC stats, WeakRef clearing on an old-generation
-// collection, and global.gc().
+// native heap, instrumented GC stats, old-generation collections, and
+// global.gc().
 //
-// WeakRef follows Hermes: constructing one, or deref() of a live target, adds
-// the target to the kept objects (lib/VM/JSLib/WeakRef.cpp:78, :104), which
-// stay strongly reachable until the task ends and microtasks drain. A
-// collection therefore never clears a target that was kept in the same task.
-// Only balloons the monitor has inflated and dropped are collectible; an armed
-// balloon is still strongly held by the monitor.
+// External bytes follow Hermes: setPressure credits the difference from the
+// object's previous amount, and a collected balloon's NativeState finalizer
+// debits its whole amount (API/hermes/hermes.cpp:2162-2202). Only balloons
+// the monitor has inflated and dropped are collectible; an armed balloon is
+// still strongly held. A balloon inflated in the current task is still on the
+// monitor's stack, so the collection that frees it, and the debit, come in a
+// later task.
 function createFakeRuntime(options: FakeRuntimeOptions = {}) {
-  const { hasStats = true, hasWeakRef = true, hasGc = true } = options;
+  const { hasStats = true, hasGc = true } = options;
   let now = 0;
   let nativeHeapBytes = 200 * MB;
   let lastInteractionAt = Number.NEGATIVE_INFINITY;
-  const stats: HermesGcStats = {
-    numGCs: 0,
-    heapSizeBytes: 30 * MB,
-    gcTimeMs: 0,
-    externalBytes: 0,
-  };
+  let otherExternalBytes = 0;
+  const stats = { numGCs: 0, heapSizeBytes: 30 * MB, gcTimeMs: 0 };
   const pressureCalls: PressureCall[] = [];
   const pressureByTarget = new Map<object, number>();
-  const weakRefs: Array<{ target: object | undefined }> = [];
-  const keptObjects = new Set<object>();
+  const inflatedThisTask = new Set<object>();
   const objectIds = new Map<object, string>();
   const callLog: string[] = [];
   const gcCalls: number[] = [];
@@ -63,15 +57,18 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
     return name;
   }
 
-  function isCollectible(target: object): boolean {
-    const pressure = pressureByTarget.get(target) ?? 0;
-    return pressure > ARMED_PRESSURE_BYTES && !keptObjects.has(target);
+  function readExternalBytes(): number {
+    let total = otherExternalBytes;
+    for (const bytes of pressureByTarget.values()) {
+      total += bytes;
+    }
+    return total;
   }
 
   function collectOldGeneration(): void {
-    for (const ref of weakRefs) {
-      if (ref.target && isCollectible(ref.target)) {
-        ref.target = undefined;
+    for (const [target, bytes] of pressureByTarget) {
+      if (bytes > ARMED_PRESSURE_BYTES && !inflatedThisTask.has(target)) {
+        pressureByTarget.delete(target);
       }
     }
     stats.numGCs += 1;
@@ -84,24 +81,14 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
       callLog.push(`pressure ${nameOf(target)} ${bytes}`);
       pressureCalls.push({ target, bytes });
       pressureByTarget.set(target, bytes);
+      if (bytes > ARMED_PRESSURE_BYTES) {
+        inflatedThisTask.add(target);
+      }
     },
-    readStats: hasStats ? () => ({ ...stats }) : null,
-    createWeakRef: hasWeakRef
-      ? (target) => {
-          callLog.push(`weakRef ${nameOf(target)}`);
-          keptObjects.add(target);
-          const ref: { target: object | undefined } = { target };
-          weakRefs.push(ref);
-          const weakTarget: WeakTarget = {
-            deref: () => {
-              callLog.push(`deref ${nameOf(target)}`);
-              if (ref.target) {
-                keptObjects.add(ref.target);
-              }
-              return ref.target;
-            },
-          };
-          return weakTarget;
+    readStats: hasStats
+      ? () => {
+          callLog.push("stats");
+          return { ...stats, externalBytes: readExternalBytes() };
         }
       : null,
     collectGarbage: hasGc
@@ -128,20 +115,24 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
     callLog,
     gcCalls,
     logs,
-    nameOf,
+    readExternalBytes,
     get now() {
       return now;
     },
     advance(ms: number) {
       now += ms;
     },
-    /** The timer task returns and microtasks drain, which clears the kept objects. */
+    // The timer task returns; the monitor's stack no longer holds anything.
     endTask() {
-      keptObjects.clear();
+      inflatedThisTask.clear();
       callLog.push("end task");
     },
     setNativeHeapMb(mb: number) {
       nativeHeapBytes = mb * MB;
+    },
+    // External memory Hermes counts besides the balloons: strings, ArrayBuffers.
+    setOtherExternalMb(mb: number) {
+      otherExternalBytes = mb * MB;
     },
     runYoungGc() {
       stats.numGCs += 1;
@@ -252,7 +243,7 @@ describe("gc safety net balloon", () => {
         nativeHeapBytes: 350 * MB,
         baselineBytes: 200 * MB,
         pressureBytes: 150 * MB,
-        stats: { numGCs: 1, heapSizeBytes: 40 * MB, gcTimeMs: 0, externalBytes: 0 },
+        stats: { numGCs: 1, heapSizeBytes: 40 * MB, gcTimeMs: 0, externalBytes: 1 },
       },
     ]);
     expect(runtime.logs).toHaveLength(1);
@@ -266,18 +257,11 @@ describe("gc safety net balloon", () => {
     runSeconds(runtime, net, 1);
 
     expect(lastTaskCalls(runtime)).toEqual([
-      "weakRef balloon2",
+      "stats",
       "pressure balloon2 1",
       "log",
       `pressure balloon1 ${150 * MB}`,
     ]);
-  });
-
-  test("the dropped balloon's WeakRef is created when it is armed, in an earlier task", () => {
-    const runtime = createFakeRuntime();
-    startedNet(runtime);
-
-    expect(lastTaskCalls(runtime)).toEqual(["weakRef balloon1", "pressure balloon1 1"]);
   });
 
   test("pressure is at least twice the JS heap and at most 1 GB", () => {
@@ -309,6 +293,96 @@ function triggeredNet(runtime: FakeRuntime) {
 }
 
 describe("gc safety net collection", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test("detects the collection from js_externalBytes dropping by most of the pressure", () => {
+    const runtime = createFakeRuntime();
+    runtime.setOtherExternalMb(20);
+    const net = triggeredNet(runtime);
+    runSeconds(runtime, net, 2);
+
+    expect(runtime.readExternalBytes()).toBe(20 * MB + 150 * MB + 1);
+    expect(net.readDiagnostics().events.map((event) => event.kind)).toEqual(["trigger"]);
+
+    runtime.collectOldGeneration();
+    runSeconds(runtime, net, 1);
+
+    expect(net.readDiagnostics().events.at(-1)).toMatchObject({
+      kind: "collected",
+      at: 4000,
+      stats: { externalBytes: 20 * MB + 1 },
+    });
+  });
+
+  test("other external memory freeing less than the drop ratio is not a collection", () => {
+    const runtime = createFakeRuntime();
+    runtime.setOtherExternalMb(200);
+    const net = triggeredNet(runtime);
+    const almostEnoughMb = Math.floor(COLLECTED_EXTERNAL_DROP_RATIO * 150) - 1;
+    runtime.setOtherExternalMb(200 - almostEnoughMb);
+    runSeconds(runtime, net, 3);
+
+    expect(net.readDiagnostics().events.map((event) => event.kind)).toEqual(["trigger"]);
+
+    runtime.collectOldGeneration();
+    runSeconds(runtime, net, 1);
+
+    expect(net.readDiagnostics().events.map((event) => event.kind)).toEqual([
+      "trigger",
+      "collected",
+    ]);
+  });
+
+  test("never constructs a WeakRef or reads one through a full cycle", () => {
+    let constructed = 0;
+    vi.stubGlobal("WeakRef", function countingWeakRef() {
+      constructed += 1;
+    });
+    const runtime = createFakeRuntime();
+    const net = triggeredNet(runtime);
+    runtime.setNativeHeapMb(200 + 450);
+    runSeconds(runtime, net, 10);
+    runSeconds(runtime, net, 5);
+
+    expect(net.readDiagnostics().events.map((event) => event.kind)).toEqual([
+      "trigger",
+      "fallback-gc",
+      "collected",
+      "rebaseline",
+    ]);
+    expect(constructed).toBe(0);
+  });
+
+  test("triggers again after each detected collection without escalating pressure", () => {
+    const runtime = createFakeRuntime();
+    const net = startedNet(runtime);
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      runtime.runYoungGc();
+      runtime.setNativeHeapMb(200 + 150);
+      runSeconds(runtime, net, 1);
+      runtime.collectOldGeneration();
+      runtime.setNativeHeapMb(200);
+      runSeconds(runtime, net, 5);
+    }
+
+    const inflations = runtime.pressureCalls.filter((call) => call.bytes > 1);
+    expect(inflations.map((call) => call.bytes)).toEqual([150 * MB, 150 * MB, 150 * MB]);
+    expect(runtime.readExternalBytes()).toBe(1);
+    expect(net.readDiagnostics().events.map((event) => event.kind)).toEqual([
+      "trigger",
+      "collected",
+      "rebaseline",
+      "trigger",
+      "collected",
+      "rebaseline",
+      "trigger",
+      "collected",
+      "rebaseline",
+    ]);
+  });
+
   test("rebaselines 2 s after the dropped balloon is collected", () => {
     const runtime = createFakeRuntime();
     const net = triggeredNet(runtime);
@@ -410,7 +484,7 @@ describe("gc safety net fallback", () => {
     expect(runtime.logs).toHaveLength(2);
   });
 
-  test("a due fallback runs before any deref in its tick, and collection is observed a tick later", () => {
+  test("a tick that forces a collection does not observe it; the next tick does", () => {
     const runtime = createFakeRuntime();
     const net = triggeredNet(runtime);
     runtime.setNativeHeapMb(200 + 450);
@@ -418,11 +492,11 @@ describe("gc safety net fallback", () => {
     runSeconds(runtime, net, 10);
 
     expect(runtime.gcCalls).toEqual([11_000]);
-    expect(lastTaskCalls(runtime)).toEqual(["gc", "log"]);
+    expect(lastTaskCalls(runtime)).toEqual(["stats", "gc", "stats", "log"]);
+    expect(net.readDiagnostics().events.at(-1)?.kind).toBe("fallback-gc");
 
     runSeconds(runtime, net, 1);
 
-    expect(lastTaskCalls(runtime)).toEqual(["deref balloon1"]);
     expect(net.readDiagnostics().events.map((event) => [event.kind, event.at])).toEqual([
       ["trigger", 1000],
       ["fallback-gc", 11_000],
@@ -443,7 +517,7 @@ describe("gc safety net fallback", () => {
   });
 
   test("in fallback-only mode, forces a collection after growth stays over 400 MB for 10 s", () => {
-    const runtime = createFakeRuntime({ hasWeakRef: false });
+    const runtime = createFakeRuntime({ hasStats: false });
     const net = startedNet(runtime);
     runtime.setNativeHeapMb(200 + 450);
     runSeconds(runtime, net, 5);
@@ -535,7 +609,7 @@ describe("gc safety net fallback", () => {
   });
 
   test("forces at most one collection per 60 s", () => {
-    const runtime = createFakeRuntime({ hasWeakRef: false });
+    const runtime = createFakeRuntime({ hasStats: false });
     const net = startedNet(runtime);
     runtime.setNativeHeapMb(200 + 450);
     runSeconds(runtime, net, 11);
@@ -554,16 +628,6 @@ describe("gc safety net fallback", () => {
 });
 
 describe("gc safety net degradation", () => {
-  test("without WeakRef it runs fallback-only and says why", () => {
-    const runtime = createFakeRuntime({ hasWeakRef: false });
-    const net = startedNet(runtime);
-
-    expect(net.readDiagnostics()).toMatchObject({
-      mode: "fallback-only",
-      notes: ["WeakRef unavailable: balloon disabled"],
-    });
-  });
-
   test("without Hermes stats it runs fallback-only and still forces collections", () => {
     const runtime = createFakeRuntime({ hasStats: false });
     const net = startedNet(runtime);
@@ -574,13 +638,15 @@ describe("gc safety net degradation", () => {
     expect(runtime.gcCalls).toEqual([11_000]);
     expect(net.readDiagnostics()).toMatchObject({
       mode: "fallback-only",
-      notes: ["HermesInternal.getInstrumentedStats unavailable: balloon disabled"],
+      notes: [
+        "HermesInternal.getInstrumentedStats with js_numGCs and js_externalBytes unavailable: balloon disabled",
+      ],
       events: [{ kind: "fallback-gc", stats: null }],
     });
   });
 
   test("with neither the balloon nor global.gc it does nothing", () => {
-    const runtime = createFakeRuntime({ hasWeakRef: false, hasGc: false });
+    const runtime = createFakeRuntime({ hasStats: false, hasGc: false });
     const net = startedNet(runtime);
     runtime.setNativeHeapMb(200 + 900);
     runSeconds(runtime, net, 30);
@@ -588,7 +654,10 @@ describe("gc safety net degradation", () => {
     expect(runtime.pressureCalls).toEqual([]);
     expect(net.readDiagnostics()).toEqual({
       mode: "off",
-      notes: ["WeakRef unavailable: balloon disabled", "global.gc unavailable: fallback disabled"],
+      notes: [
+        "HermesInternal.getInstrumentedStats with js_numGCs and js_externalBytes unavailable: balloon disabled",
+        "global.gc unavailable: fallback disabled",
+      ],
       baselineBytes: null,
       nativeHeapBytes: null,
       events: [],

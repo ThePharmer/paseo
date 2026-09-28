@@ -1,9 +1,6 @@
-import type { GcSafetyNetPorts, HermesGcStats, WeakTarget } from "./monitor";
+import type { GcSafetyNetPorts, HermesGcStats } from "./monitor";
 
-export type HermesGcTools = Pick<
-  GcSafetyNetPorts,
-  "readStats" | "createWeakRef" | "collectGarbage"
->;
+export type HermesGcTools = Pick<GcSafetyNetPorts, "readStats" | "collectGarbage">;
 
 const MS_PER_SECOND = 1000;
 
@@ -61,20 +58,13 @@ function resolveCollectGarbage(runtimeGlobal: object): (() => void) | null {
   };
 }
 
-function createWeakRef(target: object): WeakTarget {
-  return new WeakRef(target);
-}
-
 /**
- * Probes the Hermes features the GC safety net needs. Hermes defines WeakRef
- * only when the microtask queue is on, and HermesInternal can be disabled, so
- * each one may be missing.
+ * Probes the Hermes features the GC safety net needs. HermesInternal can be
+ * disabled and global.gc removed, so each one may be missing.
  */
 export function resolveHermesGcTools(runtimeGlobal: object): HermesGcTools {
-  const hasWeakRef = typeof Reflect.get(runtimeGlobal, "WeakRef") === "function";
   return {
     readStats: resolveStatsReader(runtimeGlobal),
-    createWeakRef: hasWeakRef ? createWeakRef : null,
     collectGarbage: resolveCollectGarbage(runtimeGlobal),
   };
 }

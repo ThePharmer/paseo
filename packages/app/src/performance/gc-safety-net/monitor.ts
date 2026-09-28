@@ -32,6 +32,8 @@ export const FALLBACK_MIN_INTERVAL_MS = 60_000;
 export const EMERGENCY_GROWTH_BYTES = 700 * MB;
 /** Longest a due fallback waits for a quiet moment; continuous touch or scroll must not defer it forever. */
 export const MAX_FALLBACK_DEFER_MS = 10_000;
+/** Share of the credited pressure that must come off js_externalBytes to count as the balloon's collection. Other external memory (strings, ArrayBuffers) moves by far less than a credit of 96 MB or more. */
+export const COLLECTED_EXTERNAL_DROP_RATIO = 0.75;
 /** Enough history to read a streaming session from the diagnostics sheet. */
 export const EVENT_RING_SIZE = 50;
 /** An armed balloon carries a token amount so its NativeState exists before it is needed. */
@@ -44,19 +46,13 @@ export interface HermesGcStats {
   externalBytes: number;
 }
 
-export interface WeakTarget {
-  deref(): object | undefined;
-}
-
 export interface GcSafetyNetPorts {
   /** Monotonic milliseconds. */
   now(): number;
   readNativeHeapBytes(): number;
   setPressure(target: object, bytes: number): void;
-  /** Null when HermesInternal.getInstrumentedStats is missing. */
+  /** Null when HermesInternal.getInstrumentedStats is missing or lacks js_numGCs or js_externalBytes. */
   readStats: (() => HermesGcStats) | null;
-  /** Null when the runtime has no WeakRef. */
-  createWeakRef: ((target: object) => WeakTarget) | null;
   /** Null when global.gc is missing. */
   collectGarbage: (() => void) | null;
   /** Monotonic milliseconds of the latest touch, user scroll, or keyboard motion. */
@@ -133,34 +129,27 @@ export type IntervalSchedule = (run: () => void, intervalMs: number) => () => vo
 
 interface Balloon {
   target: object;
-  // Created at arming, never in the trigger task: see arm().
-  ref: WeakTarget;
   armedAtNumGCs: number;
 }
 
 interface ReleasedBalloon {
-  ref: WeakTarget;
   triggeredAt: number;
+  // js_externalBytes at or below this means the balloon's NativeState was
+  // finalized and debited its pressure.
+  collectedAtOrBelowExternalBytes: number;
 }
 
 function describeMissingCapabilities(ports: GcSafetyNetPorts): string[] {
   const notes: string[] = [];
   if (ports.readStats === null) {
-    notes.push("HermesInternal.getInstrumentedStats unavailable: balloon disabled");
-  }
-  if (ports.createWeakRef === null) {
-    notes.push("WeakRef unavailable: balloon disabled");
+    notes.push(
+      "HermesInternal.getInstrumentedStats with js_numGCs and js_externalBytes unavailable: balloon disabled",
+    );
   }
   if (ports.collectGarbage === null) {
     notes.push("global.gc unavailable: fallback disabled");
   }
   return notes;
-}
-
-// Ripeness needs js_numGCs and collection needs a WeakRef; the balloon runs
-// only with both.
-function resolveBalloonWeakRef(ports: GcSafetyNetPorts): ((target: object) => WeakTarget) | null {
-  return ports.readStats === null ? null : ports.createWeakRef;
 }
 
 function resolveMode(input: { hasBalloon: boolean; hasGc: boolean }): GcSafetyNetMode {
@@ -175,9 +164,10 @@ function formatMb(bytes: number): string {
 }
 
 export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
-  const createBalloonRef = resolveBalloonWeakRef(ports);
+  // Ripeness reads js_numGCs and collection reads js_externalBytes.
+  const hasBalloon = ports.readStats !== null;
   const mode = resolveMode({
-    hasBalloon: createBalloonRef !== null,
+    hasBalloon,
     hasGc: ports.collectGarbage !== null,
   });
   const notes = describeMissingCapabilities(ports);
@@ -200,15 +190,10 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     }
   }
 
-  // Hermes keeps a WeakRef's target strongly reachable until the task that
-  // constructed it drains its microtasks (lib/VM/JSLib/WeakRef.cpp:78). A
-  // WeakRef built in the trigger task would root the balloon through the very
-  // collection its pressure starts, so the ref is built here, ticks earlier.
-  function arm(createRef: (target: object) => WeakTarget, stats: HermesGcStats): Balloon {
+  function arm(stats: HermesGcStats): Balloon {
     const target = {};
-    const ref = createRef(target);
     ports.setPressure(target, ARMED_PRESSURE_BYTES);
-    return { target, ref, armedAtNumGCs: stats.numGCs };
+    return { target, armedAtNumGCs: stats.numGCs };
   }
 
   // A dropped balloon still holds its pressure until it is collected, so a
@@ -220,8 +205,15 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     return isSettled && isSpaced;
   }
 
+  // A WeakRef would read collection directly, but Hermes keeps a WeakRef's
+  // target alive until the task drains its microtasks, on construction and on
+  // deref() (lib/VM/JSLib/WeakRef.cpp:78, :104), and deref() during old-gen
+  // marking marks the target live (include/hermes/VM/WeakRoot-inline.h:25).
+  // Either can keep the balloon alive through the collection it started. The
+  // balloon's NativeState debits its pressure when it is finalized, so the
+  // drop in js_externalBytes is the signal, and it holds no reference.
   function observeCollection(at: number, heap: number, stats: HermesGcStats): void {
-    if (released === null || released.ref.deref() !== undefined) {
+    if (released === null || stats.externalBytes > released.collectedAtOrBelowExternalBytes) {
       return;
     }
     record({
@@ -245,19 +237,25 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
   }
 
   function trigger(input: {
-    createRef: (target: object) => WeakTarget;
     balloon: Balloon;
     at: number;
     heap: number;
     baseline: number;
     stats: HermesGcStats;
   }): void {
-    const { createRef, balloon, at, heap, baseline, stats } = input;
+    const { balloon, at, heap, baseline, stats } = input;
     const growth = heap - baseline;
     const heapScaled = PRESSURE_HEAP_MULTIPLIER * stats.heapSizeBytes;
     const pressureBytes = Math.min(Math.max(growth, heapScaled), MAX_PRESSURE_BYTES);
-    released = { ref: balloon.ref, triggeredAt: at };
-    armed = arm(createRef, stats);
+    // Reading stats after the credit would allocate, so the post-trigger value
+    // is derived: this tick's reading plus the pressure about to be credited.
+    const externalAfterTrigger = stats.externalBytes + pressureBytes;
+    released = {
+      triggeredAt: at,
+      collectedAtOrBelowExternalBytes:
+        externalAfterTrigger - COLLECTED_EXTERNAL_DROP_RATIO * pressureBytes,
+    };
+    armed = arm(stats);
     lastTriggerAt = at;
     record({
       kind: "trigger",
@@ -277,22 +275,21 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     // allocation runs a young collection that starts old-gen marking. Marking
     // roots whatever is live at that moment, and a surviving balloon's pressure
     // lands in the next target (HadesGC.cpp:1227-1236). Every allocation (the
-    // new balloon, its WeakRef, the event, the log line) happens above, and
+    // new balloon, the event, the log line) happens above, and
     // the callers return without allocating, so the only strong references
     // left are this frame's, gone when the tick returns.
     ports.setPressure(balloon.target, pressureBytes);
   }
 
   function tickBalloon(input: {
-    createRef: (target: object) => WeakTarget;
     at: number;
     heap: number;
     baseline: number;
     stats: HermesGcStats;
   }): void {
-    const { createRef, at, heap, baseline, stats } = input;
+    const { at, heap, baseline, stats } = input;
     if (armed === null) {
-      armed = arm(createRef, stats);
+      armed = arm(stats);
       return;
     }
     // A balloon that has survived a collection lives in the old generation,
@@ -301,7 +298,7 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     const growth = heap - baseline;
     if (growth > TRIGGER_GROWTH_BYTES && isRipe && canTrigger(at)) {
       // Must stay the last statement: see the ordering note in trigger().
-      trigger({ createRef, balloon: armed, at, heap, baseline, stats });
+      trigger({ balloon: armed, at, heap, baseline, stats });
     }
   }
 
@@ -375,11 +372,10 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     }
   }
 
-  // Order matters twice here. deref() of a live target keeps it strongly
-  // reachable until the task drains its microtasks (lib/VM/JSLib/WeakRef.cpp:104),
-  // so a due fallback runs before any deref and the tick that ran it does not
-  // deref at all; the next tick observes the collection. And the balloon step
-  // runs last, because a trigger must not be followed by an allocation.
+  // Order matters twice here. A due fallback runs first and ends the tick: the
+  // stats read above predate the forced collection, so the next tick observes
+  // it. And the balloon step runs last, because a trigger must not be followed
+  // by an allocation.
   function tick(): void {
     if (mode === "off") {
       return;
@@ -404,9 +400,9 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
       });
       return;
     }
-    if (createBalloonRef && stats) {
+    if (hasBalloon && stats) {
       observeCollection(at, heap, stats);
-      tickBalloon({ createRef: createBalloonRef, at, heap, baseline, stats });
+      tickBalloon({ at, heap, baseline, stats });
     }
   }
 
