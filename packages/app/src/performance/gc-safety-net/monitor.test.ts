@@ -20,9 +20,18 @@ interface PressureCall {
   bytes: number;
 }
 
+const ARMED_PRESSURE_BYTES = 1;
+
 // Simulates the pieces of Hermes and Android the monitor reads: a clock, the
 // native heap, instrumented GC stats, WeakRef clearing on an old-generation
 // collection, and global.gc().
+//
+// WeakRef follows Hermes: constructing one, or deref() of a live target, adds
+// the target to the kept objects (lib/VM/JSLib/WeakRef.cpp:78, :104), which
+// stay strongly reachable until the task ends and microtasks drain. A
+// collection therefore never clears a target that was kept in the same task.
+// Only balloons the monitor has inflated and dropped are collectible; an armed
+// balloon is still strongly held by the monitor.
 function createFakeRuntime(options: FakeRuntimeOptions = {}) {
   const { hasStats = true, hasWeakRef = true, hasGc = true } = options;
   let now = 0;
@@ -35,14 +44,35 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
     externalBytes: 0,
   };
   const pressureCalls: PressureCall[] = [];
+  const pressureByTarget = new Map<object, number>();
   const weakRefs: Array<{ target: object | undefined }> = [];
+  const keptObjects = new Set<object>();
+  const objectIds = new Map<object, string>();
+  const callLog: string[] = [];
   const gcCalls: number[] = [];
   const logs: string[] = [];
   let gcFreesTo: number | null = null;
 
+  function nameOf(target: object): string {
+    const known = objectIds.get(target);
+    if (known) {
+      return known;
+    }
+    const name = `balloon${objectIds.size + 1}`;
+    objectIds.set(target, name);
+    return name;
+  }
+
+  function isCollectible(target: object): boolean {
+    const pressure = pressureByTarget.get(target) ?? 0;
+    return pressure > ARMED_PRESSURE_BYTES && !keptObjects.has(target);
+  }
+
   function collectOldGeneration(): void {
     for (const ref of weakRefs) {
-      ref.target = undefined;
+      if (ref.target && isCollectible(ref.target)) {
+        ref.target = undefined;
+      }
     }
     stats.numGCs += 1;
   }
@@ -51,19 +81,32 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
     now: () => now,
     readNativeHeapBytes: () => nativeHeapBytes,
     setPressure: (target, bytes) => {
+      callLog.push(`pressure ${nameOf(target)} ${bytes}`);
       pressureCalls.push({ target, bytes });
+      pressureByTarget.set(target, bytes);
     },
     readStats: hasStats ? () => ({ ...stats }) : null,
     createWeakRef: hasWeakRef
       ? (target) => {
+          callLog.push(`weakRef ${nameOf(target)}`);
+          keptObjects.add(target);
           const ref: { target: object | undefined } = { target };
           weakRefs.push(ref);
-          const weakTarget: WeakTarget = { deref: () => ref.target };
+          const weakTarget: WeakTarget = {
+            deref: () => {
+              callLog.push(`deref ${nameOf(target)}`);
+              if (ref.target) {
+                keptObjects.add(ref.target);
+              }
+              return ref.target;
+            },
+          };
           return weakTarget;
         }
       : null,
     collectGarbage: hasGc
       ? () => {
+          callLog.push("gc");
           gcCalls.push(now);
           now += 150;
           collectOldGeneration();
@@ -74,6 +117,7 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
       : null,
     readLastInteractionAt: () => lastInteractionAt,
     log: (line) => {
+      callLog.push("log");
       logs.push(line);
     },
   };
@@ -81,13 +125,20 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
   return {
     ports,
     pressureCalls,
+    callLog,
     gcCalls,
     logs,
+    nameOf,
     get now() {
       return now;
     },
     advance(ms: number) {
       now += ms;
+    },
+    /** The timer task returns and microtasks drain, which clears the kept objects. */
+    endTask() {
+      keptObjects.clear();
+      callLog.push("end task");
     },
     setNativeHeapMb(mb: number) {
       nativeHeapBytes = mb * MB;
@@ -110,17 +161,30 @@ function createFakeRuntime(options: FakeRuntimeOptions = {}) {
 
 type FakeRuntime = ReturnType<typeof createFakeRuntime>;
 
+// Each poll is its own timer task.
+function tickTask(runtime: FakeRuntime, net: { tick(): void }): void {
+  net.tick();
+  runtime.endTask();
+}
+
 // One poll per simulated second, like the production interval.
 function runSeconds(runtime: FakeRuntime, net: { tick(): void }, seconds: number): void {
   for (let second = 0; second < seconds; second += 1) {
     runtime.advance(1000);
-    net.tick();
+    tickTask(runtime, net);
   }
+}
+
+/** The port calls made by the most recent task. */
+function lastTaskCalls(runtime: FakeRuntime): string[] {
+  const calls = runtime.callLog.slice(0, -1);
+  const previousEnd = calls.lastIndexOf("end task");
+  return calls.slice(previousEnd + 1);
 }
 
 function startedNet(runtime: FakeRuntime) {
   const net = createGcSafetyNet(runtime.ports);
-  net.tick();
+  tickTask(runtime, net);
   return net;
 }
 
@@ -168,10 +232,10 @@ describe("gc safety net balloon", () => {
     runSeconds(runtime, net, 1);
 
     expect(runtime.pressureCalls.slice(1)).toEqual([
-      { target: firstBalloon, bytes: 150 * MB },
       { target: expect.any(Object), bytes: 1 },
+      { target: firstBalloon, bytes: 150 * MB },
     ]);
-    expect(runtime.pressureCalls[2]?.target).not.toBe(firstBalloon);
+    expect(runtime.pressureCalls[1]?.target).not.toBe(firstBalloon);
     expect(net.readDiagnostics().events).toEqual([
       {
         kind: "trigger",
@@ -183,6 +247,28 @@ describe("gc safety net balloon", () => {
       },
     ]);
     expect(runtime.logs).toHaveLength(1);
+  });
+
+  test("a trigger applies pressure as its last call, after the new balloon and all bookkeeping", () => {
+    const runtime = createFakeRuntime();
+    const net = startedNet(runtime);
+    runtime.runYoungGc();
+    runtime.setNativeHeapMb(200 + 150);
+    runSeconds(runtime, net, 1);
+
+    expect(lastTaskCalls(runtime)).toEqual([
+      "weakRef balloon2",
+      "pressure balloon2 1",
+      "log",
+      `pressure balloon1 ${150 * MB}`,
+    ]);
+  });
+
+  test("the dropped balloon's WeakRef is created when it is armed, in an earlier task", () => {
+    const runtime = createFakeRuntime();
+    startedNet(runtime);
+
+    expect(lastTaskCalls(runtime)).toEqual(["weakRef balloon1", "pressure balloon1 1"]);
   });
 
   test("pressure is at least twice the JS heap and at most 1 GB", () => {
@@ -199,8 +285,8 @@ describe("gc safety net balloon", () => {
     large.setNativeHeapMb(200 + 1500);
     runSeconds(large, largeNet, 1);
 
-    expect(small.pressureCalls[1]?.bytes).toBe(160 * MB);
-    expect(large.pressureCalls[1]?.bytes).toBe(1024 * MB);
+    expect(small.pressureCalls[2]?.bytes).toBe(160 * MB);
+    expect(large.pressureCalls[2]?.bytes).toBe(1024 * MB);
   });
 });
 
@@ -353,12 +439,12 @@ describe("gc safety net fallback", () => {
     runtime.advance(600);
     runtime.interact();
     runtime.advance(400);
-    net.tick();
+    tickTask(runtime, net);
 
     expect(runtime.gcCalls).toEqual([]);
 
     runtime.advance(100);
-    net.tick();
+    tickTask(runtime, net);
 
     expect(runtime.gcCalls).toEqual([11_100]);
   });

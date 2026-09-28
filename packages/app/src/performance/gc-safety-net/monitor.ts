@@ -125,6 +125,8 @@ export type IntervalSchedule = (run: () => void, intervalMs: number) => () => vo
 
 interface Balloon {
   target: object;
+  // Created at arming, never in the trigger task: see arm().
+  ref: WeakTarget;
   armedAtNumGCs: number;
 }
 
@@ -189,10 +191,15 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     }
   }
 
-  function arm(stats: HermesGcStats): Balloon {
+  // Hermes keeps a WeakRef's target strongly reachable until the task that
+  // constructed it drains its microtasks (lib/VM/JSLib/WeakRef.cpp:78). A
+  // WeakRef built in the trigger task would root the balloon through the very
+  // collection its pressure starts, so the ref is built here, ticks earlier.
+  function arm(createRef: (target: object) => WeakTarget, stats: HermesGcStats): Balloon {
     const target = {};
+    const ref = createRef(target);
     ports.setPressure(target, ARMED_PRESSURE_BYTES);
-    return { target, armedAtNumGCs: stats.numGCs };
+    return { target, ref, armedAtNumGCs: stats.numGCs };
   }
 
   // A dropped balloon still holds its pressure until it is collected, so a
@@ -240,9 +247,8 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     const growth = heap - baseline;
     const heapScaled = PRESSURE_HEAP_MULTIPLIER * stats.heapSizeBytes;
     const pressureBytes = Math.min(Math.max(growth, heapScaled), MAX_PRESSURE_BYTES);
-    ports.setPressure(balloon.target, pressureBytes);
-    released = { ref: createRef(balloon.target), triggeredAt: at };
-    armed = arm(stats);
+    released = { ref: balloon.ref, triggeredAt: at };
+    armed = arm(createRef, stats);
     lastTriggerAt = at;
     record({
       kind: "trigger",
@@ -256,6 +262,16 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
       `[GcSafetyNet] trigger growth=${formatMb(growth)} pressure=${formatMb(pressureBytes)} ` +
         `nativeHeap=${formatMb(heap)} jsHeap=${formatMb(stats.heapSizeBytes)} numGCs=${stats.numGCs}`,
     );
+    // Pressure goes last. Once the credit puts the old generation over its
+    // target, HadesGC::creditExternalMemory moves the young-gen limit to the
+    // current level (lib/VM/gcs/HadesGC.cpp:1929-1933), so the next JS
+    // allocation runs a young collection that starts old-gen marking. Marking
+    // roots whatever is live at that moment, and a surviving balloon's pressure
+    // lands in the next target (HadesGC.cpp:1227-1236). Every allocation (the
+    // new balloon, its WeakRef, the event, the log line) happens above, and
+    // the callers return without allocating, so the only strong references
+    // left are this frame's, gone when the tick returns.
+    ports.setPressure(balloon.target, pressureBytes);
   }
 
   function tickBalloon(input: {
@@ -267,7 +283,7 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
   }): void {
     const { createRef, at, heap, baseline, stats } = input;
     if (armed === null) {
-      armed = arm(stats);
+      armed = arm(createRef, stats);
       return;
     }
     // A balloon that has survived a collection lives in the old generation,
@@ -275,6 +291,7 @@ export function createGcSafetyNet(ports: GcSafetyNetPorts): GcSafetyNet {
     const isRipe = stats.numGCs > armed.armedAtNumGCs;
     const growth = heap - baseline;
     if (growth > TRIGGER_GROWTH_BYTES && isRipe && canTrigger(at)) {
+      // Must stay the last statement: see the ordering note in trigger().
       trigger({ createRef, balloon: armed, at, heap, baseline, stats });
     }
   }
