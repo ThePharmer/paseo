@@ -1,6 +1,7 @@
 import "@/styles/unistyles";
 import { BottomSheetModalProvider } from "@gorhom/bottom-sheet";
 import { PortalProvider } from "@gorhom/portal";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Linking from "expo-linking";
 import * as Notifications from "expo-notifications";
 import { Stack, useNavigationContainerRef, usePathname, useRouter } from "expo-router";
@@ -11,7 +12,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -128,6 +128,7 @@ import {
   parseServerIdFromPathname,
 } from "@/utils/host-routes";
 import { buildNotificationRoute, resolveNotificationTarget } from "@/utils/notification-routing";
+import { createNotificationResponseReplayGuard } from "@/utils/notification-response-replay";
 import { navigateToAgent } from "@/utils/navigate-to-agent";
 import { PluginCatalogSync } from "@/plugins";
 import {
@@ -155,9 +156,13 @@ const HostRuntimeBootstrapContext = createContext<HostRuntimeBootstrapState>({
   startupBlocker: { kind: "none" },
 });
 
+const notificationResponseReplayGuard = createNotificationResponseReplayGuard({
+  storage: AsyncStorage,
+  clearLastResponse: () => Notifications.clearLastNotificationResponse(),
+});
+
 function PushNotificationRouter() {
   const router = useRouter();
-  const lastHandledIdRef = useRef<string | null>(null);
   const openNotification = useStableEvent((data: Record<string, unknown> | undefined) => {
     const target = resolveNotificationTarget(data);
     const serverId = target.serverId;
@@ -235,15 +240,16 @@ function PushNotificationRouter() {
 
     const openFromResponse = (response: Notifications.NotificationResponse) => {
       const identifier = response.notification.request.identifier;
-      if (lastHandledIdRef.current === identifier) {
+      void notificationResponseReplayGuard.claim(identifier).then((isNewResponse) => {
+        if (!isNewResponse) {
+          return;
+        }
+        const data = response.notification.request.content.data as
+          | Record<string, unknown>
+          | undefined;
+        openNotification(data);
         return;
-      }
-      lastHandledIdRef.current = identifier;
-
-      const data = response.notification.request.content.data as
-        | Record<string, unknown>
-        | undefined;
-      openNotification(data);
+      });
     };
 
     const subscription = Notifications.addNotificationResponseReceivedListener(openFromResponse);
