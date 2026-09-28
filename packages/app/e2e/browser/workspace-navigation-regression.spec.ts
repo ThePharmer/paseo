@@ -489,4 +489,102 @@ test.describe("Workspace navigation regression", () => {
       await firstWorkspace.cleanup();
     }
   });
+
+  // ThePharmer/paseo#11: a deferred ?open=agent intent must only land in its own workspace.
+  test("a deferred agent open never pins the agent into the workspace on screen", async ({
+    page,
+  }) => {
+    const serverId = getServerId();
+    const daemonGate = await installDaemonWebSocketGate(page);
+    const firstWorkspace = await seedWorkspace({ repoPrefix: "workspace-foreign-pin-a-" });
+    let secondWorkspace: Awaited<ReturnType<typeof seedWorkspace>> | null = null;
+
+    try {
+      const firstAgent = await createMockIdleAgent(firstWorkspace.client, {
+        cwd: firstWorkspace.repoPath,
+        workspaceId: firstWorkspace.workspaceId,
+        title: `workspace-foreign-pin-a-${Date.now()}`,
+      });
+
+      await gotoAppShell(page);
+      await waitForSidebarHydration(page);
+      await switchWorkspaceViaSidebar({
+        page,
+        serverId,
+        workspaceId: firstWorkspace.workspaceId,
+      });
+      await waitForWorkspaceTabsVisible(page);
+      await expectOnlyWorkspaceAgentTabsVisible(page, [firstAgent.id]);
+
+      // Keep the second workspace out of the client's directory so opening its
+      // agent defers through ?open while the first workspace is on screen.
+      daemonGate.setServerMessageSuppressed("workspace_update", true);
+      daemonGate.setServerMessageSuppressed("agent_update", true);
+      secondWorkspace = await seedWorkspace({ repoPrefix: "workspace-foreign-pin-b-" });
+      const secondAgent = await createMockIdleAgent(secondWorkspace.client, {
+        cwd: secondWorkspace.repoPath,
+        workspaceId: secondWorkspace.workspaceId,
+        title: `workspace-foreign-pin-b-${Date.now()}`,
+      });
+
+      await page.evaluate(
+        ({ agentId, serverId: targetServerId, workspaceId }) => {
+          globalThis.dispatchEvent(
+            new CustomEvent("paseo:web-notification-click", {
+              detail: {
+                data: { serverId: targetServerId, workspaceId, agentId, reason: "finished" },
+              },
+              cancelable: true,
+            }),
+          );
+        },
+        { agentId: secondAgent.id, serverId, workspaceId: secondWorkspace.workspaceId },
+      );
+      await expectAppRoute(
+        page,
+        buildHostWorkspaceOpenRoute(
+          serverId,
+          secondWorkspace.workspaceId,
+          `agent:${secondAgent.id}`,
+        ),
+        { timeout: 30_000 },
+      );
+
+      // Reconnect so the directory bootstrap delivers the second workspace.
+      daemonGate.setServerMessageSuppressed("workspace_update", false);
+      daemonGate.setServerMessageSuppressed("agent_update", false);
+      await daemonGate.drop();
+      await daemonGate.waitForBlockedConnection();
+      daemonGate.restore();
+      await waitForWorkspaceInSidebar(page, {
+        serverId,
+        workspaceId: secondWorkspace.workspaceId,
+      });
+      await expect(page).toHaveURL(buildHostWorkspaceRoute(serverId, secondWorkspace.workspaceId), {
+        timeout: 60_000,
+      });
+      await waitForWorkspaceTabsVisible(page);
+      await expectWorkspaceTabVisible(page, secondAgent.id);
+
+      await switchWorkspaceViaSidebar({
+        page,
+        serverId,
+        workspaceId: firstWorkspace.workspaceId,
+      });
+      await waitForWorkspaceTabsVisible(page);
+      await expectOnlyWorkspaceAgentTabsVisible(page, [firstAgent.id]);
+
+      await page.reload();
+      await waitForSidebarHydration(page);
+      await waitForWorkspaceTabsVisible(page);
+      await expect(page).toHaveURL(buildHostWorkspaceRoute(serverId, firstWorkspace.workspaceId), {
+        timeout: 30_000,
+      });
+      await expectOnlyWorkspaceAgentTabsVisible(page, [firstAgent.id]);
+    } finally {
+      daemonGate.restore();
+      await secondWorkspace?.cleanup();
+      await firstWorkspace.cleanup();
+    }
+  });
 });
