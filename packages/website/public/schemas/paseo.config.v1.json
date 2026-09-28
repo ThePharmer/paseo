@@ -92,6 +92,10 @@
             "enableTerminalAgentHooks": {
               "type": "boolean"
             },
+            "assistantTextDelivery": {
+              "type": "string",
+              "enum": ["token", "paragraph"]
+            },
             "appendSystemPrompt": {
               "type": "string"
             },

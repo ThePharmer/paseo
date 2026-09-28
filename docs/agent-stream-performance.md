@@ -8,7 +8,8 @@ For terminal output, which is a separate pipeline with separate budgets, see [te
 
 ```
 provider deltas (every provider streams incrementally)
-  → AgentStreamCoalescer (daemon, leading + trailing, ≤1 message per 60ms per agent)
+  → AgentStreamCoalescer (daemon, leading + trailing, ≤1 message per 60ms per agent;
+                          paragraph delivery holds assistant text until a block is finished)
   → recordTimeline: one canonical row per flushed item
   → agent_stream ws message
   → reducer queue (app, one commit per frame) → session store
@@ -17,6 +18,22 @@ provider deltas (every provider streams incrementally)
 ```
 
 Every provider delivers incremental text, so there is no provider that needs special handling: Claude via `includePartialMessages`, Codex via `agent_message_delta`, ACP agents via `agent_message_chunk`, Pi and OMP via `text_delta`.
+
+## Assistant text delivery
+
+`daemon.assistantTextDelivery` (env `PASEO_ASSISTANT_TEXT_DELIVERY`) picks what the coalescer does with assistant text. It is read at startup and applies to every client; the wire format does not change, clients just receive fewer, larger `assistant_message` chunks. User-facing docs are in `public-docs/configuration.md`.
+
+- **`token`** (default) flushes whatever arrived in each 60ms window.
+- **`paragraph`** holds the unfinished tail of the current message and releases up to the last boundary: a blank line outside a fenced code block, or a closing fence. Only complete lines count, so a half-written fence marker never creates a boundary. Fences opened after list or blockquote markers (`- ```ts`, `> ~~~`) count. A closer strips only its opener's blockquote depth, never list markers, so `- ```` inside a code block stays code. The scanner does not track container nesting, so it errs toward reading an indented line as a fence, which only holds text longer. It is a single cursor pass per line, including the trailing-whitespace trim, and runs synchronously on the daemon's event loop: a regex over repeated container prefixes is exponential on lines like `> > > … x`, and an unanchored `/[ \t\r]+$/`is quadratic on a long space run. Keep regexes out of this scanner;`markdown-paragraph-boundary.test.ts` guards the cost.
+
+It exists for React Native Fabric on Android. Every commit of a growing message leaves a stale shadow-node revision holding the whole message's attributed text, one fragment per syntax token, until Hermes collects it. A long chat streaming at one commit per arrival runs the app out of native memory; fewer, larger commits cut that. t3code's `responseStreamingMode` does the same server-side.
+
+Paragraph delivery rules, all in `agent-stream-coalescer.ts`:
+
+- Releases of one message are at least `PARAGRAPH_DELIVERY_MIN_INTERVAL_MS` (400ms) apart. Paragraphs finished inside the interval wait on a timer and land together. The first release of a new message is immediate. Time alone never releases a partial paragraph.
+- Held text past `PARAGRAPH_DELIVERY_MAX_HELD_CHARS` (24 KB) is released at its last complete line, pacing or not. If that cut is inside a fence, the open fence carries over, so the rest of the block still waits for its closing fence.
+- Anything else for the agent releases all held text first: a tool call, reasoning, another message, and every event the coalescer does not own (turn completed, failed, or canceled, permission requests, user messages). Interrupt, steer admission, out-of-band command replies, `appendTimelineItem`, agent close, and shutdown flush too. `usage_updated`, `thread_started`, and mode, model, or thinking-option changes have no timeline position, so a partial paragraph stays held across them; usage updates arrive many times per message.
+- Reasoning shares the buffer but is never held: it stays on the 60ms window.
 
 ## Why the reveal is paced
 
