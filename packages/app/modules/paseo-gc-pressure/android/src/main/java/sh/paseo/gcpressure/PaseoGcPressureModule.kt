@@ -21,9 +21,20 @@ class PaseoGcPressureModule : Module() {
     // Sync functions run on the JS thread, which setExternalMemoryPressure
     // requires. Hermes replaces the object's previous amount and debits it
     // when the object is collected.
+    //
+    // Expo converts the argument into a C++ JavaScriptObject that owns a
+    // shared_ptr<jsi::Object>, which Hermes treats as a GC root. callJNISync
+    // only drops the JNI local ref, so without deallocate() that root lives
+    // until Java finalizes the wrapper, the balloon survives every collection
+    // (even global.gc()), and its pressure inflates the next old-generation
+    // target. Release it on every call, including arming calls.
     Function("setPressure") { target: JavaScriptObject, bytes: Double ->
-      val clamped = if (bytes.isNaN()) 0.0 else bytes.coerceIn(0.0, MAX_PRESSURE_BYTES)
-      target.setExternalMemoryPressure(clamped.toInt())
+      try {
+        val clamped = if (bytes.isNaN()) 0.0 else bytes.coerceIn(0.0, MAX_PRESSURE_BYTES)
+        target.setExternalMemoryPressure(clamped.toInt())
+      } finally {
+        target.deallocate()
+      }
     }
   }
 }
