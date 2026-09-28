@@ -40,6 +40,11 @@ on:
         required: false
         default: true
         type: boolean
+      profileable:
+        description: "Mark the APK profileable (PASEO_PROFILE_BUILD=1) for Perfetto/heapprofd. Use with publish off"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   # Test builds use their own group so a queued schedule run cannot cancel a pending test dispatch.
@@ -57,8 +62,8 @@ env:
   # branch, rebased onto the upstream tag it targets. Only this one commit is
   # cherry-picked, so when the feature branch gains commits or the upstream tag
   # moves, re-squash the branch onto the new tag and re-point both values here.
-  FEATURE_COMMIT: ca285a42aec671882c68eff6f320dd077042000b
-  FEATURE_BRANCH: release/native-headers-v0.9.2
+  FEATURE_COMMIT: efb96b539df9e91928518a685c45c48576e638e4
+  FEATURE_BRANCH: release/native-headers-v0.10.0
   # Fork-only fixes cherry-picked after the feature, in order, until upstream
   # ships them. One "<sha> <branch> <upstream PR>" per line; the branch is
   # fetched so the sha is reachable. A sha already in the tag is skipped.
@@ -489,6 +494,7 @@ jobs:
       - name: Prebuild and assemble the release APK
         env:
           APP_VARIANT: production
+          PASEO_PROFILE_BUILD: ${{ inputs.profileable && '1' || '' }}
           ABIS: ${{ needs.resolve.outputs.abis }}
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
           PUSH_MODE: ${{ steps.push.outputs.mode }}
