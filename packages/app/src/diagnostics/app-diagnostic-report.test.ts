@@ -73,6 +73,7 @@ describe("app diagnostics report", () => {
       connectionStatus: "online",
       client: null,
       lastError: null,
+      hasFailedConnectAttempt: false,
       lastOnlineAt: "2026-06-25T00:00:00.000Z",
       agentDirectoryStatus: "ready",
       agentDirectoryError: null,
