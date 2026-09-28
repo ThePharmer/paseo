@@ -932,6 +932,56 @@ describe("HostRuntimeController", () => {
     expect(controller.getSnapshot().client).toBe(activeClient as unknown as DaemonClient);
   });
 
+  it("reports a failed connect attempt only after an attempt ends without reaching online", async () => {
+    const relay: HostConnection = {
+      id: "relay:relay.paseo.sh:443",
+      type: "relay",
+      relayEndpoint: "relay.paseo.sh:443",
+      daemonPublicKeyB64: "pk_test",
+    };
+    const host = makeHost({ connections: [relay], preferredConnectionId: relay.id });
+    const activeClient = new FakeDaemonClient();
+    activeClient.setConnectionState({ status: "connected" });
+    const controller = new HostRuntimeController({
+      host,
+      deps: {
+        createClient: () => {
+          throw new Error("the existing client owns the selected connection");
+        },
+        connectToDaemon: async () => {
+          throw new Error("no probes expected");
+        },
+        getClientId: async () => "cid_test_runtime",
+      },
+    });
+    await controller.start({
+      autoProbe: false,
+      initialConnection: {
+        connectionId: relay.id,
+        existingClient: activeClient as unknown as DaemonClient,
+      },
+    });
+    const observe = () => {
+      const snapshot = controller.getSnapshot();
+      return {
+        status: snapshot.connectionStatus,
+        hasFailedConnectAttempt: snapshot.hasFailedConnectAttempt,
+      };
+    };
+
+    expect(observe()).toEqual({ status: "online", hasFailedConnectAttempt: false });
+    activeClient.setConnectionState({ status: "disconnected", reason: "network lost" });
+    expect(observe()).toEqual({ status: "error", hasFailedConnectAttempt: false });
+    activeClient.setConnectionState({ status: "connecting", attempt: 1 });
+    expect(observe()).toEqual({ status: "connecting", hasFailedConnectAttempt: false });
+    activeClient.setConnectionState({ status: "disconnected", reason: "Connection timed out" });
+    expect(observe()).toEqual({ status: "error", hasFailedConnectAttempt: true });
+    activeClient.setConnectionState({ status: "connecting", attempt: 2 });
+    expect(observe()).toEqual({ status: "connecting", hasFailedConnectAttempt: true });
+    activeClient.setConnectionState({ status: "connected" });
+    expect(observe()).toEqual({ status: "online", hasFailedConnectAttempt: false });
+  });
+
   it("rejects probes that resolve to a different server id", async () => {
     const host = makeHost({
       serverId: "srv_old",
