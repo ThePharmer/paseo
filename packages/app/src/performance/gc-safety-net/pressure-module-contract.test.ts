@@ -42,4 +42,12 @@ describe("PaseoGcPressure.setPressure native contract", () => {
     expect(body.indexOf("finally")).toBeGreaterThan(body.indexOf("setExternalMemoryPressure"));
     expect(finallyBlock).toMatch(/^finally \{\s*target\.deallocate\(\)\s*\}/);
   });
+
+  test("declares the balloon token names index.android.ts calls", () => {
+    const source = readFileSync(MODULE_SOURCE_PATH, "utf8");
+
+    expect(source).toContain("Class(GcBalloonToken::class)");
+    expect(source).toMatch(/Constructor \{ balloonId: Int ->/);
+    expect(source).toContain('Function("takeFinalizedBalloonTokenIds")');
+  });
 });

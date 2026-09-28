@@ -9,6 +9,7 @@ import {
 import {
   GC_SAFETY_NET_ENABLED,
   runGcSafetyNet,
+  type GcBalloonPorts,
   type GcSafetyNetDiagnostics,
   type GcSafetyNetHandle,
   type GcSafetyNetPorts,
@@ -18,6 +19,9 @@ import {
 interface PaseoGcPressureModule {
   nativeHeapBytes(): number;
   setPressure(target: object, bytes: number): void;
+  // Missing on an APK built before the balloon token existed.
+  GcBalloonToken?: new (id: number) => object;
+  takeFinalizedBalloonTokenIds?: () => number[];
 }
 
 // Null on an APK built before the module existed.
@@ -27,11 +31,26 @@ export { markInteraction, markScrollInteraction } from "./interaction";
 
 let current: GcSafetyNetHandle | null = null;
 
+// The balloon is a plain object holding the token, never the token itself:
+// Expo's class constructor keeps a strong wrapper around the object it
+// constructs until Java finalizes that wrapper, which would root a balloon.
+function createBalloonPorts(gcPressure: PaseoGcPressureModule): GcBalloonPorts | null {
+  const { GcBalloonToken, takeFinalizedBalloonTokenIds } = gcPressure;
+  if (!GcBalloonToken || !takeFinalizedBalloonTokenIds) {
+    return null;
+  }
+  return {
+    create: (id) => ({ token: new GcBalloonToken(id) }),
+    takeFinalizedIds: () => takeFinalizedBalloonTokenIds.call(gcPressure),
+  };
+}
+
 function createPorts(gcPressure: PaseoGcPressureModule): GcSafetyNetPorts {
   return {
     now: () => performance.now(),
     readNativeHeapBytes: () => gcPressure.nativeHeapBytes(),
     setPressure: (target, bytes) => gcPressure.setPressure(target, bytes),
+    balloons: createBalloonPorts(gcPressure),
     ...resolveHermesGcTools(globalThis),
     readLastInteractionAt: () => readLastInteractionAt(performance.now()),
     log: (line) => console.info(line),

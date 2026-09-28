@@ -62,7 +62,7 @@ describe("resolveHermesGcTools", () => {
     expect(resolveHermesGcTools(runtimeGlobal).readStats).toBeNull();
   });
 
-  test("treats stats without js_externalBytes as missing, since the balloon detects collection from it", () => {
+  test("treats stats without js_externalBytes as missing", () => {
     const { js_externalBytes: _omitted, ...withoutExternal } = HERMES_STATS;
     const { runtimeGlobal } = createHermesGlobal(withoutExternal);
 
