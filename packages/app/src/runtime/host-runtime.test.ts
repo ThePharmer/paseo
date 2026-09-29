@@ -1022,6 +1022,69 @@ describe("HostRuntimeController", () => {
     expect(observe()).toEqual({ status: "online", hasFailedConnectAttempt: false });
   });
 
+  it("does not report connect attempts the app was hidden for as failed", async () => {
+    const relay: HostConnection = {
+      id: "relay:relay.paseo.sh:443",
+      type: "relay",
+      relayEndpoint: "relay.paseo.sh:443",
+      daemonPublicKeyB64: "pk_test",
+    };
+    const host = makeHost({ connections: [relay], preferredConnectionId: relay.id });
+    const activeClient = new FakeDaemonClient();
+    activeClient.setConnectionState({ status: "connected" });
+    const controller = new HostRuntimeController({
+      host,
+      deps: {
+        createClient: () => {
+          throw new Error("the existing client owns the selected connection");
+        },
+        connectToDaemon: async () => {
+          throw new Error("no probes expected");
+        },
+        getClientId: async () => "cid_test_runtime",
+      },
+    });
+    await controller.start({
+      autoProbe: false,
+      initialConnection: {
+        connectionId: relay.id,
+        existingClient: activeClient as unknown as DaemonClient,
+      },
+    });
+    const hasFailedConnectAttempt = () => controller.getSnapshot().hasFailedConnectAttempt;
+    const failAttempt = (attempt: number) => {
+      activeClient.setConnectionState({ status: "connecting", attempt });
+      activeClient.setConnectionState({ status: "disconnected", reason: "Connection timed out" });
+    };
+
+    controller.setAppVisible(false);
+    activeClient.setConnectionState({ status: "disconnected", reason: "network lost" });
+    failAttempt(1);
+    failAttempt(2);
+    expect(hasFailedConnectAttempt()).toBe(false);
+
+    // An attempt started in the background that fails after the return, as when the OS thaws a
+    // frozen app and delivers the close of its cut-off attempt.
+    activeClient.setConnectionState({ status: "connecting", attempt: 3 });
+    controller.setAppVisible(true);
+    activeClient.setConnectionState({ status: "disconnected", reason: "Connection timed out" });
+    expect(hasFailedConnectAttempt()).toBe(false);
+
+    // An attempt started in view that the app is hidden during.
+    activeClient.setConnectionState({ status: "connecting", attempt: 4 });
+    controller.setAppVisible(false);
+    controller.setAppVisible(true);
+    activeClient.setConnectionState({ status: "disconnected", reason: "Connection timed out" });
+    expect(hasFailedConnectAttempt()).toBe(false);
+
+    failAttempt(5);
+    expect(hasFailedConnectAttempt()).toBe(true);
+    controller.setAppVisible(false);
+    expect(hasFailedConnectAttempt()).toBe(true);
+    activeClient.setConnectionState({ status: "connected" });
+    expect(hasFailedConnectAttempt()).toBe(false);
+  });
+
   it("rejects probes that resolve to a different server id", async () => {
     const host = makeHost({
       serverId: "srv_old",
@@ -1802,6 +1865,88 @@ describe("HostRuntimeStore", () => {
     changeAppState("active");
     expect(client.connectionVerifications).toBe(verificationsAtStart + 1);
     expect(client.connectionReplacements).toEqual(["App resumed after a long background"]);
+
+    unbind();
+    store.syncHosts([]);
+  });
+
+  it("tells hosts, including ones added in the background, when the app is hidden", async () => {
+    const relay = (suffix: string): HostConnection => ({
+      id: `relay:relay-${suffix}.paseo.sh:443`,
+      type: "relay",
+      relayEndpoint: `relay-${suffix}.paseo.sh:443`,
+      daemonPublicKeyB64: `pk_${suffix}`,
+    });
+    const hostAConnection = relay("a");
+    const hostBConnection = relay("b");
+    const hostA = makeHost({
+      serverId: "srv_a",
+      connections: [hostAConnection],
+      preferredConnectionId: hostAConnection.id,
+    });
+    const hostB = makeHost({
+      serverId: "srv_b",
+      connections: [hostBConnection],
+      preferredConnectionId: hostBConnection.id,
+    });
+    const clientA = new FakeDaemonClient();
+    const clientB = new FakeDaemonClient();
+    clientA.setConnectionState({ status: "connected" });
+    clientB.setConnectionState({ status: "connected" });
+    const store = new HostRuntimeStore({
+      storage: createMemoryHostRuntimeStorage(),
+      deps: {
+        createClient: () => {
+          throw new Error("initial clients are supplied");
+        },
+        connectToDaemon: async () => {
+          throw new Error("single-connection hosts reuse their active clients");
+        },
+        getClientId: async () => "cid_test_runtime",
+      },
+    });
+    let changeAppState: (state: AppStateStatus) => void = () => {
+      throw new Error("AppState listener not registered");
+    };
+    const unbind = bindHostRuntimeAppState(store, {
+      currentState: "active",
+      addEventListener: (_event, listener) => {
+        changeAppState = listener;
+        return { remove: () => {} };
+      },
+    });
+    const initialConnection = (hostConnection: HostConnection, client: FakeDaemonClient) => ({
+      connectionId: hostConnection.id,
+      existingClient: client as unknown as DaemonClient,
+    });
+    store.syncHosts([hostA], {
+      initialConnectionByServerId: new Map([
+        [hostA.serverId, initialConnection(hostAConnection, clientA)],
+      ]),
+    });
+    await waitForHostOnline(store, hostA.serverId);
+    changeAppState("background");
+    store.syncHosts([hostA, hostB], {
+      initialConnectionByServerId: new Map([
+        [hostB.serverId, initialConnection(hostBConnection, clientB)],
+      ]),
+    });
+    await waitForHostOnline(store, hostB.serverId);
+
+    for (const client of [clientA, clientB]) {
+      client.setConnectionState({ status: "disconnected", reason: "network lost" });
+      client.setConnectionState({ status: "connecting", attempt: 1 });
+      client.setConnectionState({ status: "disconnected", reason: "Connection timed out" });
+    }
+    const observe = (serverId: string) => {
+      const snapshot = store.getSnapshot(serverId);
+      return {
+        status: snapshot?.connectionStatus,
+        hasFailedConnectAttempt: snapshot?.hasFailedConnectAttempt,
+      };
+    };
+    expect(observe(hostA.serverId)).toEqual({ status: "error", hasFailedConnectAttempt: false });
+    expect(observe(hostB.serverId)).toEqual({ status: "error", hasFailedConnectAttempt: false });
 
     unbind();
     store.syncHosts([]);

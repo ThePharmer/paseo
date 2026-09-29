@@ -96,10 +96,15 @@ step, so there is nothing left to announce.
 
 The notice is delayed in `packages/app/src/timeline/sync-status-timing.ts`. Updating messages shows
 after 400 ms and Reconnecting to host after 1 s, both counted from when the chat stopped being
-current, so a reconnect followed by a catch-up cannot hide behind two fresh delays. A shown notice
-stays at least 400 ms. A host whose connect attempt already failed, or that has nothing to connect
-to, shows Reconnecting at once; a dropped socket alone does not count, because the first retry
-usually succeeds. Timing is keyed per chat, so a pane switch never inherits another chat's timer.
+current, so a reconnect followed by a catch-up cannot hide behind two fresh delays. Only visible
+time counts: nothing new shows while the app is hidden, and returning restarts the delay for a chat
+that is still behind. Android usually kills the socket while the app is in the background, so most
+returns are real reconnects, and a delay that ran while hidden had always expired by the time the
+user looked. A notice already on screen when the app left stays up. A shown notice stays at least
+400 ms. A host whose connect attempt already failed, or that has nothing to connect to, shows
+Reconnecting at once. A dropped socket alone does not count, because the first retry usually
+succeeds, and neither does an attempt the app was hidden for at any point, because the OS may have
+cut it off. Timing is keyed per chat, so a pane switch never inherits another chat's timer.
 
 The draft-create handoff has the same lifetime: the viewed-timeline owner releases it when the sync
 stops owing that chat a catch-up, not when the first authoritative page lands. Releasing it at the
