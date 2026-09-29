@@ -118,9 +118,12 @@ After less than 10 seconds hidden, a nominally connected session gets a three-se
 response keeps the socket and a failure reconnects. After 10 seconds or more the socket is replaced at
 once, because the operating system has usually suspended it and the probe would spend its full three
 seconds finding that out (measured on Android: 4.1 s to a synchronized chat through the probe, 1 s
-for a known disconnect). Web `visibilitychange` and native `AppState` reach this through the same
-react-native-web `AppState` path, so a hidden browser tab also reconnects after 10 seconds even though
-its socket usually survives. Hidden time uses the wall clock because a monotonic clock can stop while
+for a known disconnect). The OS often delivers the close of a socket it killed in the background a
+moment after the return, when the check has already found the session connected. A drop noticed
+within 5 seconds of the return therefore retries at once. Only that first retry skips the backoff,
+so a host that stays down does not get a burst of attempts. Web `visibilitychange` and native
+`AppState` reach this through the same react-native-web `AppState` path, so a hidden browser tab
+also reconnects after 10 seconds even though its socket usually survives. Hidden time uses the wall clock because a monotonic clock can stop while
 the device sleeps.
 
 - The same epoch and `window.maxSeq` is an exact display no-op. The app advances synchronization

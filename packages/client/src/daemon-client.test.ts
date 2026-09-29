@@ -2666,6 +2666,118 @@ test("an obsolete foreground probe cannot close a replacement connection", async
   expect(second.closesFromClient()).toEqual([]);
 });
 
+function createResumingClient(input: { clientId: string; daemons: FakeDaemon[] }): {
+  client: DaemonClient;
+  attempts: () => number;
+} {
+  let attempts = 0;
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId: input.clientId,
+    logger: noopLogger,
+    transportFactory: () => {
+      const daemon = input.daemons[attempts];
+      if (!daemon) throw new Error(`no daemon for connect attempt ${attempts + 1}`);
+      attempts += 1;
+      return daemon.transport;
+    },
+  });
+  clients.push(client);
+  return { client, attempts: () => attempts };
+}
+
+test("a drop noticed just after the return reconnects at once, then backs off normally", async () => {
+  useHeartbeatClock();
+  const daemons = [new FakeDaemon(), new FakeDaemon(), new FakeDaemon()];
+  daemons[0].daemonGoesSilent();
+  const { client, attempts } = createResumingClient({ clientId: "resume-drop", daemons });
+  const connection = client.connect();
+  daemons[0].openConnection();
+  await connection;
+
+  client.ensureConnected({ verify: true });
+  await vi.advanceTimersByTimeAsync(1_000);
+  daemons[0].daemonClosesWith("Software caused connection abort");
+  await vi.advanceTimersByTimeAsync(0);
+  expect(attempts()).toBe(2);
+
+  daemons[1].daemonClosesWith("Network is unreachable");
+  await vi.advanceTimersByTimeAsync(2_999);
+  expect(attempts()).toBe(2);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(attempts()).toBe(3);
+  daemons[2].openConnection();
+  expect(client.getConnectionState()).toEqual({ status: "connected" });
+});
+
+test("a drop long after the return waits out the backoff", async () => {
+  useHeartbeatClock();
+  const daemons = [new FakeDaemon(), new FakeDaemon()];
+  const { client, attempts } = createResumingClient({ clientId: "resume-late-drop", daemons });
+  const connection = client.connect();
+  daemons[0].openConnection();
+  await connection;
+
+  client.ensureConnected({ verify: true });
+  await vi.advanceTimersByTimeAsync(30_000);
+  daemons[0].daemonClosesWith("network changed");
+  await vi.advanceTimersByTimeAsync(1_499);
+  expect(attempts()).toBe(1);
+  await vi.advanceTimersByTimeAsync(1);
+  expect(attempts()).toBe(2);
+});
+
+test.each([
+  {
+    resume: "a foreground check",
+    resumeClient: (client: DaemonClient) => client.ensureConnected({ verify: true }),
+  },
+  {
+    resume: "a replacement",
+    resumeClient: (client: DaemonClient) =>
+      client.replaceConnection("App resumed after a long background"),
+  },
+])(
+  "an attempt already in flight at $resume retries at once when it fails",
+  async ({ resumeClient }) => {
+    useHeartbeatClock();
+    const daemons = [new FakeDaemon(), new FakeDaemon(), new FakeDaemon()];
+    const { client, attempts } = createResumingClient({ clientId: "resume-in-flight", daemons });
+    const connection = client.connect();
+    daemons[0].openConnection();
+    await connection;
+    daemons[0].daemonClosesWith("network lost");
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(client.getConnectionState()).toEqual({ status: "connecting", attempt: 1 });
+
+    resumeClient(client);
+    expect(attempts()).toBe(2);
+    daemons[1].daemonClosesWith("Software caused connection abort");
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(attempts()).toBe(3);
+  },
+);
+
+test("a return to a known drop connects at once and then backs off normally", async () => {
+  useHeartbeatClock();
+  const daemons = [new FakeDaemon(), new FakeDaemon(), new FakeDaemon()];
+  const { client, attempts } = createResumingClient({ clientId: "resume-known-drop", daemons });
+  const connection = client.connect();
+  daemons[0].openConnection();
+  await connection;
+  daemons[0].daemonClosesWith("network lost");
+
+  client.ensureConnected({ verify: true });
+  expect(attempts()).toBe(2);
+  daemons[1].daemonClosesWith("Network is unreachable");
+  await vi.advanceTimersByTimeAsync(2_999);
+  expect(attempts()).toBe(2);
+  await vi.advanceTimersByTimeAsync(1);
+
+  expect(attempts()).toBe(3);
+});
+
 test("stays online through ten minutes of pongs that arrive five seconds late", async () => {
   useHeartbeatClock();
   const session = new DaemonClientSession();
