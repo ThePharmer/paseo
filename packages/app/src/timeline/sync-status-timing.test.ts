@@ -9,9 +9,10 @@ import {
   type SyncNoticeSignal,
 } from "./sync-status-timing";
 
-const updating: SyncNoticeSignal = { notice: "updating", immediate: false };
-const reconnecting: SyncNoticeSignal = { notice: "reconnecting", immediate: false };
-const hostUnreachable: SyncNoticeSignal = { notice: "reconnecting", immediate: true };
+const updating: SyncNoticeSignal = { notice: "updating", timing: "delayed" };
+const reconnecting: SyncNoticeSignal = { notice: "reconnecting", timing: "delayed" };
+const hostUnreachable: SyncNoticeSignal = { notice: "reconnecting", timing: "immediate" };
+const verifying: SyncNoticeSignal = { notice: "updating", timing: "quiet" };
 
 const ONE_HOUR_MS = 60 * 60 * 1_000;
 const clockJumps = [
@@ -178,6 +179,34 @@ test("switching panes cancels a pending show for the previous pane", () => {
   clock.advance(5_000);
 
   expect(clock.shown).toEqual([]);
+});
+
+test("a quiet catch-up shows nothing, and one that surfaces waits the full delay", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(RECONNECTING_SHOW_DELAY_MS - 100);
+  clock.notice.update("agent-a", verifying);
+  clock.advance(5_000);
+  expect(clock.shown).toEqual([]);
+  clock.notice.update("agent-a", updating);
+  clock.advance(UPDATING_SHOW_DELAY_MS - 1);
+  expect(clock.shown).toEqual([]);
+  clock.advance(1);
+
+  expect(clock.shown).toEqual(["updating"]);
+});
+
+test("a quiet catch-up keeps a notice already on screen up as updating", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(RECONNECTING_SHOW_DELAY_MS + NOTICE_MIN_VISIBLE_MS);
+  clock.notice.update("agent-a", verifying);
+  expect(clock.current()).toBe("updating");
+  clock.advance(5_000);
+  expect(clock.current()).toBe("updating");
+  clock.notice.update("agent-a", null);
+
+  expect(clock.shown).toEqual(["reconnecting", "updating", null]);
 });
 
 test("time in the background does not count toward the show delay", () => {

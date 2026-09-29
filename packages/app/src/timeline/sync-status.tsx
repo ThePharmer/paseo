@@ -19,10 +19,13 @@ const keepUntilSynchronized = () => {};
 
 function toSyncNoticeSignal(sync: AgentScreenReadySyncState | null): SyncNoticeSignal | null {
   if (sync?.status === "reconnecting") {
-    return { notice: "reconnecting", immediate: sync.hasFailedAttempt };
+    return { notice: "reconnecting", timing: sync.hasFailedAttempt ? "immediate" : "delayed" };
+  }
+  if (sync?.status === "verifying") {
+    return { notice: "updating", timing: "quiet" };
   }
   if (sync?.status === "catching_up" && sync.ui === "status") {
-    return { notice: "updating", immediate: false };
+    return { notice: "updating", timing: "delayed" };
   }
   return null;
 }
@@ -34,13 +37,13 @@ function useDelayedSyncNotice(key: string, signal: SyncNoticeSignal | null): Syn
   );
   const isAppVisible = useAppVisible();
   const notice = signal?.notice ?? null;
-  const immediate = signal?.immediate ?? false;
+  const timing = signal?.timing ?? "delayed";
   useEffect(() => {
     delayedNotice.setVisible(isAppVisible);
   }, [delayedNotice, isAppVisible]);
   useEffect(() => {
-    delayedNotice.update(key, notice ? { notice, immediate } : null);
-  }, [delayedNotice, key, notice, immediate]);
+    delayedNotice.update(key, notice ? { notice, timing } : null);
+  }, [delayedNotice, key, notice, timing]);
   useEffect(() => () => delayedNotice.dispose(), [delayedNotice]);
   return shown;
 }

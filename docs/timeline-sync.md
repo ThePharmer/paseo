@@ -86,25 +86,31 @@ displayed conversation is current, so the timeline owner publishes freshness and
 Reconnecting to host while the host is offline, then Updating messages until authoritative catch-up
 completes.
 
-Returning to the foreground on a connection that never dropped is the exception. A chat that was
-current when the app left becomes `verifying`, not `pending`, and its catch-up runs without a notice.
-It becomes `pending` when a page reports newer history, when the catch-up runs past
-`QUIET_VERIFICATION_LIMIT_MS`, or when the connection drops, and it reports a sync error if the
-catch-up fails. Marking every visible chat pending showed Updating messages on every return, although
-a healthy resume usually changes nothing. A single page that brings new rows lands and settles in one
-step, so there is nothing left to announce.
+A chat that was current before the interruption is the exception, whether the app returned to the
+foreground on a connection that never dropped or the connection came back after dropping. The chat
+becomes `verifying`, not `pending`, and its catch-up runs without a notice. It becomes `pending`
+when a page reports newer history, when the catch-up runs past `QUIET_VERIFICATION_LIMIT_MS`, or
+when the connection drops, and it reports a sync error if the catch-up fails. Marking every visible
+chat pending showed Updating messages on every return and after every reconnect, although most
+change nothing. A single page that brings new rows lands and settles in one step, so there is
+nothing left to announce. After a reconnect the limit counts from when the connection came back, so
+it covers the subscription as well as the fetch, and the history resync that every reconnect
+requests (`needsAuthoritativeSync` in the agent screen) stays quiet while the chat is `verifying`.
 
 The notice is delayed in `packages/app/src/timeline/sync-status-timing.ts`. Updating messages shows
 after 400 ms and Reconnecting to host after 1 s, both counted from when the chat stopped being
-current, so a reconnect followed by a catch-up cannot hide behind two fresh delays. Only visible
-time counts: nothing new shows while the app is hidden, and returning restarts the delay for a chat
-that is still behind. Android usually kills the socket while the app is in the background, so most
-returns are real reconnects, and a delay that ran while hidden had always expired by the time the
-user looked. A notice already on screen when the app left stays up. A shown notice stays at least
-400 ms. A host whose connect attempt already failed, or that has nothing to connect to, shows
-Reconnecting at once. A dropped socket alone does not count, because the first retry usually
-succeeds, and neither does an attempt the app was hidden for at any point, because the OS may have
-cut it off. Timing is keyed per chat, so a pane switch never inherits another chat's timer.
+current, so a reconnect followed by a catch-up cannot hide behind two fresh delays. A `verifying`
+chat counts as current: its clock starts when the verification surfaces. If a notice is already on
+screen when a quiet catch-up starts, it stays up as Updating messages until the chat settles, so
+Reconnecting to host never gives way to a chat that only looks current. Only visible time counts:
+nothing new shows while the app is hidden, and returning restarts the delay for a chat that is still
+behind. Android usually kills the socket while the app is in the background, so most returns are
+real reconnects, and a delay that ran while hidden had always expired by the time the user looked. A
+notice already on screen when the app left stays up. A shown notice stays at least 400 ms. A host
+whose connect attempt already failed, or that has nothing to connect to, shows Reconnecting at once.
+A dropped socket alone does not count, because the first retry usually succeeds, and neither does an
+attempt the app was hidden for at any point, because the OS may have cut it off. Timing is keyed per
+chat, so a pane switch never inherits another chat's timer.
 
 The draft-create handoff has the same lifetime: the viewed-timeline owner releases it when the sync
 stops owing that chat a catch-up, not when the first authoritative page lands. Releasing it at the

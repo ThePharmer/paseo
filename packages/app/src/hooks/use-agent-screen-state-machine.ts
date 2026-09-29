@@ -81,6 +81,8 @@ export interface AgentScreenMachineMemory {
 export type AgentScreenReadySyncState =
   | { status: "idle" }
   | { status: "reconnecting"; hasFailedAttempt: boolean }
+  /** A catch-up presumed to change nothing. It announces nothing unless it surfaces. */
+  | { status: "verifying" }
   | {
       status: "catching_up";
       ui: "overlay" | "status" | "silent";
@@ -188,6 +190,11 @@ function resolveAgentScreenSync(args: {
   if (input.visibilityCatchUpStatus === "error" || input.visibilityCatchUpStatus === "retrying") {
     return { status: "sync_error", isRetrying: input.visibilityCatchUpStatus === "retrying" };
   }
+  // The viewed-timeline owner is running this chat's catch-up and will surface it if the chat
+  // turns out to be behind, so the history resync every reconnect requests stays quiet too.
+  if (input.visibilityCatchUpStatus === "verifying") {
+    return { status: "verifying" };
+  }
   if (
     input.visibilityCatchUpStatus === "pending" ||
     input.needsAuthoritativeSync ||
@@ -202,9 +209,6 @@ function resolveAgentScreenSync(args: {
         hadInitialSyncFailure,
       }),
     };
-  }
-  if (input.visibilityCatchUpStatus === "verifying") {
-    return { status: "catching_up", ui: "silent" };
   }
   return { status: "idle" };
 }
