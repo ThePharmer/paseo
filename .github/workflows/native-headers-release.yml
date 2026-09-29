@@ -40,6 +40,11 @@ on:
         required: false
         default: true
         type: boolean
+      profileable:
+        description: "Mark the APK profileable (PASEO_PROFILE_BUILD=1) for Perfetto/heapprofd. Use with publish off"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   # Test builds use their own group so a queued schedule run cannot cancel a pending test dispatch.
@@ -489,6 +494,7 @@ jobs:
       - name: Prebuild and assemble the release APK
         env:
           APP_VARIANT: production
+          PASEO_PROFILE_BUILD: ${{ inputs.profileable && '1' || '' }}
           ABIS: ${{ needs.resolve.outputs.abis }}
           SIGNING_MODE: ${{ steps.signing.outputs.mode }}
           PUSH_MODE: ${{ steps.push.outputs.mode }}
