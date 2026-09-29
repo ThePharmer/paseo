@@ -1,6 +1,8 @@
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { TaskListRow } from "@/components/task-list-row";
 import {
+  Animated,
+  Easing,
   View,
   Text,
   Image,
@@ -46,14 +48,6 @@ import {
 import { StyleSheet, withUnistyles } from "react-native-unistyles";
 import { ICON_SIZE, type Theme } from "@/styles/theme";
 import { useIsCompactFormFactor } from "@/constants/layout";
-import Animated, {
-  Easing,
-  cancelAnimation,
-  useAnimatedStyle,
-  useSharedValue,
-  withRepeat,
-  withTiming,
-} from "react-native-reanimated";
 import Svg, { Defs, LinearGradient as SvgLinearGradient, Rect, Stop } from "react-native-svg";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
 import { MarkdownRenderer, type MarkdownStyles } from "@/components/markdown/renderer";
@@ -105,6 +99,7 @@ import { RewindMenu, type RewindMode } from "@/components/rewind/rewind-menu";
 import { useRewindAgentMutation } from "@/components/rewind/use-rewind-agent-mutation";
 import { AssistantForkMenu, type AssistantForkTarget } from "@/components/assistant-fork-menu";
 import { useRetainedPanelActive } from "@/components/retained-panel";
+import { useAppVisible } from "@/hooks/use-app-visible";
 import {
   markdownCopyDataSet,
   markdownCopyOrderedListDataSet,
@@ -1261,32 +1256,34 @@ const NativeExpandableBadgeShimmer = memo(function NativeExpandableBadgeShimmer(
   gradientId,
 }: NativeExpandableBadgeShimmerProps) {
   const isPanelActive = useRetainedPanelActive();
-  const shimmerTranslateX = useSharedValue(0);
+  const isAppVisible = useAppVisible();
+  const isOnScreen = isPanelActive && isAppVisible;
+  // React Native's native driver moves the peak on the UI thread without a commit per frame.
+  const [shimmerTranslateX] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
-    if (!isPanelActive) {
-      cancelAnimation(shimmerTranslateX);
+    if (!isOnScreen) {
       return;
     }
-    const startPosition = -peakWidth;
-    const endPosition = rowWidth + peakWidth;
-    shimmerTranslateX.value = startPosition;
-    shimmerTranslateX.value = withRepeat(
-      withTiming(endPosition, {
+    shimmerTranslateX.setValue(-peakWidth);
+    const sweep = Animated.loop(
+      Animated.timing(shimmerTranslateX, {
+        toValue: rowWidth + peakWidth,
         duration: durationSeconds * 1000,
         easing: Easing.linear,
+        useNativeDriver: true,
       }),
-      -1,
-      false,
     );
+    sweep.start();
     return () => {
-      cancelAnimation(shimmerTranslateX);
+      sweep.stop();
     };
-  }, [durationSeconds, isPanelActive, peakWidth, rowWidth, shimmerTranslateX]);
+  }, [durationSeconds, isOnScreen, peakWidth, rowWidth, shimmerTranslateX]);
 
-  const nativeShimmerPeakStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: shimmerTranslateX.value }],
-  }));
+  const nativeShimmerPeakStyle = useMemo(
+    () => ({ transform: [{ translateX: shimmerTranslateX }] }),
+    [shimmerTranslateX],
+  );
 
   const nativeShimmerTrackStyle = useMemo(
     () => [expandableBadgeStylesheet.nativeShimmerTrack, { width: rowWidth, height: rowHeight }],

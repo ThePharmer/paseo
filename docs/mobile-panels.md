@@ -104,9 +104,16 @@ definition, no longer eligible to begin.
 - Panels whose gesture wrapper already owns visibility use `RetainedPanelActivity` to provide the
   same active signal without adding another layout root. Persistent animations, timers, polling, and
   shared clocks must subscribe to that signal and stop when their final visible consumer leaves.
-- Synchronized step animations use one wall-clock-aligned source. Register a local shared value only
-  while its retained panel is active so hidden animated styles remain mounted without receiving clock
-  updates. Do not give every instance its own loop or leave hidden styles subscribed to the source.
+- Synchronized animations use one wall-clock-aligned source per family, attached only to instances
+  on screen: retained panel active and app visible (`useAppVisible`). Hidden instances stay mounted
+  but detached. Do not give every instance its own loop or leave hidden styles subscribed to the
+  source. On native, the status ring and synced loader each run one React Native native-driver loop
+  (`components/native-loop`), started at the wall-clock phase when the first instance comes on screen
+  and stopped when the last leaves; hidden instances render a static style. Native-driven frames
+  write to the view without a shadow-tree commit, which a Reanimated worklet clock costs on every
+  frame while `ANDROID_SYNCHRONOUSLY_UPDATE_UI_PROPS` is off. The driver steps at 60 Hz, so rings
+  turn in 60 Hz steps on a 120 Hz display. On web, the synced loader copies its Reanimated clock
+  into a local shared value registered only while on screen.
 - Retention order and render order are separate concerns. LRU metadata may change on every switch;
   keyed retained roots must keep a stable sibling order. Moving large retained roots triggered Fabric
   Differ failures (`addViewAt` / `removeViewAt` view reuse) on Android.
