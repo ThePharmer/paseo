@@ -1290,6 +1290,8 @@ export class DaemonClient {
   private checkoutStatusInFlight: Map<string, Promise<CheckoutStatusPayload>> = new Map();
   private connectionListeners: Set<(status: ConnectionState) => void> = new Set();
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+  // The transport whose failure armed `reconnectTimeout`, if a transport event armed it.
+  private reconnectTimeoutFailedTransport: DaemonTransport | null = null;
   private connectTimeout: ReturnType<typeof setTimeout> | null = null;
   private pendingGenericTransportErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
@@ -1498,6 +1500,7 @@ export class DaemonClient {
             reason,
             event: "TRANSPORT_CLOSE",
             reasonCode: "transport_closed",
+            failedTransport: transport,
           });
         }),
         transport.onError((event) => {
@@ -1521,6 +1524,7 @@ export class DaemonClient {
                     reason,
                     event: "TRANSPORT_ERROR",
                     reasonCode: "transport_error",
+                    failedTransport: transport,
                   });
                 }
               }, 250);
@@ -1537,6 +1541,7 @@ export class DaemonClient {
             reason,
             event: "TRANSPORT_ERROR",
             reasonCode: "transport_error",
+            failedTransport: transport,
           });
         }),
         transport.onMessage((data) => {
@@ -6529,8 +6534,11 @@ export class DaemonClient {
     reason?: string;
     event?: string;
     reasonCode?: string;
+    failedTransport?: DaemonTransport;
   }): void {
-    if (this.reconnectTimeout) {
+    const failedTransport = input?.failedTransport ?? null;
+    const isRepeatedFailure = this.isRetryArmedFor(failedTransport);
+    if (this.reconnectTimeout && !isRepeatedFailure) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
     }
@@ -6568,7 +6576,18 @@ export class DaemonClient {
       return;
     }
 
-    this.armReconnectTimer();
+    if (!isRepeatedFailure) this.armReconnectTimer(failedTransport);
+  }
+
+  // A failing socket often reports an error and then closes. The later report still
+  // publishes its details, but it keeps the retry the first one armed instead of taking
+  // a second backoff step or cancelling an immediate retry after a return.
+  private isRetryArmedFor(failedTransport: DaemonTransport | null): boolean {
+    return (
+      this.reconnectTimeout !== null &&
+      failedTransport !== null &&
+      this.reconnectTimeoutFailedTransport === failedTransport
+    );
   }
 
   private emitDisconnectedStateForReconnect(
@@ -6588,12 +6607,13 @@ export class DaemonClient {
     );
   }
 
-  private armReconnectTimer(): void {
+  private armReconnectTimer(failedTransport: DaemonTransport | null): void {
     const attempt = this.reconnectAttempt;
     const baseDelay = this.config.reconnect?.baseDelayMs ?? DEFAULT_RECONNECT_BASE_DELAY_MS;
     const maxDelay = this.config.reconnect?.maxDelayMs ?? DEFAULT_RECONNECT_MAX_DELAY_MS;
     const delay = this.takeResumeRetry() ? 0 : Math.min(baseDelay * 2 ** attempt, maxDelay);
     this.reconnectAttempt = attempt + 1;
+    this.reconnectTimeoutFailedTransport = failedTransport;
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
       if (!this.shouldReconnect) {
