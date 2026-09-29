@@ -57,8 +57,8 @@ env:
   # branch, rebased onto the upstream tag it targets. Only this one commit is
   # cherry-picked, so when the feature branch gains commits or the upstream tag
   # moves, re-squash the branch onto the new tag and re-point both values here.
-  FEATURE_COMMIT: ca285a42aec671882c68eff6f320dd077042000b
-  FEATURE_BRANCH: release/native-headers-v0.9.2
+  FEATURE_COMMIT: 8748be974129ff2fd28c0de7b91b934a16be7aff
+  FEATURE_BRANCH: release/native-headers-v0.10.1
   # Fork-only fixes cherry-picked after the feature, in order, until upstream
   # ships them. One "<sha> <branch> <upstream PR>" per line; the branch is
   # fetched so the sha is reachable. A sha already in the tag is skipped.
