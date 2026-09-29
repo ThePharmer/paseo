@@ -1100,6 +1100,10 @@ const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
 const DEFAULT_SESSION_RPC_TIMEOUT_MS = 60_000;
 const PUSH_TOKEN_REVOCATION_TIMEOUT_MS = 2_000;
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+// A mobile OS often delivers the close of a socket it killed in the background a moment after
+// the app returns, and a probe of that socket takes up to three seconds to fail. A drop noticed
+// this soon after the return retries at once instead of waiting out the backoff.
+const RESUME_RETRY_WINDOW_MS = 5_000;
 // Browser WebSocket.close throws InvalidAccessError for any code other than 1000 or 3000-4999
 // and leaves the socket open, so client teardown uses 1000.
 const CLIENT_CLOSE_CODE = 1000;
@@ -1289,6 +1293,7 @@ export class DaemonClient {
   private connectTimeout: ReturnType<typeof setTimeout> | null = null;
   private pendingGenericTransportErrorTimeout: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
+  private resumeRetryDeadline: number | null = null;
   private shouldReconnect = true;
   private connectPromise: Promise<void> | null = null;
   private connectResolve: (() => void) | null = null;
@@ -1609,6 +1614,11 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Connects unless a connection is open or an attempt is in flight. `verify` is the check made
+   * when the app returns to the foreground: it probes a nominally connected session, and when
+   * no attempt starts now, the first retry after a drop in the next few seconds skips the backoff.
+   */
   ensureConnected(options?: { verify?: boolean }): void {
     if (this.connectionState.status === "disposed") {
       return;
@@ -1617,10 +1627,18 @@ export class DaemonClient {
       this.shouldReconnect = true;
     }
     if (this.connectionState.status === "connected") {
-      if (options?.verify) this.verifyConnection();
+      if (options?.verify) {
+        this.openResumeRetryWindow();
+        this.verifyConnection();
+      }
       return;
     }
-    if (this.connectionState.status === "connecting") return;
+    if (this.connectionState.status === "connecting") {
+      if (options?.verify) this.openResumeRetryWindow();
+      return;
+    }
+    // The attempt starting now is the prompt retry; later ones follow the backoff.
+    if (options?.verify) this.resumeRetryDeadline = null;
     if (this.connectPromise) {
       this.attemptConnect();
       return;
@@ -1638,7 +1656,19 @@ export class DaemonClient {
       this.disposeTransport(CLIENT_CLOSE_CODE, reason);
       this.scheduleReconnect({ reason, event: "CONNECTION_REPLACED", reasonCode: "replaced" });
     }
-    this.ensureConnected();
+    // Never probes: the session is no longer connected. It still gives an attempt that was
+    // already in flight a prompt retry.
+    this.ensureConnected({ verify: true });
+  }
+
+  private openResumeRetryWindow(): void {
+    this.resumeRetryDeadline = perfNow() + RESUME_RETRY_WINDOW_MS;
+  }
+
+  private takeResumeRetry(): boolean {
+    const deadline = this.resumeRetryDeadline;
+    this.resumeRetryDeadline = null;
+    return deadline !== null && perfNow() <= deadline;
   }
 
   private verifyConnection(): void {
@@ -6562,7 +6592,7 @@ export class DaemonClient {
     const attempt = this.reconnectAttempt;
     const baseDelay = this.config.reconnect?.baseDelayMs ?? DEFAULT_RECONNECT_BASE_DELAY_MS;
     const maxDelay = this.config.reconnect?.maxDelayMs ?? DEFAULT_RECONNECT_MAX_DELAY_MS;
-    const delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
+    const delay = this.takeResumeRetry() ? 0 : Math.min(baseDelay * 2 ** attempt, maxDelay);
     this.reconnectAttempt = attempt + 1;
     this.reconnectTimeout = setTimeout(() => {
       this.reconnectTimeout = null;
