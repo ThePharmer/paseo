@@ -804,6 +804,13 @@ class BrowserWebSocket {
     this.dispatch("message", { data });
   }
 
+  // React Native's websocketFailed: an error event carrying the OkHttp message, then close.
+  fail(message: string): void {
+    this.readyState = 3;
+    this.dispatch("error", { message });
+    this.dispatch("close", { code: 1006, reason: message });
+  }
+
   private dispatch(event: string, payload: unknown): void {
     for (const listener of this.listeners.get(event) ?? []) {
       listener(payload);
@@ -2777,6 +2784,113 @@ test("a return to a known drop connects at once and then backs off normally", as
 
   expect(attempts()).toBe(3);
 });
+
+interface FailingConnection {
+  client: DaemonClient;
+  attempts(): number;
+  // Connects on real timers: the relay handshake does not settle under fake ones.
+  connect(): Promise<void>;
+  // The transport reports an error and then closes, in one synchronous burst.
+  fail(attempt: number): void;
+}
+
+function createPlainFailingConnection(clientId: string): FailingConnection {
+  const daemons: FakeDaemon[] = [];
+  const client = new DaemonClient({
+    url: "ws://test",
+    clientId,
+    logger: noopLogger,
+    transportFactory: () => {
+      const daemon = new FakeDaemon();
+      daemons.push(daemon);
+      return daemon.transport;
+    },
+  });
+  clients.push(client);
+  return {
+    client,
+    attempts: () => daemons.length,
+    connect: async () => {
+      const connection = client.connect();
+      daemons[0].openConnection();
+      await connection;
+    },
+    fail: (attempt) => {
+      const daemon = daemons[attempt - 1];
+      daemon.triggerError(new Error("Software caused connection abort"));
+      daemon.daemonClosesWith("Software caused connection abort");
+    },
+  };
+}
+
+function createRelayFailingConnection(clientId: string): FailingConnection {
+  const daemon = createRelayDaemon();
+  const sockets: BrowserWebSocket[] = [];
+  const client = new DaemonClient({
+    url: "ws://relay.test/ws?role=client&serverId=srv_test&v=2",
+    clientId,
+    logger: noopLogger,
+    e2ee: { enabled: true, daemonPublicKeyB64: daemon.daemonPublicKeyB64 },
+    webSocketFactory: () => {
+      const socket = daemon.socket();
+      sockets.push(socket);
+      return socket;
+    },
+  });
+  clients.push(client);
+  return {
+    client,
+    attempts: () => sockets.length,
+    connect: async () => {
+      const connection = client.connect();
+      await vi.waitFor(() => expect(sockets).toHaveLength(1));
+      sockets[0].open();
+      await connection;
+    },
+    fail: (attempt) => sockets[attempt - 1].fail("Software caused connection abort"),
+  };
+}
+
+const failingConnections = [
+  { transport: "a plain transport", create: createPlainFailingConnection },
+  { transport: "the encrypted relay transport", create: createRelayFailingConnection },
+];
+
+test.each(failingConnections)(
+  "an error and close at the return through $transport retry at once and back off one step",
+  async ({ create }) => {
+    const connection = create("resume-error-close");
+    await connection.connect();
+    useHeartbeatClock();
+
+    connection.client.ensureConnected({ verify: true });
+    connection.fail(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(connection.attempts()).toBe(2);
+
+    connection.fail(2);
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(connection.attempts()).toBe(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connection.attempts()).toBe(3);
+  },
+);
+
+test.each(failingConnections)(
+  "an error and close through $transport take one backoff step",
+  async ({ create }) => {
+    const connection = create("error-close");
+    await connection.connect();
+    useHeartbeatClock();
+
+    connection.fail(1);
+    await vi.advanceTimersByTimeAsync(1_499);
+    expect(connection.attempts()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(connection.attempts()).toBe(2);
+    expect(connection.client.getConnectionState()).toEqual({ status: "connecting", attempt: 1 });
+  },
+);
 
 test("stays online through ten minutes of pongs that arrive five seconds late", async () => {
   useHeartbeatClock();
