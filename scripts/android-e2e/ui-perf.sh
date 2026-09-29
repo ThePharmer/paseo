@@ -73,7 +73,7 @@ host=(--host "127.0.0.1:${DAEMON_PORT}")
 tools=(node "$(dirname "$0")/ui-perf-tools.mjs")
 problems=()
 
-echo "phase,repeat,seconds,elapsed_s,pid,main_cpu_ms_s,js_cpu_ms_s,render_cpu_ms_s,process_cpu_ms_s,frames,frames_s,doframe_s,mount_batches_s,update_props_groups_s,mount_dispatch_s,commit_main_s,commit_js_s,commit_other_s,execute_mount_s,sync_view_update_s,trace_sections,js_threads" >"${windows_csv}"
+echo "phase,repeat,seconds,elapsed_s,pid,main_cpu_ms_s,js_cpu_ms_s,render_cpu_ms_s,process_cpu_ms_s,frames,frames_s,doframe_s,resynced_s,mount_batches_s,update_props_groups_s,update_props_views_s,mount_dispatch_s,commit_main_s,commit_js_s,commit_other_s,execute_mount_s,sync_view_update_s,trace_sections,js_threads" >"${windows_csv}"
 echo "repeat,target,style,delay_ms,gap_ms,outcome" >"${taps_csv}"
 
 now_ms() { date +%s%3N; }
@@ -236,7 +236,7 @@ measure_window() {
   local row=("${phase}" "${repeat}" "${seconds}" "${elapsed}" "${pid}")
   for key in main_cpu_ms_s js_cpu_ms_s render_cpu_ms_s process_cpu_ms_s; do row+=("$(json_field "${cpu}" "${key}")"); done
   row+=("${frames}" "${frames_s}")
-  for key in doframe_s mount_batches_s update_props_groups_s mount_dispatch_s; do row+=("$(json_field "${atrace}" "${key}")"); done
+  for key in doframe_s resynced_s mount_batches_s update_props_groups_s update_props_views_s mount_dispatch_s; do row+=("$(json_field "${atrace}" "${key}")"); done
   for key in commit_main_s commit_js_s commit_other_s mount_main_s syncupd_main_s; do row+=("$(json_field "${probes}" "${key}")"); done
   row+=("$(json_field "${atrace}" trace_sections)" "$(json_field "${cpu}" js_thread_names)")
   (
@@ -451,6 +451,8 @@ sync_ui_props="$(json_field "${apk_flags}" ANDROID_SYNCHRONOUSLY_UPDATE_UI_PROPS
   echo "wm_size=$(adb shell wm size | tr -d '\r' | paste -sd' ')"
   echo "wm_density=$(adb shell wm density | tr -d '\r' | paste -sd' ')"
   echo "root=${has_root} ${root_prefix}"
+  # Render-bound frame rates depend on the runner's CPU; compare builds with that in mind.
+  echo "runner_cpu=$(awk -F': ' '/model name/ { print $2; exit }' /proc/cpuinfo) x$(nproc)"
 } >"${out}/device.txt"
 setup_uprobes "${start_pid}" || true
 log_event "start pid=${start_pid} sync_ui_props=${sync_ui_props:-?} uprobes=${uprobes} config: repeats=${repeats} quiet_s=${quiet_s} idle_s=${idle_s} idle_step_ms=${idle_step_ms} stream_s=${stream_s} stream_step_ms=${stream_step_ms} hold_tries=${hold_tries} tap_tries=${tap_tries} control_tries=${control_tries}"

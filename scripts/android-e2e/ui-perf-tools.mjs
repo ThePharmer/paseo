@@ -244,13 +244,17 @@ const commands = {
     const line = /^\s*(.+?)-(\d+)\s+(?:\(\s*[-\d]+\)\s+)?\[\d+\]\s+\S+\s+[\d.]+: tracing_mark_write: B\|(\d+)\|(.*)$/;
     const counts = new Map();
     let total = 0;
+    let propViews = 0;
     for (const text of fs.readFileSync(file, "utf8").split("\n")) {
       const m = line.exec(text);
       if (!m || Number(m[3]) !== pid) continue;
       total += 1;
       const tid = Number(m[2]);
       const thread = tid === pid ? "main" : m[1].trim();
-      const name = m[4].split("|")[0].replace(/\d+/g, "#").trim();
+      const raw = m[4].split("|")[0];
+      const views = /^IntBufferBatchMountItem::mountInstructions::UPDATE_PROPS numInstructions=(\d+)/.exec(raw);
+      if (views) propViews += Number(views[1]);
+      const name = raw.replace(/\d+/g, "#").trim();
       const key = `${thread}\t${name}`;
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
@@ -265,11 +269,17 @@ const commands = {
     console.log(
       JSON.stringify({
         trace_sections: total,
-        doframe_s: perSecond(count((t, n) => t === "main" && n.startsWith("Choreographer#doFrame"))),
+        // "Choreographer#doFrame - resynced to ..." marks vsyncs skipped because
+        // the previous frame ran long; it is not a frame of its own.
+        doframe_s: perSecond(count((t, n) => t === "main" && n === "Choreographer#doFrame #")),
+        resynced_s: perSecond(
+          count((t, n) => t === "main" && n.startsWith("Choreographer#doFrame - resynced")),
+        ),
         mount_batches_s: perSecond(count((_, n) => n === "IntBufferBatchMountItem::mountViews")),
         update_props_groups_s: perSecond(
-          count((_, n) => n === "IntBufferBatchMountItem::mountInstructions::UPDATE_PROPS"),
+          count((_, n) => n.startsWith("IntBufferBatchMountItem::mountInstructions::UPDATE_PROPS")),
         ),
+        update_props_views_s: perSecond(propViews),
         mount_dispatch_s: perSecond(
           count((_, n) => n === "MountItemDispatcher::mountViews mountItems to execute"),
         ),
@@ -303,6 +313,29 @@ const commands = {
     console.log(JSON.stringify(counts));
   },
 
+  // Recomputes the atrace columns of windows.csv from the traces kept in
+  // windows/<phase>-<repeat>/atrace.txt, for artifacts from older parsers.
+  reanalyze([dir]) {
+    const file = `${dir}/windows.csv`;
+    const rows = readCsv(file);
+    const keys = new Set(Object.keys(rows[0] ?? {}));
+    for (const row of rows) {
+      const trace = `${dir}/windows/${row.phase}-${row.repeat}/atrace.txt`;
+      if (!fs.existsSync(trace)) continue;
+      const original = console.log;
+      let json = "";
+      console.log = (text) => (json = text);
+      commands.atrace([trace, row.pid, row.seconds, `${dir}/windows/${row.phase}-${row.repeat}/sections.tsv`]);
+      console.log = original;
+      for (const [key, value] of Object.entries(JSON.parse(json))) {
+        row[key] = String(value);
+        keys.add(key);
+      }
+    }
+    const header = [...keys];
+    fs.writeFileSync(file, [header.join(","), ...rows.map((r) => header.map((k) => r[k] ?? "").join(","))].join("\n") + "\n");
+  },
+
   bounds([file, id]) {
     const node = onScreenNode(fs.readFileSync(file, "utf8"), id);
     if (!node) process.exit(1);
@@ -324,14 +357,21 @@ const commands = {
       `APK: \`${meta.apk ?? "?"}\`. Reanimated ANDROID_SYNCHRONOUSLY_UPDATE_UI_PROPS: **${meta.syncUiProps ?? "?"}**. ` +
         `Commit probes: **${meta.uprobes ?? "?"}**. Median [min-max] over ${meta.repeats ?? "?"} repeats.\n`,
     );
+    for (const w of windows) {
+      const commits = Number(w.commit_main_s);
+      const frames = Number(w.doframe_s);
+      w.commits_per_frame = w.commit_main_s !== "" && frames > 0 ? String(commits / frames) : "";
+    }
     const metrics = [
       ["main_cpu_ms_s", "main thread CPU ms/s"],
       ["js_cpu_ms_s", "JS thread CPU ms/s"],
+      ["commits_per_frame", "main-thread commits per Choreographer frame (1 = every frame)"],
       ["commit_main_s", "Fabric commits/s on main (Reanimated, native state)"],
       ["commit_js_s", "Fabric commits/s on JS (React)"],
       ["mount_batches_s", "mount batches/s (IntBufferBatchMountItem::mountViews)"],
-      ["update_props_groups_s", "UPDATE_PROPS groups/s"],
-      ["doframe_s", "Choreographer#doFrame/s"],
+      ["update_props_views_s", "view prop updates/s (UPDATE_PROPS instructions)"],
+      ["doframe_s", "Choreographer frames/s"],
+      ["resynced_s", "skipped vsyncs/s (doFrame resynced)"],
       ["frames_s", "frames rendered/s (gfxinfo)"],
       ["render_cpu_ms_s", "RenderThread CPU ms/s (software GPU, context only)"],
       ["process_cpu_ms_s", "whole process CPU ms/s"],
@@ -342,7 +382,7 @@ const commands = {
       out.push(`|---|${phases.map(() => "---").join("|")}|`);
       for (const [key, label] of metrics) {
         const cells = phases.map((phase) =>
-          fmtStat(windows.filter((w) => w.phase === phase).map((w) => w[key])),
+          fmtStat(windows.filter((w) => w.phase === phase).map((w) => w[key]), key === "commits_per_frame" ? 2 : 1),
         );
         if (cells.every((cell) => cell === "n/a")) continue;
         out.push(`| ${label} | ${cells.join(" | ")} |`);
