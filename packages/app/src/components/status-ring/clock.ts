@@ -1,58 +1,34 @@
-import { useLayoutEffect } from "react";
-import { makeMutable, type SharedValue, useSharedValue } from "react-native-reanimated";
-import { scheduleOnUI } from "react-native-worklets";
-import { getStatusRingRotation } from "@/components/status-ring/geometry";
+import { useAppVisible } from "@/hooks/use-app-visible";
+import { useRetainedPanelActive } from "@/components/retained-panel";
+import { createNativeLoop, useNativeLoop } from "@/components/native-loop";
+import { rotatorStyles } from "@/components/status-ring/frame";
+import { STATUS_RING_PERIOD_MS } from "@/components/status-ring/geometry";
 
-const sharedRotation = makeMutable(getStatusRingRotation(Date.now()));
-const activeRingCount = makeMutable(0);
-const clockRunning = makeMutable(false);
+const ringLoop = createNativeLoop({ periodMs: STATUS_RING_PERIOD_MS, span: 1 });
+const turningRotatorStyle = [
+  rotatorStyles.rotator,
+  {
+    transform: [
+      {
+        rotate: ringLoop.progress.interpolate({
+          inputRange: [0, 1],
+          outputRange: ["0deg", "360deg"],
+        }),
+      },
+    ],
+  },
+];
 
-function advanceSharedRotation(): void {
-  "worklet";
-  if (activeRingCount.value === 0) {
-    clockRunning.value = false;
-    return;
-  }
-
-  sharedRotation.value = getStatusRingRotation(Date.now());
-  requestAnimationFrame(advanceSharedRotation);
-}
-
-function registerStatusRing(registered: SharedValue<boolean>): void {
-  "worklet";
-  if (registered.value) {
-    return;
-  }
-
-  registered.value = true;
-  activeRingCount.value += 1;
-
-  if (!clockRunning.value) {
-    clockRunning.value = true;
-    sharedRotation.value = getStatusRingRotation(Date.now());
-    requestAnimationFrame(advanceSharedRotation);
-  }
-}
-
-function unregisterStatusRing(registered: SharedValue<boolean>): void {
-  "worklet";
-  if (!registered.value) {
-    return;
-  }
-
-  registered.value = false;
-  activeRingCount.value -= 1;
-}
-
-export function useStatusRingRotation(): SharedValue<number> {
-  const registered = useSharedValue(false);
-
-  useLayoutEffect(() => {
-    scheduleOnUI(registerStatusRing, registered);
-    return () => {
-      scheduleOnUI(unregisterStatusRing, registered);
-    };
-  }, [registered]);
-
-  return sharedRotation;
+/**
+ * The rotator style for one native ring. Every ring on screen follows the same native-driven value,
+ * so they stay in phase. A ring off screen (its retained panel inactive, or the app not visible)
+ * stays mounted with a static style, detached from the value, and the loop stops once no ring is
+ * on screen.
+ */
+export function useStatusRingRotatorStyle() {
+  const panelActive = useRetainedPanelActive();
+  const appVisible = useAppVisible();
+  const onScreen = panelActive && appVisible;
+  useNativeLoop(ringLoop.loop, onScreen);
+  return onScreen ? turningRotatorStyle : rotatorStyles.rotator;
 }

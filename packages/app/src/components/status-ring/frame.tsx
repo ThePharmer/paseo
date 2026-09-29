@@ -60,10 +60,10 @@ function getBackdropStyle(backdrop: SurfaceBackdrop | null | undefined) {
 }
 
 // The rotating quarter's geometry, deliberately plain React Native rather than Unistyles: on
-// native this style lands on a Reanimated `Animated.View`, and applying a theme-tracked style to
-// one crashes when the theme changes — Unistyles and Reanimated both mutate the same native node.
-// See docs/unistyles.md. The colour it needs lives on `styles.arc`, one level in, on a view
-// Reanimated never touches.
+// native this style lands on a natively animated `Animated.View`, and Unistyles must not patch a
+// node an animation driver also writes. On Reanimated views that crashed on theme change. See
+// docs/unistyles.md. The colour it needs lives on `styles.arc`, one level in, on a view the
+// animation never touches.
 export const rotatorStyles = RNStyleSheet.create({
   rotator: {
     position: "absolute",

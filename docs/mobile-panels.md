@@ -107,6 +107,9 @@ definition, no longer eligible to begin.
 - Synchronized step animations use one wall-clock-aligned source. Register a local shared value only
   while its retained panel is active so hidden animated styles remain mounted without receiving clock
   updates. Do not give every instance its own loop or leave hidden styles subscribed to the source.
+  On native, the status ring and synced loader run one React Native native-driver loop per family
+  (`components/native-loop`), started at the wall-clock phase. Native-driven frames skip the shadow
+  tree, so they cost no commit. Hidden instances render a static style, detached from the loop.
 - Retention order and render order are separate concerns. LRU metadata may change on every switch;
   keyed retained roots must keep a stable sibling order. Moving large retained roots triggered Fabric
   Differ failures (`addViewAt` / `removeViewAt` view reuse) on Android.
