@@ -18,12 +18,19 @@
 # thread: commits on the main thread come from Reanimated (and native state
 # updates), commits on the JS thread from React.
 #
-# Then the tap test: Settings > Switch host sheet (the #32 sheet), tap the
-# trigger to open it and press the sheet's "Add host" row at fixed delays.
-# The row's action opens the add-host method modal; a dropped press leaves the
-# sheet open. `hold` presses send move events between down and up, like a
-# finger, which is what makes Pressable re-check its press rectangle. The
-# control presses the trigger, which never moves.
+# Then the tap test, on two containers that Reanimated slides in:
+#
+#   sheet-row    Settings > Switch host sheet (the #32 sheet): tap the trigger
+#                to open it and press the sheet's "Add host" row at fixed
+#                delays. The row's action opens the add-host method modal.
+#   sidebar-row  the phone's left sidebar overlay (MobilePanelOverlay): tap the
+#                header menu button to open it and press the sidebar's Settings
+#                button at the same delays. Its action opens Settings.
+#
+# A dropped press leaves the container open. `hold` presses send move events
+# between down and up, like a finger, which is what makes Pressable re-check
+# its press rectangle. The controls (`trigger`, `menu`) press the button that
+# opens each container, which never moves.
 #
 # Everything repeats `repeats` times. It measures, it does not assert: the job
 # fails only when the app process dies or setup breaks.
@@ -310,6 +317,15 @@ dump_ui() {
 sheet_row_id="settings-add-host"
 trigger_id="settings-host-picker"
 modal_id="add-host-method-modal"
+menu_id="menu-button"
+sidebar_row_id="sidebar-settings"
+sidebar_close_id="sidebar-close"
+settings_ids=("${trigger_id}" settings-sidebar)
+# Opened by the last streaming agent's deep link: a workspace chat with the
+# menu button in its header. Set once the stream phase has run.
+home_agent=""
+# Screen coordinates "<x> <y>" per control and row target, filled in by calibration.
+declare -A trigger_at row_at
 
 open_settings() {
   adb shell am start -W -a android.intent.action.VIEW -d "paseo://settings" "${APP_ID}" >>"${events}" 2>&1 || true
@@ -339,6 +355,46 @@ ensure_settings_root() {
   return 1
 }
 
+open_home_chat() {
+  adb shell am start -W -a android.intent.action.VIEW \
+    -d "paseo://h/${SERVER_ID}/agent/${home_agent}" "${APP_ID}" >>"${events}" 2>&1 || true
+  sleep 3
+}
+
+# Brings the app back to the workspace chat with the sidebar closed.
+ensure_workspace_root() {
+  local xml="${out}/taps/state.xml" x y
+  for _ in 1 2 3 4 5; do
+    if ! dump_ui "${xml}"; then
+      sleep 1
+      continue
+    fi
+    if "${tools[@]}" has-id "${xml}" "${settings_ids[@]}"; then
+      adb shell input keyevent KEYCODE_BACK
+      sleep 1.2
+    elif "${tools[@]}" has-id "${xml}" "${sidebar_row_id}"; then
+      if read -r x y < <("${tools[@]}" bounds "${xml}" "${sidebar_close_id}"); then
+        adb shell input tap "${x}" "${y}"
+      else
+        adb shell input keyevent KEYCODE_BACK
+      fi
+      sleep 1.2
+    elif "${tools[@]}" has-id "${xml}" "${menu_id}"; then
+      return 0
+    else
+      open_home_chat
+    fi
+  done
+  return 1
+}
+
+return_home() {
+  case "$1" in
+    sheet-row | trigger) ensure_settings_root ;;
+    sidebar-row | menu) ensure_workspace_root ;;
+  esac
+}
+
 # press <style> <x> <y> as a device-side shell fragment.
 press_cmd() {
   case "$1" in
@@ -349,58 +405,99 @@ press_cmd() {
 
 hold_ms() { [[ "$1" == "hold" ]] && echo 100 || echo 0; }
 
-classify() {
-  local xml="$1"
-  if "${tools[@]}" has-id "${xml}" "${modal_id}"; then
+# outcome <acted-ids> <dropped-ids> <xml>: ids are space-separated; the
+# action's screen wins over the container still being open.
+outcome() {
+  local acted="$1" dropped="$2" xml="$3"
+  # shellcheck disable=SC2086
+  if "${tools[@]}" has-id "${xml}" ${acted}; then
     echo acted
-  elif "${tools[@]}" has-id "${xml}" "${sheet_row_id}"; then
+  elif "${tools[@]}" has-id "${xml}" ${dropped}; then
     echo dropped
   else
     echo missed
   fi
 }
 
-# One sheet-row try: open the sheet with a plain tap on the trigger, wait,
-# press the row, classify from a UI dump.
-try_sheet_row() {
-  local repeat="$1" index="$2" style="$3" delay_ms="$4" delay_s times gap outcome xml
+classify() {
+  case "$1" in
+    sheet-row) outcome "${modal_id}" "${sheet_row_id}" "$2" ;;
+    sidebar-row) outcome "${settings_ids[*]}" "${sidebar_row_id}" "$2" ;;
+    trigger) outcome "${sheet_row_id}" "${trigger_id}" "$2" ;;
+    menu) outcome "${sidebar_row_id}" "${menu_id}" "$2" ;;
+  esac
+}
+
+# The control that opens a row target's container.
+control_of() {
+  case "$1" in
+    sheet-row) echo trigger ;;
+    sidebar-row) echo menu ;;
+  esac
+}
+
+# One row try: open the container with a plain tap on its control, wait, press
+# the row, classify from a UI dump.
+try_row() {
+  local target="$1" repeat="$2" index="$3" style="$4" delay_ms="$5" delay_s times gap result xml
+  local control_xy row_xy
+  control_xy="${trigger_at[$(control_of "${target}")]}"
+  row_xy="${row_at[${target}]}"
   delay_s="$(awk -v d="${delay_ms}" 'BEGIN { printf "%.3f", d / 1000 }')"
   # One device-side shell, so adb round trips do not stretch the delay.
-  times="$(adb shell "b=\$(cut -d' ' -f1 /proc/uptime); input tap ${trigger_x} ${trigger_y}; c=\$(cut -d' ' -f1 /proc/uptime); sleep ${delay_s}; $(press_cmd "${style}" "${row_x}" "${row_y}"); d=\$(cut -d' ' -f1 /proc/uptime); echo \$b \$c \$d" | tr -d '\r')"
+  # shellcheck disable=SC2086
+  times="$(adb shell "b=\$(cut -d' ' -f1 /proc/uptime); input tap ${control_xy}; c=\$(cut -d' ' -f1 /proc/uptime); sleep ${delay_s}; $(press_cmd "${style}" ${row_xy}); d=\$(cut -d' ' -f1 /proc/uptime); echo \$b \$c \$d" | tr -d '\r')"
   # The row's down event lands at the end of its `input` command, minus the hold.
   gap="$(awk -v t="${times}" -v h="$(hold_ms "${style}")" 'BEGIN { split(t, a, " "); printf "%d", (a[3] - a[2]) * 1000 - h }')"
   sleep "$(awk -v s="${settle_ms}" 'BEGIN { printf "%.3f", s / 1000 }')"
-  xml="${out}/taps/row-${repeat}-${style}-${index}.xml"
+  xml="${out}/taps/${target}-${repeat}-${style}-${index}.xml"
   if dump_ui "${xml}"; then
-    outcome="$(classify "${xml}")"
+    result="$(classify "${target}" "${xml}")"
   else
-    outcome="no-dump"
+    result="no-dump"
   fi
-  echo "${repeat},sheet-row,${style},${delay_ms},${gap},${outcome}" >>"${taps_csv}"
-  [[ "${outcome}" == "acted" ]] && rm -f "${xml}"
-  ensure_settings_root || log_event "taps: could not return to the Settings root after ${style} try ${index}"
+  echo "${repeat},${target},${style},${delay_ms},${gap},${result}" >>"${taps_csv}"
+  [[ "${result}" == "acted" ]] && rm -f "${xml}"
+  return_home "${target}" || log_event "taps: could not return home after ${target} ${style} try ${index}"
 }
 
-# One control try: press the trigger, which never moves; the sheet opening is the action.
+# One control try: press the control, which never moves; its container opening is the action.
 try_control() {
-  local repeat="$1" index="$2" style="$3" outcome xml
-  adb shell "$(press_cmd "${style}" "${trigger_x}" "${trigger_y}")"
+  local control="$1" repeat="$2" index="$3" style="$4" result xml
+  # shellcheck disable=SC2086
+  adb shell "$(press_cmd "${style}" ${trigger_at[${control}]})"
   sleep "$(awk -v s="${settle_ms}" 'BEGIN { printf "%.3f", s / 1000 }')"
-  xml="${out}/taps/control-${repeat}-${style}-${index}.xml"
+  xml="${out}/taps/${control}-${repeat}-${style}-${index}.xml"
   if dump_ui "${xml}"; then
-    if "${tools[@]}" has-id "${xml}" "${sheet_row_id}"; then
-      outcome=acted
-      rm -f "${xml}"
-    elif "${tools[@]}" has-id "${xml}" "${trigger_id}"; then
-      outcome=dropped
-    else
-      outcome=missed
-    fi
+    result="$(classify "${control}" "${xml}")"
   else
-    outcome=no-dump
+    result=no-dump
   fi
-  echo "${repeat},trigger,${style},0,0,${outcome}" >>"${taps_csv}"
-  ensure_settings_root || log_event "taps: could not return to the Settings root after control try ${index}"
+  [[ "${result}" == "acted" ]] && rm -f "${xml}"
+  echo "${repeat},${control},${style},0,0,${result}" >>"${taps_csv}"
+  return_home "${control}" || log_event "taps: could not return home after ${control} try ${index}"
+}
+
+# run_taps <row target>: the control and row tries of every repeat.
+run_taps() {
+  local target="$1" control max_tries delay
+  control="$(control_of "${target}")"
+  for repeat in $(seq 1 "${repeats}"); do
+    [[ "$(app_pid)" == "${start_pid}" ]] || {
+      crashed=true
+      return
+    }
+    for index in $(seq 1 "${control_tries}"); do
+      try_control "${control}" "${repeat}" "${index}" hold
+    done
+    max_tries=$((hold_tries > tap_tries ? hold_tries : tap_tries))
+    for index in $(seq 0 $((max_tries - 1))); do
+      delay="${delays_ms[$((index % ${#delays_ms[@]}))]}"
+      [[ "${index}" -lt "${hold_tries}" ]] && try_row "${target}" "${repeat}" "${index}" hold "${delay}"
+      [[ "${index}" -lt "${tap_tries}" ]] && try_row "${target}" "${repeat}" "${index}" tap "${delay}"
+    done
+    log_event "taps ${target} repeat ${repeat}: $(awk -F, -v r="${repeat}" -v t="${target}" -v c="${control}" '$1 == r && ($2 == t || $2 == c) { n[$2 "/" $3 "/" $6]++ } END { for (k in n) printf "%s=%d ", k, n[k] }' "${taps_csv}")"
+  done
 }
 
 calibrate_taps() {
@@ -411,20 +508,56 @@ calibrate_taps() {
     return 1
   fi
   cp "${out}/taps/state.xml" "${out}/taps/settings-root.xml"
-  if ! read -r trigger_x trigger_y < <("${tools[@]}" bounds "${out}/taps/settings-root.xml" "${trigger_id}"); then
+  if ! trigger_at[trigger]="$("${tools[@]}" bounds "${out}/taps/settings-root.xml" "${trigger_id}")"; then
     log_event "taps: Settings shows no ${trigger_id}"
     return 1
   fi
-  adb shell input tap "${trigger_x}" "${trigger_y}"
+  # shellcheck disable=SC2086
+  adb shell input tap ${trigger_at[trigger]}
   sleep 2.5
   dump_ui "${out}/taps/sheet-open.xml"
   adb exec-out screencap -p >"${out}/taps/sheet-open.png" 2>/dev/null
-  if ! read -r row_x row_y < <("${tools[@]}" bounds "${out}/taps/sheet-open.xml" "${sheet_row_id}"); then
+  if ! row_at[sheet-row]="$("${tools[@]}" bounds "${out}/taps/sheet-open.xml" "${sheet_row_id}")"; then
     log_event "taps: the Switch host sheet did not show ${sheet_row_id}"
     return 1
   fi
-  log_event "taps: trigger at ${trigger_x},${trigger_y}; Add host row at ${row_x},${row_y}; screen ${screen_w}x${screen_h}"
+  log_event "taps: trigger at ${trigger_at[trigger]}; Add host row at ${row_at[sheet-row]}; screen ${screen_w}x${screen_h}"
   ensure_settings_root
+}
+
+# Finds the menu button and the sidebar's Settings button, and checks once that
+# a plain tap on the latter opens Settings, which is how its presses are classified.
+calibrate_sidebar_taps() {
+  open_home_chat
+  if ! ensure_workspace_root; then
+    adb exec-out screencap -p >"${out}/taps/sidebar-calibration-failed.png" 2>/dev/null
+    cp "${out}/taps/state.xml" "${out}/taps/sidebar-calibration-failed.xml" 2>/dev/null
+    return 1
+  fi
+  cp "${out}/taps/state.xml" "${out}/taps/workspace-root.xml"
+  if ! trigger_at[menu]="$("${tools[@]}" bounds "${out}/taps/workspace-root.xml" "${menu_id}")"; then
+    log_event "taps: the workspace chat shows no ${menu_id}"
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  adb shell input tap ${trigger_at[menu]}
+  sleep 2.5
+  dump_ui "${out}/taps/sidebar-open.xml"
+  adb exec-out screencap -p >"${out}/taps/sidebar-open.png" 2>/dev/null
+  if ! row_at[sidebar-row]="$("${tools[@]}" bounds "${out}/taps/sidebar-open.xml" "${sidebar_row_id}")"; then
+    log_event "taps: the sidebar did not show ${sidebar_row_id}"
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  adb shell input tap ${row_at[sidebar-row]}
+  sleep 2.5
+  dump_ui "${out}/taps/sidebar-action.xml"
+  if [[ "$(classify sidebar-row "${out}/taps/sidebar-action.xml")" != "acted" ]]; then
+    log_event "taps: a plain tap on ${sidebar_row_id} did not open Settings"
+    return 1
+  fi
+  log_event "taps: menu at ${trigger_at[menu]}; sidebar Settings at ${row_at[sidebar-row]}"
+  ensure_workspace_root
 }
 
 # ---------------------------------------------------------------------------
@@ -488,6 +621,7 @@ if [[ "${crashed}" == "false" ]]; then
     sleep "${stream_warmup_s}"
     [[ "${repeat}" == "1" ]] && adb exec-out screencap -p >"${out}/stream-chat.png" 2>/dev/null
     measure_window stream "${repeat}" "${stream_s}" || break
+    home_agent="${agent_id}"
     status="$(agent_status "${agent_id}")"
     log_event "stream ${repeat}: agent status at the end of the window: ${status}"
     [[ "${status}" == "running" ]] || problems+=("stream ${repeat}: the agent was '${status}' at the end of the window, so part of it did not stream; raise stream_blocks")
@@ -501,24 +635,18 @@ if [[ "${crashed}" == "false" ]]; then
   "${cli[@]}" stop --all --json "${host[@]}" >>"${events}" 2>&1 || true
   sleep 3
   if calibrate_taps; then
-    for repeat in $(seq 1 "${repeats}"); do
-      [[ "$(app_pid)" == "${start_pid}" ]] || {
-        crashed=true
-        break
-      }
-      for index in $(seq 1 "${control_tries}"); do
-        try_control "${repeat}" "${index}" hold
-      done
-      max_tries=$((hold_tries > tap_tries ? hold_tries : tap_tries))
-      for index in $(seq 0 $((max_tries - 1))); do
-        delay="${delays_ms[$((index % ${#delays_ms[@]}))]}"
-        [[ "${index}" -lt "${hold_tries}" ]] && try_sheet_row "${repeat}" "${index}" hold "${delay}"
-        [[ "${index}" -lt "${tap_tries}" ]] && try_sheet_row "${repeat}" "${index}" tap "${delay}"
-      done
-      log_event "taps repeat ${repeat}: $(awk -F, -v r="${repeat}" '$1 == r { n[$2 "/" $3 "/" $6]++ } END { for (k in n) printf "%s=%d ", k, n[k] }' "${taps_csv}")"
-    done
+    run_taps sheet-row
   else
     problems+=("the tap test could not find the Switch host sheet; see ui-perf/taps/")
+  fi
+fi
+if [[ "${crashed}" == "false" ]]; then
+  if [[ -z "${home_agent}" ]]; then
+    problems+=("the sidebar tap test needs the stream phase's agent chat; it did not run")
+  elif calibrate_sidebar_taps; then
+    run_taps sidebar-row
+  else
+    problems+=("the sidebar tap test could not open the sidebar or its Settings button; see ui-perf/taps/")
   fi
 fi
 

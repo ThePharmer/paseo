@@ -390,9 +390,10 @@ const commands = {
       out.push("");
     }
     if (taps.length > 0) {
-      out.push("#### Taps in the Settings > Switch host sheet\n");
+      out.push("#### Taps in containers that slide in\n");
       out.push(
-        "Per repeat: tries whose row action ran / tries whose press was dropped (sheet stayed open) / tries that missed (sheet closed without the action). " +
+        "`sheet-row`: the Add host row of the Settings > Switch host sheet, opened by `trigger`. `sidebar-row`: the Settings button of the phone's left sidebar overlay, opened by `menu`. " +
+          "Per repeat: tries whose action ran / tries whose press was dropped (container stayed open) / tries that missed (container closed without the action). " +
           "`tap` is `input tap` (down, up); `hold` is a zero-distance `input swipe` (down, moves, up), which is what makes Pressable re-check its press rectangle.\n",
       );
       out.push("| target | style | acted | dropped | missed | tries/repeat |");
@@ -409,12 +410,13 @@ const commands = {
           `| ${target} | ${style} | ${fmtStat(per("acted"), 0)} | ${fmtStat(per("dropped"), 0)} | ${fmtStat(per("missed"), 0)} | ${fmtStat(tries, 0)} |`,
         );
       }
-      const rowTaps = taps.filter((t) => t.target === "sheet-row");
-      const delays = [...new Set(rowTaps.map((t) => Number(t.delay_ms)))].sort((a, b) => a - b);
-      const styles = [...new Set(rowTaps.map((t) => t.style))];
-      if (delays.length > 0) {
+      const rowTargets = [...new Set(taps.map((t) => t.target))].filter((target) => target.endsWith("-row"));
+      for (const target of rowTargets) {
+        const rowTaps = taps.filter((t) => t.target === target);
+        const delays = [...new Set(rowTaps.map((t) => Number(t.delay_ms)))].sort((a, b) => a - b);
+        const styles = [...new Set(rowTaps.map((t) => t.style))];
         out.push(
-          "\nSheet-row presses by delay after the trigger tap, all repeats. The measured gap runs from the end of the trigger's `input` command to the row's down event, so it includes the row command's start-up.\n",
+          `\n\`${target}\` presses by delay after the opening tap, all repeats. The measured gap runs from the end of the opening tap's \`input\` command to the row's down event, so it includes the row command's start-up.\n`,
         );
         out.push(`| delay ms | ${styles.map((st) => `${st} gap ms | ${st} dropped / missed / tries`).join(" | ")} |`);
         out.push(`|---|${styles.map(() => "---|---").join("|")}|`);
