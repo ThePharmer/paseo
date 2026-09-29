@@ -5,6 +5,7 @@ import {
   createMobilePanelMotionState,
   getMobilePanelFrame,
   isMobilePanelActive,
+  isMobilePanelAtRest,
   isMobilePanelGestureCurrent,
   transitionMobilePanel,
   type MobilePanelCommit,
@@ -261,6 +262,37 @@ describe("mobile panel ownership", () => {
 
     expect(isMobilePanelGestureCurrent(active, 7)).toBe(true);
     expect(canBeginMobilePanelGesture(active, "agent", 0)).toBe(false);
+  });
+
+  it("comes to rest only when motion reaches its target anchor with no drag", () => {
+    const initial = createMobilePanelMotionState({ target: "agent", revision: 0 });
+    const opening = transitionMobilePanel(initial, {
+      type: "command",
+      selection: { target: "agent-list", revision: 1 },
+    }).state;
+
+    expect(isMobilePanelAtRest(initial, 0)).toBe(true);
+    expect(isMobilePanelAtRest(opening, -0.5)).toBe(false);
+    expect(isMobilePanelAtRest(opening, 0)).toBe(false);
+    expect(isMobilePanelAtRest(opening, -1)).toBe(true);
+  });
+
+  it("comes to rest when a cancelled drag springs back to its origin", () => {
+    const initial = createMobilePanelMotionState({ target: "agent-list", revision: 0 });
+    const dragging = transitionMobilePanel(initial, {
+      type: "gesture.begin",
+      origin: "agent-list",
+    }).state;
+    const cancelled = transitionMobilePanel(dragging, {
+      type: "gesture.finish",
+      startedRevision: 0,
+      success: false,
+      target: "agent",
+    }).state;
+
+    expect(isMobilePanelAtRest(dragging, -1)).toBe(false);
+    expect(isMobilePanelAtRest(cancelled, -0.6)).toBe(false);
+    expect(isMobilePanelAtRest(cancelled, -1)).toBe(true);
   });
 
   it("derives both transforms and both backdrops from one normalized position", () => {

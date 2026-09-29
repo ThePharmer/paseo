@@ -4,8 +4,9 @@ import { GestureDetector, type GestureType } from "react-native-gesture-handler"
 import Animated, { useAnimatedStyle } from "react-native-reanimated";
 import { isWeb } from "@/constants/platform";
 import { WindowChromeRootRegion } from "@/utils/desktop-window";
+import { useShadowTreeSyncOnSettle } from "@/components/shadow-tree-sync";
 import { usePanelStore, type MobilePanelView } from "@/stores/panel-store";
-import { getMobilePanelFrame } from "./model";
+import { getMobilePanelFrame, isMobilePanelAtRest } from "./model";
 import { useIsMobilePanelActive, useMobilePanelsRuntime } from "./provider";
 
 type OverlayPanel = Exclude<MobilePanelView, "agent">;
@@ -23,7 +24,7 @@ export function MobilePanelOverlay({
   panel,
   panelStyle,
 }: MobilePanelOverlayProps) {
-  const { position, windowWidth } = useMobilePanelsRuntime();
+  const { motionState, position, windowWidth } = useMobilePanelsRuntime();
   const showMobileAgent = usePanelStore((state) => state.showMobileAgent);
   const isOpen = useIsMobilePanelActive(panel);
   const isLeft = panel === "agent-list";
@@ -39,6 +40,12 @@ export function MobilePanelOverlay({
     const frame = getMobilePanelFrame(position.value, windowWidth);
     return { opacity: isLeft ? frame.leftBackdropOpacity : frame.rightBackdropOpacity };
   }, [isLeft, windowWidth]);
+
+  // Settling into the target publishes the active panel, but a cancelled drag publishes nothing.
+  useShadowTreeSyncOnSettle(() => {
+    "worklet";
+    return isMobilePanelAtRest(motionState.value, position.value);
+  }, [motionState, position]);
 
   const overlayAnimatedStyle = useAnimatedStyle(() => {
     const isVisible = isLeft ? position.value < 0 : position.value > 0;

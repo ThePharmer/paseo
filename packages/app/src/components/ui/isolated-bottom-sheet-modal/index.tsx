@@ -11,6 +11,7 @@ import {
   createBottomSheetVisibilityTracker,
 } from "./visibility-tracker";
 import { BottomSheetScope } from "@/components/ui/bottom-sheet-scope";
+import { requestShadowTreeSync } from "@/components/shadow-tree-sync";
 
 type GorhomBottomSheetModalMethods = ElementRef<typeof GorhomBottomSheetModal>;
 
@@ -58,10 +59,19 @@ export const IsolatedBottomSheetModal = forwardRef<
   IsolatedBottomSheetModalRef,
   IsolatedBottomSheetModalProps
 >(function IsolatedBottomSheetModal(props, ref) {
-  const { children, presentation = "push", contextBridge, ...bottomSheetProps } = props;
+  const { children, presentation = "push", contextBridge, onChange, ...bottomSheetProps } = props;
+  // Gorhom calls onChange when a snap animation completes.
+  const handleChange = useCallback<NonNullable<BottomSheetModalProps["onChange"]>>(
+    (index, position, type) => {
+      requestShadowTreeSync();
+      onChange?.(index, position, type);
+    },
+    [onChange],
+  );
   const modal = (
     <GorhomBottomSheetModal
       {...bottomSheetProps}
+      onChange={handleChange}
       ref={ref}
       enableDismissOnClose
       stackBehavior={presentation}

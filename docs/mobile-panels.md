@@ -97,6 +97,12 @@ definition, no longer eligible to begin.
   stall across a panel settle loses the final position, and the next React commit reverts the overlay
   to its last synced props: a backdrop over the workspace while the store says closed. Upstream fixed
   the collector in 4.4.3, which needs React Native 0.83.
+- `ANDROID_SYNCHRONOUSLY_UPDATE_UI_PROPS` is on, so animated transforms reach native views but not
+  the shadow tree, where Pressability measures press regions. Reanimated keeps the latest values and
+  writes them into the shadow tree on the next React commit. A container whose transform animates and
+  holds React Native touchables calls `useShadowTreeSyncOnSettle` or `requestShadowTreeSync`
+  (`components/shadow-tree-sync`) when it comes to rest. Without that commit, presses with finger
+  movement are cancelled long after the container settled.
 - Gesture start and progress must not update React state. The retained overlay is already mounted and
   offscreen; only the shared position and its derived native styles move during a drag.
 - Hidden tabs and workspaces use `RetainedPanel`. It owns a non-collapsible native root, visibility,

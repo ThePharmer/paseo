@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import type { ViewProps } from "react-native";
 import Animated, { useAnimatedStyle } from "react-native-reanimated";
+import { useShadowTreeSyncOnSettle } from "@/components/shadow-tree-sync";
 import { useKeyboardShift } from "./context";
 
 interface KeyboardTranslateViewProps extends ViewProps {
@@ -14,7 +15,11 @@ export function KeyboardTranslateView({
   style,
   ...props
 }: KeyboardTranslateViewProps) {
-  const { shift } = useKeyboardShift();
+  const { shift, isMoving } = useKeyboardShift();
+  useShadowTreeSyncOnSettle(() => {
+    "worklet";
+    return !isMoving.value;
+  }, [isMoving]);
   const keyboardStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: enabled ? -shift.value : 0 }],
   }));

@@ -19,6 +19,7 @@ import Animated, {
   type SharedValue,
 } from "react-native-reanimated";
 import { scheduleOnRN } from "react-native-worklets";
+import { requestShadowTreeSync } from "@/components/shadow-tree-sync";
 import { InlineReviewThread } from "@/review";
 import { useKeyboardShift } from "@/keyboard/shift";
 import { inlineUnistylesStyle } from "@/styles/unistyles-inline-style";
@@ -213,8 +214,17 @@ export function DiffSurface(props: DiffSurfaceProps) {
     [fileWindowTop, model.files, viewport.height],
   );
 
-  const scrollHandler = useAnimatedScrollHandler((event) => {
-    scrollTop.value = event.contentOffset.y;
+  // Sticky file headers follow scrollTop through a transform; put the resting one in the shadow tree.
+  const scrollHandler = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      scrollTop.value = event.contentOffset.y;
+    },
+    onEndDrag: () => {
+      scheduleOnRN(requestShadowTreeSync);
+    },
+    onMomentumEnd: () => {
+      scheduleOnRN(requestShadowTreeSync);
+    },
   });
 
   const layout = useCallback((event: LayoutChangeEvent) => {

@@ -151,6 +151,13 @@ export function isMobilePanelGestureCurrent(
   return state.revision === startedRevision && state.gesture?.startedRevision === startedRevision;
 }
 
+/** The shared position has stopped: no drag owns it and it sits at the anchor it was moving to. */
+export function isMobilePanelAtRest(state: MobilePanelMotionState, position: number): boolean {
+  "worklet";
+  const isAtMotionTarget = Math.abs(position - getMobilePanelAnchor(state.motionTarget)) <= 0.002;
+  return !state.gesture && isAtMotionTarget;
+}
+
 export function isMobilePanelActive(
   state: MobilePanelMotionState,
   panel: MobilePanelView,
