@@ -100,6 +100,8 @@ import { useRewindAgentMutation } from "@/components/rewind/use-rewind-agent-mut
 import { AssistantForkMenu, type AssistantForkTarget } from "@/components/assistant-fork-menu";
 import { useRetainedPanelActive } from "@/components/retained-panel";
 import { useAppVisible } from "@/hooks/use-app-visible";
+import { getBadgeShimmerMotion } from "@/components/badge-shimmer-state";
+import { useReducedMotion } from "react-native-reanimated";
 import {
   markdownCopyDataSet,
   markdownCopyOrderedListDataSet,
@@ -1258,17 +1260,29 @@ const NativeExpandableBadgeShimmer = memo(function NativeExpandableBadgeShimmer(
   const isPanelActive = useRetainedPanelActive();
   const isAppVisible = useAppVisible();
   const isOnScreen = isPanelActive && isAppVisible;
+  // Animated.loop does not follow the system Reduce Motion setting, so the shimmer checks it here.
+  const reduceMotion = useReducedMotion();
+  const motion = useMemo(
+    () => getBadgeShimmerMotion({ isOnScreen, reduceMotion, rowWidth, peakWidth }),
+    [isOnScreen, peakWidth, reduceMotion, rowWidth],
+  );
   // React Native's native driver moves the peak on the UI thread without a commit per frame.
-  const [shimmerTranslateX] = useState(() => new Animated.Value(0));
+  const [shimmerTranslateX] = useState(
+    () => new Animated.Value(motion.kind === "resting" ? motion.translateX : 0),
+  );
 
   useEffect(() => {
-    if (!isOnScreen) {
+    if (motion.kind === "paused") {
       return;
     }
-    shimmerTranslateX.setValue(-peakWidth);
+    if (motion.kind === "resting") {
+      shimmerTranslateX.setValue(motion.translateX);
+      return;
+    }
+    shimmerTranslateX.setValue(motion.fromX);
     const sweep = Animated.loop(
       Animated.timing(shimmerTranslateX, {
-        toValue: rowWidth + peakWidth,
+        toValue: motion.toX,
         duration: durationSeconds * 1000,
         easing: Easing.linear,
         useNativeDriver: true,
@@ -1278,7 +1292,7 @@ const NativeExpandableBadgeShimmer = memo(function NativeExpandableBadgeShimmer(
     return () => {
       sweep.stop();
     };
-  }, [durationSeconds, isOnScreen, peakWidth, rowWidth, shimmerTranslateX]);
+  }, [durationSeconds, motion, shimmerTranslateX]);
 
   const nativeShimmerPeakStyle = useMemo(
     () => ({ transform: [{ translateX: shimmerTranslateX }] }),
