@@ -27,15 +27,10 @@ export const STATUS_RING_TRACK_OPACITY = 0.3;
 export const STATUS_RING_HEAD_OPACITY = 0.9;
 
 // One period for every ring in the app. Each platform owns one mount-independent timeline: web
-// animations share an absolute document-timeline start, while native publishes this wall-clock
-// phase from one UI-thread clock. A row that appears mid-flight therefore lands in step with the
-// rings already turning.
+// animations share an absolute document-timeline start, while native turns every ring from one
+// native-driven loop started at the wall-clock phase. A row that appears mid-flight therefore lands
+// in step with the rings already turning.
 export const STATUS_RING_PERIOD_MS = 900;
-
-export function getStatusRingRotation(nowMs: number): number {
-  "worklet";
-  return ((nowMs % STATUS_RING_PERIOD_MS) / STATUS_RING_PERIOD_MS) * 360;
-}
 
 /**
  * Re-anchors a corner status dot's offset for the ring that replaces it.
