@@ -123,10 +123,19 @@ wait_for_device || exit 1
 # The emulator action turns animations off. ui-perf measures animation work
 # and the taps in an opening sheet, and Reanimated treats scale 0 as Reduce
 # Motion, which it reads when the app starts: turn them back on before install.
+# It also halves the display in each direction at the same dp size: the
+# emulator renders in software, and at full size RenderThread holds the app
+# near 26 fps, which caps every per-frame animation below what a phone runs.
 if [[ "${SCENARIO:-suites}" == "ui-perf" ]]; then
   for scale in window_animation_scale transition_animation_scale animator_duration_scale; do
     adb shell settings put global "${scale}" 1 || true
   done
+  density="$(adb shell wm density | tr -d '\r' | awk '/Physical density/ { print $3 }')"
+  read -r width height < <(adb shell wm size | tr -d '\r' | awk -F'[ x]' '/Physical size/ { print $(NF-1), $NF }')
+  if [[ -n "${density}" && -n "${width}" ]]; then
+    adb shell wm size "$((width / 2))x$((height / 2))" || true
+    adb shell wm density "$((density / 2))" || true
+  fi
 fi
 settle_system_ui
 install_apk || exit 1

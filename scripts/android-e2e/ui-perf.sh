@@ -59,7 +59,9 @@ fi
 # Delays from the trigger tap to the row press, cycled over the tries. The
 # `input` command itself takes a few hundred ms to start, so the measured gap
 # (gap_ms in taps.csv) is what to read; the open animation runs ~300-500 ms.
-delays_ms=(0 250 500 1000 2500)
+# A press within ~100 ms of the trigger tap lands before the sheet exists and
+# reads as dropped (the sheet opens afterwards and stays open).
+delays_ms=(100 250 400 600 1500)
 
 out="${ARTIFACTS_DIR}/ui-perf"
 mkdir -p "${out}/windows" "${out}/taps"
@@ -291,7 +293,7 @@ stop_agent() {
 
 screen_w=1080
 screen_h=2400
-read -r screen_w screen_h < <(adb shell wm size 2>/dev/null | tr -d '\r' | awk -F'[ x]' '/Physical size/ { print $(NF-1), $NF }')
+read -r screen_w screen_h < <(adb shell wm size 2>/dev/null | tr -d '\r' | awk -F'[ x]' '/size/ { w = $(NF-1); h = $NF } END { print w, h }')
 
 dump_ui() {
   local dest="$1"
@@ -446,7 +448,8 @@ sync_ui_props="$(json_field "${apk_flags}" ANDROID_SYNCHRONOUSLY_UPDATE_UI_PROPS
   echo "animator_duration_scale=$(adb shell settings get global animator_duration_scale | tr -d '\r')"
   echo "transition_animation_scale=$(adb shell settings get global transition_animation_scale | tr -d '\r')"
   echo "window_animation_scale=$(adb shell settings get global window_animation_scale | tr -d '\r')"
-  echo "refresh=$(adb shell dumpsys display | awk '/mRefreshRate|refreshRate/ { print; exit }' | tr -d '\r')"
+  echo "wm_size=$(adb shell wm size | tr -d '\r' | paste -sd' ')"
+  echo "wm_density=$(adb shell wm density | tr -d '\r' | paste -sd' ')"
   echo "root=${has_root} ${root_prefix}"
 } >"${out}/device.txt"
 setup_uprobes "${start_pid}" || true
@@ -472,9 +475,6 @@ if [[ "${crashed}" == "false" ]]; then
     sleep 3
   done
   log_event "idle agent status after the windows: $(agent_status "${idle_agent}")"
-  # After the windows: a UI dump attaches UI Automation to the app. It shows
-  # whether the header's "Agent running" ring was on screen.
-  timeout 60 bash -c "$(declare -f dump_ui); dump_ui '${out}/idle-chat.xml'" || log_event "idle chat: no UI dump"
   stop_agent "${idle_agent}"
   sleep 3
 fi
