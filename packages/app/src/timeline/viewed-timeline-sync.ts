@@ -325,9 +325,10 @@ export interface ViewedTimelineSyncPorts {
 
 /**
  * `verifying` is a catch-up for a chat whose cached content is presumed current: the app
- * came back to the foreground on a connection that never dropped. It becomes `pending`
- * once the catch-up finds more history, runs past `QUIET_VERIFICATION_LIMIT_MS`, or the
- * connection drops, and `error` if it fails.
+ * came back to the foreground on a connection that never dropped, or the connection came
+ * back and the chat was current when it dropped. It becomes `pending` once the catch-up
+ * finds more history, runs past `QUIET_VERIFICATION_LIMIT_MS`, or the connection drops,
+ * and `error` if it fails.
  */
 export type ViewedTimelineStatus = "ready" | "verifying" | "pending" | "error" | "retrying";
 
@@ -495,6 +496,8 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
   const visibilityCatchUpPending = new Set<string>();
   // Foreground catch-ups for chats presumed current, with the timer that surfaces them.
   const quietVerifications = new Map<string, () => void>();
+  // Chats that were current when the connection dropped. The reconnect verifies them quietly.
+  const currentAtDisconnect = new Set<string>();
   const visibilityCatchUpErrors = new Map<string, string>();
   // User-initiated retries only. Background retries stay silent; a retry the user asked for
   // owes them a pending state until it settles.
@@ -562,6 +565,13 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       ports.schedule(() => surfaceQuietVerification(agentId), QUIET_VERIFICATION_LIMIT_MS),
     );
   };
+
+  // Owes no catch-up and has no failure outstanding, so its content can pass for current.
+  const isCurrent = (agentId: string) =>
+    isDesired(agentId) &&
+    !visibilityCatchUpPending.has(agentId) &&
+    !visibilityCatchUpErrors.has(agentId) &&
+    !manualRetries.has(agentId);
 
   const setVisibilityCatchUpReady = (agentId: string) => {
     const wasPending = visibilityCatchUpPending.delete(agentId);
@@ -834,6 +844,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
         cancelCatchUp(agentId);
         visibilityCatchUpPending.delete(agentId);
         endQuietVerification(agentId);
+        currentAtDisconnect.delete(agentId);
         visibilityCatchUpErrors.delete(agentId);
         manualRetries.delete(agentId);
         released.push(agentId);
@@ -902,13 +913,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       for (const agentId of visibleAgentIds()) {
         // A chat that was current when the app left stays presentable as current on a
         // connection that never dropped; a disconnect already marked it pending.
-        const isPresumedCurrent =
-          connected &&
-          isDesired(agentId) &&
-          !visibilityCatchUpPending.has(agentId) &&
-          !visibilityCatchUpErrors.has(agentId) &&
-          !manualRetries.has(agentId);
-        if (isPresumedCurrent) {
+        if (connected && isCurrent(agentId)) {
           beginQuietVerification(agentId);
         } else {
           visibilityCatchUpPending.add(agentId);
@@ -922,6 +927,9 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       if (connected === nextConnected) return;
       connected = nextConnected;
       if (!connected) {
+        for (const agentId of desired) {
+          if (isCurrent(agentId)) currentAtDisconnect.add(agentId);
+        }
         commitDesiredMembership(desired, { resetCatchUpStatus: true });
         cancelMembershipRetry?.();
         cancelMembershipRetry = null;
@@ -933,7 +941,18 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
         for (const agentId of desired) cancelCatchUp(agentId);
         return;
       }
+      // Most drops change nothing a chat shows, so a chat that was current when the
+      // connection dropped catches up the way a healthy foreground return does. The quiet
+      // window covers the whole recovery, membership included.
+      let statusChanged = false;
+      for (const agentId of currentAtDisconnect) {
+        if (!visibilityCatchUpPending.delete(agentId)) continue;
+        beginQuietVerification(agentId);
+        statusChanged = true;
+      }
+      currentAtDisconnect.clear();
       membershipGeneration += 1;
+      if (statusChanged) notifyListeners();
       void reconcileMembership();
     },
     recoverGap(agentId, cursor) {
@@ -963,6 +982,7 @@ export function createViewedTimelineSync(ports: ViewedTimelineSyncPorts): Viewed
       visibilityCatchUpPending.clear();
       for (const cancelSurface of quietVerifications.values()) cancelSurface();
       quietVerifications.clear();
+      currentAtDisconnect.clear();
       visibilityCatchUpErrors.clear();
       manualRetries.clear();
       notifyListeners();

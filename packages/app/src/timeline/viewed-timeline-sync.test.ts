@@ -1127,9 +1127,10 @@ test("a failed foreground verification reports the error", async () => {
   world.sync.dispose();
 });
 
-test("returning after the connection dropped surfaces the catch-up", async () => {
+test("returning after the connection dropped verifies the chat quietly once reconnected", async () => {
   const world = new TimelineWorld();
   await showCaughtUpChat(world, "agent-a");
+  const statuses = recordStatuses(world, "agent-a");
 
   world.sync.setActive(false);
   world.sync.setConnected(false);
@@ -1140,6 +1141,88 @@ test("returning after the connection dropped surfaces the catch-up", async () =>
   (await world.nextFetch("agent-a")).respond({ hasNewer: false });
 
   await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
+  expect(statuses).toEqual(["pending", "verifying", "ready"]);
+  world.sync.dispose();
+});
+
+test("a reconnect verifies a chat that was current when the connection dropped", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+  const statuses = recordStatuses(world, "agent-a");
+
+  world.sync.setConnected(false);
+  world.sync.setConnected(true);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("verifying");
+  (await world.nextMembership()).succeed();
+  const resume = await world.nextFetch("agent-a");
+  expect(resume.request.direction).toBe("after");
+  resume.respond({ hasNewer: false, seq: 42 });
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
+  expect(statuses).toEqual(["pending", "verifying", "ready"]);
+  world.sync.dispose();
+});
+
+test("a reconnect catch-up that finds more history surfaces", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+
+  world.sync.setConnected(false);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  (await world.nextFetch("agent-a")).respond({ hasNewer: true, seq: 82 });
+  const latest = await world.nextFetch("agent-a");
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("pending");
+  latest.respond({ hasNewer: false });
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
+  world.sync.dispose();
+});
+
+test("a slow reconnect catch-up surfaces", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+
+  world.sync.setConnected(false);
+  world.sync.setConnected(true);
+  const membership = await world.nextMembership();
+  world.elapse(QUIET_VERIFICATION_LIMIT_MS - 1);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("verifying");
+  world.elapse(QUIET_VERIFICATION_LIMIT_MS);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("pending");
+  membership.succeed();
+  (await world.nextFetch("agent-a")).respond({ hasNewer: false });
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("ready"));
+  world.sync.dispose();
+});
+
+test("a failed reconnect catch-up reports the error", async () => {
+  const world = new TimelineWorld();
+  await showCaughtUpChat(world, "agent-a");
+
+  world.sync.setConnected(false);
+  world.sync.setConnected(true);
+  (await world.nextMembership()).succeed();
+  (await world.nextFetch("agent-a")).fail("timeline unavailable");
+
+  await vi.waitFor(() => expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("error"));
+  world.elapse(QUIET_VERIFICATION_LIMIT_MS);
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("error");
+  world.sync.dispose();
+});
+
+test("a chat that was still catching up when the connection dropped surfaces after the reconnect", async () => {
+  const world = new TimelineWorld();
+  world.sync.setConnected(true);
+  world.show("workspace", ["agent-a"]);
+  (await world.nextMembership()).succeed();
+  await world.nextFetch("agent-a");
+
+  world.sync.setConnected(false);
+  world.sync.setConnected(true);
+
+  expect(world.sync.getAgentTimelineStatus("agent-a")).toBe("pending");
   world.sync.dispose();
 });
 

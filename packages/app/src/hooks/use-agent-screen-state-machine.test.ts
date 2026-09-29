@@ -226,10 +226,10 @@ describe("deriveAgentScreenViewState", () => {
     const result = deriveAgentScreenViewState({ input, memory });
     const ready = expectReadyState(result.state);
 
-    expect(ready.sync).toEqual({ status: "catching_up", ui: "silent" });
+    expect(ready.sync).toEqual({ status: "verifying" });
   });
 
-  it("shows updating status for a foreground verification after a reconnect", () => {
+  it("keeps the verification after a reconnect quiet while the host history resyncs", () => {
     const memory = createBaseMemory({
       hasRenderedReady: true,
       lastReadyAgent: createAgent("agent-1"),
@@ -245,7 +245,7 @@ describe("deriveAgentScreenViewState", () => {
     const result = deriveAgentScreenViewState({ input, memory });
     const ready = expectReadyState(result.state);
 
-    expect(ready.sync).toEqual({ status: "catching_up", ui: "status" });
+    expect(ready.sync).toEqual({ status: "verifying" });
   });
 
   it("keeps hydrated history visible while reconnect revalidation and visibility catch-up overlap", () => {

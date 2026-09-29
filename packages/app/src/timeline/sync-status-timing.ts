@@ -2,8 +2,12 @@ export type SyncNotice = "reconnecting" | "updating";
 
 export interface SyncNoticeSignal {
   notice: SyncNotice;
-  /** Skip the show delay, for a host already known to be unreachable. */
-  immediate: boolean;
+  /**
+   * `delayed` shows after the notice's show delay. `immediate` skips it, for a host already
+   * known to be unreachable. `quiet` is a catch-up presumed to change nothing: it never
+   * shows on its own, but a notice already on screen stays up, relabeled, until it settles.
+   */
+  timing: "delayed" | "immediate" | "quiet";
 }
 
 // Most catch-ups and reconnects finish sub-second. Showing a spinner for those only
@@ -105,7 +109,7 @@ export function createDelayedSyncNotice(input: {
       }
       return;
     }
-    if (latest === null) {
+    if (latest === null || latest.timing === "quiet") {
       cancelPendingShow();
       staleSince = null;
       return;
@@ -114,7 +118,7 @@ export function createDelayedSyncNotice(input: {
       cancelPendingShow();
       return;
     }
-    if (latest.immediate) {
+    if (latest.timing === "immediate") {
       show(latest.notice);
       return;
     }
