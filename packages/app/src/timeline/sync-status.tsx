@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { withUnistyles } from "react-native-unistyles";
 import { ToastViewport, type ToastState } from "@/components/toast-host";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { useAppVisible } from "@/hooks/use-app-visible";
 import {
   createDelayedSyncNotice,
   monotonicNoticeTimers,
@@ -31,8 +32,12 @@ function useDelayedSyncNotice(key: string, signal: SyncNoticeSignal | null): Syn
   const [delayedNotice] = useState(() =>
     createDelayedSyncNotice({ ports: monotonicNoticeTimers, onChange: setShown }),
   );
+  const isAppVisible = useAppVisible();
   const notice = signal?.notice ?? null;
   const immediate = signal?.immediate ?? false;
+  useEffect(() => {
+    delayedNotice.setVisible(isAppVisible);
+  }, [delayedNotice, isAppVisible]);
   useEffect(() => {
     delayedNotice.update(key, notice ? { notice, immediate } : null);
   }, [delayedNotice, key, notice, immediate]);

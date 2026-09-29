@@ -116,7 +116,8 @@ export interface HostRuntimeSnapshot {
   lastError: string | null;
   /**
    * A connect attempt has ended without reaching online since the host was last online,
-   * or the host has no connection to try. A dropped socket alone does not set it.
+   * or the host has no connection to try. A dropped socket alone does not set it, and neither
+   * does an attempt the app was hidden for at any point.
    */
   hasFailedConnectAttempt: boolean;
   authFailureReason?: "password_required" | "incorrect_password" | null;
@@ -413,12 +414,15 @@ function hasConnectAttemptFailed(input: {
   next: HostRuntimeConnectionMachineState;
   event: HostRuntimeConnectionMachineEvent;
   failedBefore: boolean;
+  wasAttemptWatched: boolean;
 }): boolean {
   if (input.next.tag === "online") return false;
   if (input.failedBefore) return true;
-  if (input.event.type !== "client_state") return input.event.type !== "select_connection";
+  if (input.event.type === "select_connection") return false;
+  if (input.event.type === "no_connections" || input.event.type === "stopped") return true;
+  if (input.event.type === "connect_failed") return input.wasAttemptWatched;
   const isDown = input.next.tag === "offline" || input.next.tag === "error";
-  return input.previous.tag === "connecting" && isDown;
+  return input.previous.tag === "connecting" && isDown && input.wasAttemptWatched;
 }
 
 function toSnapshotConnectionPatch(
@@ -640,6 +644,9 @@ export class HostRuntimeController {
   private connectionMachineState: HostRuntimeConnectionMachineState;
   private connectionEpoch = 0;
   private hasFailedConnectAttempt = false;
+  private isAppVisible = true;
+  // Whether the app was hidden at any point during the current connect attempt.
+  private hasAttemptSeenBackground = false;
   private snapshot: HostRuntimeSnapshot;
   private listeners = new Set<() => void>();
   private activeClient: DaemonClient | null = null;
@@ -784,6 +791,11 @@ export class HostRuntimeController {
 
   replaceConnection(reason: string): void {
     this.activeClient?.replaceConnection(reason);
+  }
+
+  setAppVisible(visible: boolean): void {
+    this.isAppVisible = visible;
+    if (!visible) this.hasAttemptSeenBackground = true;
   }
 
   markAgentDirectorySyncLoading(): void {
@@ -1175,12 +1187,20 @@ export class HostRuntimeController {
     if (previousState.tag !== "online" && nextState.tag === "online") {
       this.connectionEpoch += 1;
     }
+    // Only a failure the user watched from the start of its attempt counts. A mobile OS
+    // suspends a hidden app and cuts its attempts off, which says nothing about the host.
+    const wasAttemptWatched =
+      previousState.tag === "connecting" ? !this.hasAttemptSeenBackground : this.isAppVisible;
     this.hasFailedConnectAttempt = hasConnectAttemptFailed({
       previous: previousState,
       next: nextState,
       event,
       failedBefore: this.hasFailedConnectAttempt,
+      wasAttemptWatched,
     });
+    if (previousState.tag !== "connecting" && nextState.tag === "connecting") {
+      this.hasAttemptSeenBackground = !this.isAppVisible;
+    }
     this.connectionMachineState = nextState;
     this.logConnectionTransition({
       from: previousState.tag,
@@ -2299,6 +2319,7 @@ export class HostRuntimeStore {
         deps: this.deps,
         onReconcileServerId: (oldId, newId) => this.reconcileServerId(oldId, newId),
       });
+      controller.setAppVisible(this.hiddenAtMs === null);
       this.controllers.set(host.serverId, controller);
       useSessionStore.getState().initializeSession(host.serverId, null);
       const directory = new DirectorySync(
@@ -2562,6 +2583,9 @@ export class HostRuntimeStore {
   setAppVisible(visible: boolean): void {
     // Keep normal reconnect backoff running while hidden, for as long as the OS
     // lets us execute. Foregrounding bypasses that backoff.
+    for (const controller of this.controllers.values()) {
+      controller.setAppVisible(visible);
+    }
     if (!visible) {
       this.hiddenAtMs ??= this.now();
       void this.replicaCache.flush();

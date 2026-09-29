@@ -180,6 +180,72 @@ test("switching panes cancels a pending show for the previous pane", () => {
   expect(clock.shown).toEqual([]);
 });
 
+test("time in the background does not count toward the show delay", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(RECONNECTING_SHOW_DELAY_MS - 100);
+  clock.notice.setVisible(false);
+  clock.advance(30_000);
+  clock.notice.setVisible(true);
+  expect(clock.shown).toEqual([]);
+  clock.advance(RECONNECTING_SHOW_DELAY_MS - 1);
+  expect(clock.shown).toEqual([]);
+  clock.advance(1);
+
+  expect(clock.shown).toEqual(["reconnecting"]);
+});
+
+test("a chat that stops being current in the background starts its delay on return", () => {
+  const clock = new NoticeClock();
+  clock.notice.setVisible(false);
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(5_000);
+  clock.notice.update("agent-a", updating);
+  clock.advance(5_000);
+  clock.notice.setVisible(true);
+  clock.advance(UPDATING_SHOW_DELAY_MS - 1);
+  expect(clock.shown).toEqual([]);
+  clock.advance(1);
+
+  expect(clock.shown).toEqual(["updating"]);
+});
+
+test("a chat that recovers soon after the return never shows the notice that fell due in the background", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.notice.setVisible(false);
+  clock.advance(60_000);
+  clock.notice.setVisible(true);
+  clock.advance(RECONNECTING_SHOW_DELAY_MS - 1);
+  clock.notice.update("agent-a", null);
+  clock.advance(5_000);
+
+  expect(clock.shown).toEqual([]);
+});
+
+test("a known unreachable host waits for the return and then shows at once", () => {
+  const clock = new NoticeClock();
+  clock.notice.setVisible(false);
+  clock.notice.update("agent-a", hostUnreachable);
+  clock.advance(5_000);
+  expect(clock.shown).toEqual([]);
+  clock.notice.setVisible(true);
+
+  expect(clock.shown).toEqual(["reconnecting"]);
+});
+
+test("a notice shown before the app was hidden stays up on return", () => {
+  const clock = new NoticeClock();
+  clock.notice.update("agent-a", reconnecting);
+  clock.advance(RECONNECTING_SHOW_DELAY_MS);
+  clock.notice.setVisible(false);
+  clock.advance(5_000);
+  clock.notice.setVisible(true);
+  clock.advance(5_000);
+
+  expect(clock.shown).toEqual(["reconnecting"]);
+});
+
 test.each(clockJumps)(
   "a known unreachable host shows at once after the clock moves $direction",
   ({ jumpMs }) => {

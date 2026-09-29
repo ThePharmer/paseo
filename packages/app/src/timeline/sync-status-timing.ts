@@ -37,6 +37,11 @@ export const monotonicNoticeTimers: SyncNoticeTimerPorts = {
 export interface DelayedSyncNotice {
   /** Reports the real status for `key`, the pane's chat. A new key drops the shown notice. */
   update(key: string, signal: SyncNoticeSignal | null): void;
+  /**
+   * Nothing new shows while the app is hidden. Returning restarts the show delay, so a notice
+   * that fell due in the background waits for the user to watch the chat stay behind.
+   */
+  setVisible(visible: boolean): void;
   /** Cancels the pending timers. A later `update` resumes from the real status. */
   dispose(): void;
 }
@@ -47,6 +52,8 @@ export interface DelayedSyncNotice {
  * by a catch-up cannot hide behind two fresh delays. An immediate signal and the minimum
  * visible time never read the clock, and a scheduled show is never recomputed, so a clock
  * change cannot hold back a known outage or keep a notice up after the chat recovers.
+ * Hidden time does not count: the delay exists to hide blips the user would see, and a
+ * mobile OS can hold the app long enough for any delay to run out unseen.
  */
 export function createDelayedSyncNotice(input: {
   ports: SyncNoticeTimerPorts;
@@ -54,6 +61,7 @@ export function createDelayedSyncNotice(input: {
 }): DelayedSyncNotice {
   const { ports, onChange } = input;
   let key: string | null = null;
+  let visible = true;
   let latest: SyncNoticeSignal | null = null;
   let shown: SyncNotice | null = null;
   let staleSince: number | null = null;
@@ -102,6 +110,10 @@ export function createDelayedSyncNotice(input: {
       staleSince = null;
       return;
     }
+    if (!visible) {
+      cancelPendingShow();
+      return;
+    }
     if (latest.immediate) {
       show(latest.notice);
       return;
@@ -135,6 +147,12 @@ export function createDelayedSyncNotice(input: {
         if (shown !== null) hide();
       }
       latest = signal;
+      evaluate();
+    },
+    setVisible(nextVisible) {
+      if (nextVisible === visible) return;
+      visible = nextVisible;
+      if (visible) staleSince = null;
       evaluate();
     },
     dispose() {
