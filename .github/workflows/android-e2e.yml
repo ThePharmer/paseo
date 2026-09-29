@@ -18,6 +18,12 @@ name: Android E2E
 # scenario=stream-memory opens one mock agent's chat while it streams a long,
 # code-heavy assistant message (scripts/android-e2e/stream-memory.sh);
 # text_delivery picks the daemon's assistant text delivery for an A/B.
+# scenario=ui-perf counts UI-thread work that does not depend on the GPU
+# (Fabric commits by thread, mount batches, main and JS thread CPU, frames)
+# with a running agent's chat open and while one streams, then presses rows in
+# the Switch host sheet at fixed delays after it opens and counts dropped
+# presses (scripts/android-e2e/ui-perf.sh). To compare builds, dispatch it once
+# per build_run_id with the same daemon_ref.
 # daemon_ref builds the daemon from a fork branch instead of the built commit,
 # so a daemon-only change (such as a new mock scenario) needs no APK rebuild.
 
@@ -39,7 +45,7 @@ on:
         default: ""
         type: string
       scenario:
-        description: "suites runs the Android E2E suites; agent-memory measures app memory while many mock agents and subagents spawn; stream-memory measures it while one open chat streams a long code-heavy message"
+        description: "suites runs the Android E2E suites; agent-memory measures app memory while many mock agents and subagents spawn; stream-memory measures it while one open chat streams a long code-heavy message; ui-perf counts UI-thread work and dropped taps in a sheet"
         required: false
         default: suites
         type: choice
@@ -47,18 +53,19 @@ on:
           - suites
           - agent-memory
           - stream-memory
+          - ui-perf
       memory_config:
-        description: "agent-memory/stream-memory only: space-separated key=value overrides, e.g. 'batches=6 batch_size=5' or 'blocks=120 repeats=3' (see the scenario's script in scripts/android-e2e)"
+        description: "Measurement scenarios only: space-separated key=value overrides, e.g. 'batches=6 batch_size=5', 'blocks=120 repeats=3' or 'repeats=1 stream_s=30' (see the scenario's script in scripts/android-e2e)"
         required: false
         default: ""
         type: string
       daemon_ref:
-        description: "agent-memory/stream-memory only: build the daemon from this fork branch instead of the built commit (blank = built commit). Keep it protocol-compatible with the APK."
+        description: "Measurement scenarios only: build the daemon from this fork branch instead of the built commit (blank = built commit). Keep it protocol-compatible with the APK."
         required: false
         default: ""
         type: string
       text_delivery:
-        description: "stream-memory/agent-memory only: the daemon's assistant text delivery (PASEO_ASSISTANT_TEXT_DELIVERY)"
+        description: "Measurement scenarios only: the daemon's assistant text delivery (PASEO_ASSISTANT_TEXT_DELIVERY)"
         required: false
         default: token
         type: choice
@@ -87,7 +94,7 @@ env:
 jobs:
   android:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: ${{ inputs.scenario == 'ui-perf' && 110 || 75 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -176,7 +183,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$SCENARIO" == "suites" ]]; then
-            echo "::error::daemon_ref only works with the memory scenarios: the suites run scripts from the built commit against its own daemon."
+            echo "::error::daemon_ref only works with the measurement scenarios: the suites run scripts from the built commit against its own daemon."
             exit 1
           fi
           git check-ref-format "refs/heads/$DAEMON_REF"
@@ -270,10 +277,11 @@ jobs:
           script: echo "Generated the AVD boot snapshot."
 
       - name: Run the Android suites
-        timeout-minutes: 35
+        timeout-minutes: ${{ inputs.scenario == 'ui-perf' && 75 || 35 }}
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         env:
           ARTIFACTS_DIR: ${{ runner.temp }}/e2e/artifacts
+          BUILD_RUN_ID: ${{ inputs.build_run_id }}
           SCENARIO: ${{ inputs.scenario }}
           MEMORY_CONFIG: ${{ inputs.memory_config }}
           TEXT_DELIVERY: ${{ inputs.text_delivery }}

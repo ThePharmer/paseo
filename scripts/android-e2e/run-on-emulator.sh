@@ -3,8 +3,8 @@
 # the APK, connects the app to the E2E daemon, and runs the Android suites
 # from the built source. Every suite runs even after an earlier one fails, so
 # one run reports every broken flow; the exit status is non-zero if any failed.
-# With SCENARIO=agent-memory or stream-memory it runs that scenario's script
-# (agent-memory.sh, stream-memory.sh) instead of the suites.
+# With SCENARIO=agent-memory, stream-memory or ui-perf it runs that scenario's
+# script (agent-memory.sh, stream-memory.sh, ui-perf.sh) instead of the suites.
 #
 # Needs: SRC_DIR, APK_PATH, APP_ID, DAEMON_PORT, SERVER_ID, WORKSPACE_ID,
 # WORKSPACE_DIR, ARTIFACTS_DIR; DAEMON_SRC_DIR for the memory scenarios.
@@ -120,6 +120,14 @@ run_suite() {
 }
 
 wait_for_device || exit 1
+# The emulator action turns animations off. ui-perf measures animation work
+# and the taps in an opening sheet, and Reanimated treats scale 0 as Reduce
+# Motion, which it reads when the app starts: turn them back on before install.
+if [[ "${SCENARIO:-suites}" == "ui-perf" ]]; then
+  for scale in window_animation_scale transition_animation_scale animator_duration_scale; do
+    adb shell settings put global "${scale}" 1 || true
+  done
+fi
 settle_system_ui
 install_apk || exit 1
 # The app dials 127.0.0.1:<port> on the device; adb forwards it to the daemon.
@@ -158,7 +166,7 @@ if ! connect_app; then
 fi
 
 case "${SCENARIO:-suites}" in
-  agent-memory | stream-memory)
+  agent-memory | stream-memory | ui-perf)
     bash "$(dirname "$0")/${SCENARIO}.sh"
     exit $?
     ;;
