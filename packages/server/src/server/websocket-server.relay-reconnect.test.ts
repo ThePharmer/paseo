@@ -242,7 +242,11 @@ function createServer(options?: {
   speechReadiness?: SpeechReadinessSnapshot | null;
   logger?: ReturnType<typeof createLogger>;
   startPaused?: boolean;
-  auth?: { password: string; localCredential: () => string | null };
+  auth?: {
+    password: string;
+    localCredential: () => string | null;
+    relayPasswordRequired?: boolean;
+  };
 }) {
   const speechReadiness = options?.speechReadiness ?? null;
   const daemonConfigStore = {
@@ -572,6 +576,38 @@ describe("relay external socket reconnect behavior", () => {
           accepts: ["password"],
         }),
       );
+    } finally {
+      await server.close();
+    }
+  });
+  test("rejects a passwordless relay hello when the relay password is required", async () => {
+    const server = createServer({
+      auth: {
+        password: "$2b$12$OLxyuuP9uLK30Uzc4wQX0O6liuU/Q1t5P2b0Ebf36mULvpVK3DRZW",
+        localCredential: () => "local-token",
+        relayPasswordRequired: true,
+      },
+    });
+    try {
+      const legacySocket = new MockSocket();
+      const closed = new Promise<{ code: unknown; reason: unknown }>((resolve) => {
+        legacySocket.once("close", (code, reason) => resolve({ code, reason }));
+      });
+      await server.attachExternalSocket(legacySocket, { transport: "relay" });
+      legacySocket.emit("message", JSON.stringify(createHelloMessage("relay-legacy")));
+      await expect(closed).resolves.toEqual({ code: 4401, reason: "Password required" });
+      expect(sentServerInfoEnvelopes(legacySocket)).toHaveLength(0);
+
+      const passwordSocket = new MockSocket();
+      await server.attachExternalSocket(passwordSocket, { transport: "relay" });
+      passwordSocket.emit(
+        "message",
+        JSON.stringify({
+          ...createHelloMessage("relay-password"),
+          auth: { kind: "password", password: "correct-password" },
+        }),
+      );
+      await vi.waitFor(() => expect(sentServerInfoEnvelopes(passwordSocket)).toHaveLength(1));
     } finally {
       await server.close();
     }

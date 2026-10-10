@@ -4,6 +4,7 @@ import { readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
+import { RelayPasswordNotConfiguredError } from "./bootstrap.js";
 import { createTestPaseoDaemon } from "./test-utils/paseo-daemon.js";
 import { DaemonAuthenticationError, DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { readLocalCredentialForTarget } from "./local-credential.js";
@@ -51,6 +52,20 @@ describe("daemon bearer auth", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     process.env = { ...originalEnv, PASEO_SUPERVISED: "0" };
+  });
+
+  test("refuses to start when the relay password is required but no password is set", async () => {
+    await expect(createTestPaseoDaemon({ relayRequirePassword: true })).rejects.toBeInstanceOf(
+      RelayPasswordNotConfiguredError,
+    );
+  });
+
+  test("starts when the relay password is required and a password is set", async () => {
+    const daemonHandle = await createTestPaseoDaemon({
+      relayRequirePassword: true,
+      auth: { password: CORRECT_PASSWORD_HASH },
+    });
+    await daemonHandle.close();
   });
 
   test("leaves HTTP and WebSocket open when no password is configured", async () => {

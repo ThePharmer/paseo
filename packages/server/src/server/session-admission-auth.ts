@@ -13,14 +13,16 @@ export async function resolveSessionAdmission(input: {
   passwordHash: string | undefined;
   localCredential: string | null;
   transport: "direct" | "relay";
+  relayPasswordRequired: boolean;
 }): Promise<AdmissionResolution> {
-  const { credential, passwordHash, localCredential, transport } = input;
+  const { credential, passwordHash, localCredential, transport, relayPasswordRequired } = input;
   if (!passwordHash) {
     return { admission: { principalId: "owner", permissions: OWNER_PERMISSIONS } };
   }
   if (!credential) {
     // COMPAT(relayPasswordOptional): added in v0.9.1, remove once release N mobile builds are live on App Store and Play.
-    if (transport === "relay") {
+    // `daemon.relay.requirePassword` opts out early; remove it together with this shim.
+    if (transport === "relay" && !relayPasswordRequired) {
       return { admission: { principalId: "owner", permissions: OWNER_PERMISSIONS } };
     }
     return { rejection: "password_required" };

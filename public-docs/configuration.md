@@ -235,6 +235,23 @@ Set the persisted value in `config.json`:
 
 `PASEO_RELAY_ENABLED=true|false` overrides the file for a foreground deployment. Managed `start` uses the file. End and relaunch a deployment to remove its override before changing relay from the app or `paseo daemon pair --relay`.
 
+### Require the password on relay connections
+
+By default, relay clients that send no password are still admitted so older mobile builds keep connecting. Set `daemon.relay.requirePassword: true` (or `PASEO_RELAY_REQUIRE_PASSWORD=true`) to reject them now. Without it, anyone holding your pairing link can connect over the relay.
+
+```json
+{
+  "daemon": {
+    "relay": {
+      "enabled": true,
+      "requirePassword": true
+    }
+  }
+}
+```
+
+The daemon refuses to start if this is on and no [daemon password](#password-authentication) is set. Every relay client must then send the password, so update the Paseo app on your devices first. This is a startup setting; restart the daemon after changing it.
+
 ## Common env vars
 
 - `PASEO_HOME`, set Paseo home directory
@@ -242,6 +259,7 @@ Set the persisted value in `config.json`:
 - `PASEO_PASSWORD`, on the daemon, the password to require (plaintext, hashed at startup); on the CLI, the password used to connect when the host URI doesn't include one
 - `PASEO_LISTEN`, override `daemon.listen`
 - `PASEO_RELAY_ENABLED`, enable or disable the outbound relay for this daemon launch
+- `PASEO_RELAY_REQUIRE_PASSWORD`, override `daemon.relay.requirePassword`
 - `PASEO_HOSTNAMES`, override/extend `daemon.hostnames`
 - `PASEO_ALLOWED_HOSTS`, deprecated alias for `PASEO_HOSTNAMES`
 - `PASEO_WEB_UI_ENABLED`, enable or disable the daemon-served web UI

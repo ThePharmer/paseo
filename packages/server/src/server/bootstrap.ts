@@ -426,6 +426,7 @@ export interface PaseoDaemonConfig {
   relayPublicEndpoint?: string;
   relayUseTls?: boolean;
   relayPublicUseTls?: boolean;
+  relayRequirePassword?: boolean;
   serviceProxy?: {
     publicBaseUrl: string | null;
     standaloneListen: string | null;
@@ -578,11 +579,29 @@ function createInitialMutableDaemonConfig(config: PaseoDaemonConfig): MutableDae
   return initialConfig;
 }
 
+export class RelayPasswordNotConfiguredError extends Error {
+  constructor() {
+    super(
+      "daemon.relay.requirePassword is enabled but no daemon password is set. " +
+        "Run `paseo daemon set-password` or set PASEO_PASSWORD, or turn the setting off.",
+    );
+    this.name = "RelayPasswordNotConfiguredError";
+  }
+}
+
+// Checked regardless of relayEnabled, because relay can be turned on at runtime.
+function assertRelayPasswordConfigured(config: PaseoDaemonConfig): void {
+  if (config.relayRequirePassword && !config.auth?.password) {
+    throw new RelayPasswordNotConfiguredError();
+  }
+}
+
 export async function createPaseoDaemon(
   config: PaseoDaemonConfig,
   rootLogger: Logger,
   dependencies: PaseoDaemonDependencies = {},
 ): Promise<PaseoDaemon> {
+  assertRelayPasswordConfigured(config);
   configureGitProcessPolicy(config.git ?? resolveGitProcessPolicy({ env: process.env }));
   const logger = rootLogger.child({ module: "bootstrap" });
   const obsoleteTimelineDirectory = path.join(config.paseoHome, "agent-timelines");
@@ -784,7 +803,11 @@ export async function createPaseoDaemon(
   mountWebUi(app, config, logger);
 
   let localCredential: string | null = null;
-  const daemonAuth = { ...config.auth, localCredential: () => localCredential };
+  const daemonAuth = {
+    ...config.auth,
+    localCredential: () => localCredential,
+    relayPasswordRequired: config.relayRequirePassword === true,
+  };
   app.use(
     createRequireBearerMiddleware(daemonAuth, (context) => {
       logger.warn(context, "Rejected HTTP request with invalid daemon password");
