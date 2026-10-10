@@ -3,6 +3,7 @@ import { startCommand, daemonRunCommand } from "./start.js";
 import { daemonStatusCommand } from "./status.js";
 import { daemonStopCommand } from "./stop.js";
 import { daemonRestartCommand } from "./restart.js";
+import { runRotateKeyCommand } from "./rotate-key.js";
 import { runSetPasswordCommand } from "./set-password.js";
 import { pairCommand } from "./pair.js";
 import { daemonReloadCommand } from "./reload.js";
@@ -28,5 +29,16 @@ export function createDaemonCommand(): Command {
       daemon.command("set-password").description("Save a hashed daemon password (local operation)"),
     ),
   ).action(withOutput(runSetPasswordCommand));
+  addJsonOption(
+    addLocalDaemonOptions(
+      daemon
+        .command("rotate-key")
+        .description(
+          "Replace the daemon keypair so existing pairing links stop working (local operation)",
+        ),
+    ),
+  )
+    .option("--yes", "Skip the confirmation prompt")
+    .action(withOutput(runRotateKeyCommand));
   return daemon;
 }

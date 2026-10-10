@@ -186,6 +186,10 @@ IPs and `localhost` are allowed by default.
   `/home/paseo`.
 - The bundled web UI static files are public on the daemon origin. The daemon
   API and WebSocket remain protected by password auth when configured.
+- The daemon keypair lives in `/home/paseo/.paseo`, so it survives container
+  recreation. To revoke leaked pairing links, run
+  `docker exec --user paseo paseo paseo daemon rotate-key --yes`, then
+  `docker restart paseo`.
 
 See [SECURITY.md](../SECURITY.md) for the daemon trust model.
 

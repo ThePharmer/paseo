@@ -52,6 +52,8 @@ The daemon requires a valid cryptographic handshake before processing any comman
 
 The QR code or pairing link is the trust anchor. It contains the daemon's public key, which is required to establish the encrypted connection. Treat it like a password, don't share it publicly.
 
+If a pairing link leaks, run `paseo daemon rotate-key` and restart the daemon. Every existing link stops working, and you pair your devices again with `paseo daemon pair`.
+
 ## Direct connections
 
 By default, the daemon listens on `127.0.0.1:6767` (localhost only). This is safe for local CLI usage but not reachable from your phone or other devices.

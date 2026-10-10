@@ -385,7 +385,7 @@ Every daemon-connected CLI command accepts global `--home` or `--host`, before o
 | Both environment selectors, without a flag | `TARGET_AMBIGUOUS`                                     |
 | Neither                                    | Default local home, `~/.paseo`                         |
 
-Local-only `start`, `daemon run`, `config`, `onboard`, and `set-password` reject explicit `--host` and ignore `PASEO_HOST`. Endpoint operations retain TCP, Unix socket, Windows pipe, SSH, and pairing-offer transports. A host-side CLI controlling a container needs `--host` or `PASEO_HOST`.
+Local-only `start`, `daemon run`, `config`, `onboard`, `set-password`, and `rotate-key` reject explicit `--host` and ignore `PASEO_HOST`. Endpoint operations retain TCP, Unix socket, Windows pipe, SSH, and pairing-offer transports. A host-side CLI controlling a container needs `--host` or `PASEO_HOST`.
 
 ## Hub
 
@@ -436,6 +436,15 @@ paseo daemon pair --json   # structured output; never prompts
 ```
 
 Relay is off for new installations. A disabled relay returns a `RELAY_DISABLED` error; pass `--relay` to provide explicit consent. For a stopped home, pairing is labelled offline; `--relay` saves relay enablement and the offer includes a start instruction. A live but unreachable home never falls back to an offline identity. Relay pairing is end-to-end encrypted. See [Security](/docs/security).
+
+To revoke every pairing link you have issued, replace the daemon keypair:
+
+```bash
+paseo daemon rotate-key        # asks for confirmation
+paseo daemon rotate-key --yes  # no prompt, for scripts and containers
+```
+
+A running daemon keeps the old key until you restart it. After the restart, pair each device again with `paseo daemon pair`.
 
 Use it from anywhere:
 

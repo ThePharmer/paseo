@@ -33,7 +33,7 @@ export async function loadOrCreateDaemonKeyPair(
   logger?: pino.Logger,
 ): Promise<DaemonKeyPairBundle> {
   const log = logger?.child({ module: "daemon-keypair" });
-  const filePath = path.join(paseoHome, KEYPAIR_FILENAME);
+  const filePath = daemonKeyPairPath(paseoHome);
 
   if (existsSync(filePath)) {
     try {
@@ -52,18 +52,31 @@ export async function loadOrCreateDaemonKeyPair(
     }
   }
 
+  const bundle = writeNewDaemonKeyPair(filePath);
+  log?.info({ filePath }, "Saved daemon keypair");
+  return bundle;
+}
+
+export function daemonKeyPairPath(paseoHome: string): string {
+  return path.join(paseoHome, KEYPAIR_FILENAME);
+}
+
+/**
+ * Replaces the daemon keypair. Every existing pairing link stops working, and a
+ * running daemon keeps the old key until it restarts.
+ */
+export function rotateDaemonKeyPair(paseoHome: string): DaemonKeyPairBundle {
+  return writeNewDaemonKeyPair(daemonKeyPairPath(paseoHome));
+}
+
+function writeNewDaemonKeyPair(filePath: string): DaemonKeyPairBundle {
   const keyPair = generateKeyPair();
   const publicKeyB64 = exportPublicKey(keyPair.publicKey);
-  const secretKeyB64 = exportSecretKey(keyPair.secretKey);
-
   const payload: StoredKeyPair = {
     v: 2,
     publicKeyB64,
-    secretKeyB64,
+    secretKeyB64: exportSecretKey(keyPair.secretKey),
   };
-
   writePrivateFileAtomicSync(filePath, JSON.stringify(payload, null, 2) + "\n");
-  log?.info({ filePath }, "Saved daemon keypair");
-
   return { keyPair, publicKeyB64 };
 }

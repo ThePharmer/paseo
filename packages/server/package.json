@@ -53,6 +53,11 @@
       "source": "./src/server/pairing-offer.ts",
       "default": "./dist/server/server/pairing-offer.js"
     },
+    "./keypair": {
+      "types": "./dist/server/server/daemon-keypair.d.ts",
+      "source": "./src/server/daemon-keypair.ts",
+      "default": "./dist/server/server/daemon-keypair.js"
+    },
     "./agent-activity": {
       "types": "./dist/server/server/agent/activity-curator.d.ts",
       "source": "./src/server/agent/activity-curator.ts",
