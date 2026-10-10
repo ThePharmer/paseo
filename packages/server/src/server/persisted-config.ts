@@ -276,6 +276,7 @@ export const PersistedConfigSchema = z
             publicEndpoint: z.string().optional(),
             useTls: z.boolean().optional(),
             publicUseTls: z.boolean().optional(),
+            requirePassword: z.boolean().optional(),
           })
           .strict()
           .optional(),

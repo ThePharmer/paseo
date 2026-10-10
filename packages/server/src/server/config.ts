@@ -279,6 +279,7 @@ interface ResolvedRelay {
   publicEndpoint: string;
   useTls: boolean;
   publicUseTls: boolean;
+  requirePassword: boolean;
 }
 
 interface ResolvedServiceProxy {
@@ -333,7 +334,16 @@ function resolveRelayConfig(input: ResolveRelayInput): ResolvedRelay {
     publicEndpoint,
     useTls,
     publicUseTls,
+    requirePassword: resolveRelayRequirePassword(input.env, input.persisted),
   };
+}
+
+function resolveRelayRequirePassword(env: NodeJS.ProcessEnv, persisted: PersistedConfig): boolean {
+  return (
+    parseBooleanEnv(env.PASEO_RELAY_REQUIRE_PASSWORD) ??
+    persisted.daemon?.relay?.requirePassword ??
+    false
+  );
 }
 
 interface ResolvedVoiceLlm {
@@ -639,6 +649,7 @@ export function resolveConfigFromPersisted(
     relayPublicEndpoint: relay.publicEndpoint,
     relayUseTls: relay.useTls,
     relayPublicUseTls: relay.publicUseTls,
+    relayRequirePassword: relay.requirePassword,
     serviceProxy,
     webUi,
     appBaseUrl,
@@ -747,6 +758,9 @@ function resolveRelayOverridePaths(
   }
   if (env.PASEO_RELAY_PUBLIC_USE_TLS !== undefined) {
     paths.push("daemon.relay.publicUseTls");
+  }
+  if (parseBooleanEnv(env.PASEO_RELAY_REQUIRE_PASSWORD) !== undefined) {
+    paths.push("daemon.relay.requirePassword");
   }
   return paths;
 }

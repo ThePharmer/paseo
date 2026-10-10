@@ -8,6 +8,7 @@ export const DAEMON_PASSWORD_BCRYPT_COST = 12;
 export interface DaemonAuthConfig {
   password?: string;
   localCredential?: () => string | null;
+  relayPasswordRequired?: boolean;
 }
 
 export interface BearerAuthRejectContext {

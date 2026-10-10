@@ -207,7 +207,7 @@ snapshot so a mixed edit can apply its live subset and still name the paths that
     terminalProfiles: TerminalProfile[],  // named shell commands; omitted means DEFAULT_TERMINAL_PROFILES
     agentProfiles: AgentProfile[],        // named agent launch bundles; omitted means none
     cors: { allowedOrigins: string[] },
-    relay: { enabled: boolean, endpoint: string, publicEndpoint: string, useTls: boolean, publicUseTls: boolean }, // new homes materialize enabled: false
+    relay: { enabled: boolean, endpoint: string, publicEndpoint: string, useTls: boolean, publicUseTls: boolean, requirePassword: boolean }, // new homes materialize enabled: false
     auth: { password: string }    // bcrypt hash, optional
   },
   app: {

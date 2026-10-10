@@ -124,6 +124,9 @@
                 },
                 "publicUseTls": {
                   "type": "boolean"
+                },
+                "requirePassword": {
+                  "type": "boolean"
                 }
               },
               "additionalProperties": false

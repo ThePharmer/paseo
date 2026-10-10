@@ -295,4 +295,27 @@ describe("daemon worktree root config", () => {
       path.join(os.tmpdir(), "paseo-custom-worktrees"),
     );
   });
+
+  test("relay password requirement defaults off", async () => {
+    const home = await createPaseoHome({ version: 1, daemon: { relay: { enabled: true } } });
+    expect(loadConfig(home, { env: {} }).relayRequirePassword).toBe(false);
+  });
+
+  test("reads relay.requirePassword from config.json", async () => {
+    const home = await createPaseoHome({
+      version: 1,
+      daemon: { relay: { requirePassword: true } },
+    });
+    expect(loadConfig(home, { env: {} }).relayRequirePassword).toBe(true);
+  });
+
+  test("PASEO_RELAY_REQUIRE_PASSWORD overrides config.json and marks the path override-controlled", async () => {
+    const home = await createPaseoHome({
+      version: 1,
+      daemon: { relay: { requirePassword: false } },
+    });
+    const config = loadConfig(home, { env: { PASEO_RELAY_REQUIRE_PASSWORD: "true" } });
+    expect(config.relayRequirePassword).toBe(true);
+    expect(config.configReload?.overrideControlledPaths).toContain("daemon.relay.requirePassword");
+  });
 });

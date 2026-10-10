@@ -1683,6 +1683,7 @@ export class VoiceAssistantWebSocketServer {
         passwordHash: this.passwordHash,
         localCredential: this.credentialSource?.localCredential?.() ?? null,
         transport: pending.identity.transport === "relay" ? "relay" : "direct",
+        relayPasswordRequired: this.credentialSource?.relayPasswordRequired === true,
       });
       if (this.pendingConnections.get(ws) !== pending) return false;
       if ("rejection" in resolved) {
