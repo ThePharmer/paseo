@@ -1,48 +1,50 @@
 name: Desktop Release
 
-on:
+'on':
   push:
     tags:
-      - "v*"
-      - "desktop-v*"
-      - "desktop-macos-v*"
-      - "desktop-linux-v*"
-      - "desktop-windows-v*"
+    - v*
+    - desktop-v*
+    - desktop-macos-v*
+    - desktop-linux-v*
+    - desktop-windows-v*
+    - '!**-native-headers'
+    - '!**-native-headers-test'
+    - '!native-headers-preflight-**'
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build (e.g. v0.1.0)"
+        description: Existing tag to build (e.g. v0.1.0)
         required: true
         type: string
       platform:
-        description: "Optional desktop platform to build."
+        description: Optional desktop platform to build.
         required: false
-        default: "all"
+        default: all
         type: choice
         options:
-          - all
-          - macos
-          - linux
-          - windows
+        - all
+        - macos
+        - linux
+        - windows
       checkout_ref:
-        description: "Optional branch/ref to checkout while using tag for release metadata."
+        description: Optional branch/ref to checkout while using tag for release metadata.
         required: false
-        default: ""
+        default: ''
         type: string
       publish:
-        description: "Publish built artifacts to GitHub Releases."
+        description: Publish built artifacts to GitHub Releases.
         required: false
-        default: "true"
+        default: 'true'
         type: choice
         options:
-          - "true"
-          - "false"
+        - 'true'
+        - 'false'
       rollout_hours:
-        description: "Linear rollout duration in hours. Use 0 for instant rollout."
+        description: Linear rollout duration in hours. Use 0 for instant rollout.
         required: false
-        default: "36"
+        default: '36'
         type: string
-
 concurrency:
   group: desktop-release-${{ github.ref }}
   cancel-in-progress: false

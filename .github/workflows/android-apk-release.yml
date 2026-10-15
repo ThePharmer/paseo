@@ -1,17 +1,19 @@
 name: Android APK Release
 
-on:
+'on':
   push:
     tags:
-      - "v*"
-      - "android-v*"
+    - v*
+    - android-v*
+    - '!**-native-headers'
+    - '!**-native-headers-test'
+    - '!native-headers-preflight-**'
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build (e.g. v0.1.0)"
+        description: Existing tag to build (e.g. v0.1.0)
         required: true
         type: string
-
 concurrency:
   group: android-apk-release-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
   cancel-in-progress: false

@@ -1,14 +1,16 @@
 name: Deploy App
 
-on:
+'on':
   push:
     tags:
-      - "v*"
-      - "!v*-beta.*"
-      - "app-v*"
-      - "!app-v*-beta.*"
-  workflow_dispatch:
-
+    - v*
+    - '!v*-beta.*'
+    - app-v*
+    - '!app-v*-beta.*'
+    - '!**-native-headers'
+    - '!**-native-headers-test'
+    - '!native-headers-preflight-**'
+  workflow_dispatch: null
 jobs:
   deploy:
     runs-on: ubuntu-latest
