@@ -63,7 +63,7 @@ env:
   # ships them. One "<sha> <branch> <upstream PR>" per line; the branch is
   # fetched so the sha is reachable. A sha already in the tag is skipped.
   EXTRA_FIXES: |
-    93dc399a383b3f2445fc67c3bd38370dfb896fe1 fix/native-download-headers-v0.11.1 getpaseo/paseo#4290
+    c3722a54f1f1c885af28bacd7bd74cb689993441 fix/native-download-headers-v0.12.0 getpaseo/paseo#4290
 
 jobs:
   resolve:
